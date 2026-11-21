@@ -2753,7 +2753,7 @@ if (Test-Registration (Read-Registration)) { 'ENROLLED' } else { 'UNKNOWN_EFFECT
 """
 
 
-_CLEAN_9444_TASK_MIGRATION = _CLEAN_9444_TASK_INSPECTION + r"""
+_CLEAN_9444_D5_ATTESTATION = r"""
 $chromeExecutables = if ($env:AI_COMMERCE_TASK_CHROME_EXECUTABLES) {
     @($env:AI_COMMERCE_TASK_CHROME_EXECUTABLES | ConvertFrom-Json)
 } else { @() }
@@ -3280,9 +3280,9 @@ function Get-AttestedD5PowerShellAction($pwshPath, $argsLine, $workDir, $aiRoot,
     return 'PWSH_CMD|' + $pwshPath.ToLowerInvariant() + '|' + $ch
 }
 
-function Get-D5Attestation($d5) {
+function Get-D5Attestation($d5, [bool]$allowDisabled = $false) {
     try {
-        if (!$d5 -or !$d5.Enabled -or $d5.Name -cne 'AI-Commerce-D5-CDP-AtLogon') { return $null }
+        if (!$d5 -or (!$allowDisabled -and !$d5.Enabled) -or $d5.Name -cne 'AI-Commerce-D5-CDP-AtLogon') { return $null }
         if (!$d5.Xml -or $d5.Xml.IndexOf($name, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
             $d5.Xml -match '(?i)WakeHub-9444-Clean') { return $null }
         $d5Acl = [Security.AccessControl.RawSecurityDescriptor]::new($d5.GetSecurityDescriptor(7))
@@ -3301,7 +3301,7 @@ function Get-D5Attestation($d5) {
         if ($def.Actions.Context -and $def.Actions.Context -cne $p.Id) { return $null }
         if ($def.Triggers.Count -ne 1) { return $null }
         $t = $def.Triggers.Item(1)
-        if ($t.Type -ne 9 -or !$t.Enabled -or !(Test-Owner $t.UserId) -or
+        if ($t.Type -ne 9 -or (!$allowDisabled -and !$t.Enabled) -or !(Test-Owner $t.UserId) -or
             ($t.Repetition -and ($t.Repetition.Interval -or $t.Repetition.Duration))) { return $null }
         if ($def.Actions.Count -ne 1) { return $null }
         $a = $def.Actions.Item(1)
@@ -3360,7 +3360,10 @@ function Get-D5Snapshot {
     }
     return $null
 }
+"""
 
+
+_CLEAN_9444_TASK_MIGRATION = _CLEAN_9444_TASK_INSPECTION + _CLEAN_9444_D5_ATTESTATION + r"""
 $key = $null
 $rollback = 'DemandMigrationRollback'
 $completed = 'DemandMigrationComplete'
@@ -3424,6 +3427,648 @@ try {
 """
 
 
+_CLEAN_9444_TASK_RECONCILE_SCRIPT = _CLEAN_9444_TASK_INSPECTION + _CLEAN_9444_D5_ATTESTATION + r"""
+function Test-ReconcileRegistrationBase($reg) {
+    if (!$reg) { return $false }
+    $acl = [Security.AccessControl.RawSecurityDescriptor]::new($reg.GetSecurityDescriptor(7))
+    $want = [Security.AccessControl.RawSecurityDescriptor]::new($sddl)
+    if (!$acl.Owner -or $acl.Owner.Value -cne $sid -or
+        $acl.GetSddlForm('Access') -cne $want.GetSddlForm('Access')) { return $false }
+    $definition = $reg.Definition
+    $principal = $definition.Principal
+    if ($principal.Id -cne $expected.Principal.Id -or !(Test-Owner $principal.UserId) -or
+        $principal.LogonType -ne 3 -or
+        $principal.RunLevel -ne 0 -or $principal.GroupId -or $definition.Actions.Count -ne 1 -or
+        $definition.Actions.Item(1).Type -ne 0 -or
+        $definition.Actions.Context -cne $expected.Actions.Context) {
+        return $false
+    }
+    foreach ($key in @('AllowDemandStart', 'AllowHardTerminate', 'DisallowStartIfOnBatteries',
+        'ExecutionTimeLimit', 'Hidden', 'MultipleInstances', 'RestartCount', 'RestartInterval',
+        'RunOnlyIfIdle', 'RunOnlyIfNetworkAvailable', 'StartWhenAvailable',
+        'StopIfGoingOnBatteries', 'WakeToRun', 'DeleteExpiredTaskAfter')) {
+        if ($definition.Settings.$key -cne $expected.Settings.$key) { return $false }
+    }
+    if ($reg.Enabled) {
+        if ($definition.Settings.Enabled -cne $expected.Settings.Enabled) { return $false }
+    } else {
+        if ($null -ne $definition.Settings.Enabled -and $definition.Settings.Enabled -ne $false) { return $false }
+    }
+    return $true
+}
+
+function Test-ReconcileDemandAction($reg) {
+    if (!$trustedPowerShellSpecs.Count) { return $false }
+    $a = $reg.Definition.Actions.Item(1)
+    if (!$a -or $a.Path -ine $action.Path -or $a.WorkingDirectory -ine $action.WorkingDirectory -or !$a.Arguments) {
+        return $false
+    }
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $argHash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes([string]$a.Arguments))).Replace('-', '')
+    } finally { $sha.Dispose() }
+    $matched = @($trustedPowerShellSpecs | Where-Object { [string]$_.demand_sha256 -ieq $argHash })
+    return $matched.Count -eq 1 -and (Test-TrustedPowerShell ([string]$matched[0].path))
+}
+
+function Test-ReconcileLegacyTriggerAndAction($reg) {
+    if ($reg.Definition.Triggers.Count -ne 1) { return $false }
+    $t = $reg.Definition.Triggers.Item(1)
+    if ($t.Type -ne 9 -or ($reg.Enabled -and !$t.Enabled) -or !(Test-Owner $t.UserId) -or $t.Delay -or
+        $t.StartBoundary -or $t.EndBoundary -or $t.Repetition.Duration -or
+        $t.Repetition.StopAtDurationEnd -or [string]$t.ExecutionTimeLimit -cnotin @('', 'PT72H')) {
+        return $false
+    }
+    try {
+        if ([Xml.XmlConvert]::ToTimeSpan($t.Repetition.Interval) -ne [TimeSpan]::FromMinutes(1)) {
+            return $false
+        }
+    } catch { return $false }
+    $a = $reg.Definition.Actions.Item(1)
+    if (!$env:AI_COMMERCE_TASK_LEGACY_ARGUMENTS -or
+        $a.Arguments -cne $env:AI_COMMERCE_TASK_LEGACY_ARGUMENTS) { return $false }
+    if (!$a.Path -or !$a.WorkingDirectory) { return $false }
+    $validWorkDir = ($a.WorkingDirectory -in $trustedPowerShellDirs) -or
+        (Test-HistoricalLegacyWorkDir $a.WorkingDirectory)
+    if (!$validWorkDir) { return $false }
+    return Test-TrustedPowerShell $a.Path
+}
+
+function Test-ReconcileRollbackSddl($aclText) {
+    if ($aclText -isnot [string] -or !$aclText -or $aclText.Length -gt 2048 -or
+        $aclText.IndexOf([char]0) -ge 0 -or $aclText -cne $aclText.Trim()) {
+        return 'UNVERIFIED'
+    }
+    try {
+        $acl = [Security.AccessControl.RawSecurityDescriptor]::new($aclText)
+        $want = [Security.AccessControl.RawSecurityDescriptor]::new($sddl)
+    } catch {
+        return 'UNVERIFIED'
+    }
+    if (!$acl.Owner -or $acl.Owner.Value -cne $sid -or !$acl.DiscretionaryAcl -or
+        $null -ne $acl.SystemAcl -or $acl.GetSddlForm('Access') -cne $want.GetSddlForm('Access')) {
+        return 'MISMATCH'
+    }
+    return 'VALID'
+}
+
+function Get-XmlElementChildren($el) {
+    $children = [Collections.Generic.List[Xml.XmlElement]]::new()
+    foreach ($node in $el.ChildNodes) {
+        if ($node.NodeType -eq [Xml.XmlNodeType]::Element) {
+            if ($node.NamespaceURI -cne 'http://schemas.microsoft.com/windows/2004/02/mit/task') {
+                return $null
+            }
+            $children.Add([Xml.XmlElement]$node)
+        } elseif ($node.NodeType -in @([Xml.XmlNodeType]::Whitespace, [Xml.XmlNodeType]::SignificantWhitespace, [Xml.XmlNodeType]::Comment)) {
+            continue
+        } else {
+            return $null
+        }
+    }
+    return ,$children
+}
+
+function Get-XmlLeafText($el) {
+    if ($el.HasAttributes) { return $null }
+    foreach ($node in $el.ChildNodes) {
+        if ($node.NodeType -notin @([Xml.XmlNodeType]::Text, [Xml.XmlNodeType]::Whitespace, [Xml.XmlNodeType]::SignificantWhitespace)) {
+            return $null
+        }
+    }
+    return [string]$el.InnerText
+}
+
+function ConvertFrom-XmlStrictBool($text) {
+    if ($text -ceq 'true') { return $true }
+    if ($text -ceq 'false') { return $false }
+    return $null
+}
+
+function Test-ReconcileRollbackMetadata($rbVal) {
+    if ($rbVal -isnot [string] -or [string]::IsNullOrWhiteSpace($rbVal) -or
+        $rbVal.Length -gt 131072 -or $rbVal.IndexOf([char]0) -ge 0) {
+        return 'UNVERIFIED'
+    }
+    $xmlText = $null
+    $aclText = $null
+    $jsonDoc = $null
+    try {
+        $jsonOpts = [Text.Json.JsonDocumentOptions]::new()
+        $jsonOpts.AllowTrailingCommas = $false
+        $jsonOpts.CommentHandling = [Text.Json.JsonCommentHandling]::Disallow
+        $jsonOpts.MaxDepth = 4
+        $jsonDoc = [Text.Json.JsonDocument]::Parse($rbVal, $jsonOpts)
+        if ($jsonDoc.RootElement.ValueKind -ne [Text.Json.JsonValueKind]::Object) {
+            return 'UNVERIFIED'
+        }
+        $seenKeys = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($prop in $jsonDoc.RootElement.EnumerateObject()) {
+            if (!$seenKeys.Add($prop.Name)) { return 'UNVERIFIED' }
+            if ($prop.Name -cnotin @('Xml', 'SecurityDescriptor')) { return 'UNVERIFIED' }
+            if ($prop.Value.ValueKind -ne [Text.Json.JsonValueKind]::String) { return 'UNVERIFIED' }
+            if ($prop.Name -ceq 'Xml') { $xmlText = $prop.Value.GetString() }
+            else { $aclText = $prop.Value.GetString() }
+        }
+        if ($seenKeys.Count -ne 2) { return 'UNVERIFIED' }
+    } catch {
+        return 'UNVERIFIED'
+    } finally {
+        if ($jsonDoc) { $jsonDoc.Dispose() }
+    }
+    if ($xmlText -isnot [string] -or !$xmlText -or $xmlText.Length -gt 65536 -or $xmlText.IndexOf([char]0) -ge 0) {
+        return 'UNVERIFIED'
+    }
+    $aclStatus = Test-ReconcileRollbackSddl $aclText
+    if ($aclStatus -cne 'VALID') { return $aclStatus }
+
+    $sr = $null
+    $reader = $null
+    $xmlDoc = $null
+    try {
+        $xmlSettings = [Xml.XmlReaderSettings]::new()
+        $xmlSettings.DtdProcessing = [Xml.DtdProcessing]::Prohibit
+        $xmlSettings.XmlResolver = $null
+        $xmlSettings.MaxCharactersInDocument = 65536
+        $xmlSettings.MaxCharactersFromEntities = 1024
+        $xmlSettings.IgnoreComments = $true
+        $xmlSettings.IgnoreProcessingInstructions = $false
+        $xmlSettings.IgnoreWhitespace = $true
+        $sr = [IO.StringReader]::new($xmlText)
+        $reader = [Xml.XmlReader]::Create($sr, $xmlSettings)
+        $xmlDoc = [Xml.XmlDocument]::new()
+        $xmlDoc.XmlResolver = $null
+        $xmlDoc.Load($reader)
+    } catch {
+        return 'UNVERIFIED'
+    } finally {
+        if ($reader) { $reader.Dispose() }
+        if ($sr) { $sr.Dispose() }
+    }
+
+    foreach ($topNode in $xmlDoc.ChildNodes) {
+        if ($topNode.NodeType -notin @([Xml.XmlNodeType]::XmlDeclaration, [Xml.XmlNodeType]::Element, [Xml.XmlNodeType]::Comment, [Xml.XmlNodeType]::Whitespace)) {
+            return 'UNVERIFIED'
+        }
+    }
+    $taskNs = 'http://schemas.microsoft.com/windows/2004/02/mit/task'
+    $root = $xmlDoc.DocumentElement
+    if (!$root -or $root.LocalName -cne 'Task' -or $root.NamespaceURI -cne $taskNs) {
+        return 'UNVERIFIED'
+    }
+    $taskVer = $null
+    foreach ($attr in $root.Attributes) {
+        if ($attr.Name -ceq 'xmlns') { continue }
+        if ($attr.Name -ceq 'version') { $taskVer = $attr.Value; continue }
+        return 'UNVERIFIED'
+    }
+    if ($taskVer -cnotin @('1.2', '1.3', '1.4')) { return 'UNVERIFIED' }
+
+    $rootChildren = Get-XmlElementChildren $root
+    if ($null -eq $rootChildren) { return 'UNVERIFIED' }
+    $sections = @{}
+    foreach ($child in $rootChildren) {
+        if ($child.LocalName -cnotin @('RegistrationInfo', 'Triggers', 'Principals', 'Settings', 'Actions')) {
+            return 'UNVERIFIED'
+        }
+        if ($sections.ContainsKey($child.LocalName)) { return 'UNVERIFIED' }
+        $sections[$child.LocalName] = $child
+    }
+    foreach ($req in @('RegistrationInfo', 'Triggers', 'Principals', 'Settings', 'Actions')) {
+        if (!$sections.ContainsKey($req)) { return 'MISMATCH' }
+    }
+
+    if ($sections['RegistrationInfo'].HasAttributes) { return 'UNVERIFIED' }
+    $regChildren = Get-XmlElementChildren $sections['RegistrationInfo']
+    if ($null -eq $regChildren) { return 'UNVERIFIED' }
+    $regSeen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $regUri = $null
+    foreach ($rc in $regChildren) {
+        if ($rc.LocalName -cnotin @('Date', 'Author', 'Version', 'Description', 'Documentation', 'URI', 'SecurityDescriptor', 'Source')) {
+            return 'UNVERIFIED'
+        }
+        if (!$regSeen.Add($rc.LocalName)) { return 'UNVERIFIED' }
+        $val = Get-XmlLeafText $rc
+        if ($null -eq $val) { return 'UNVERIFIED' }
+        if ($rc.LocalName -ceq 'URI') { $regUri = $val }
+        elseif ($rc.LocalName -ceq 'SecurityDescriptor') {
+            $regSddlStatus = Test-ReconcileRollbackSddl $val
+            if ($regSddlStatus -cne 'VALID') { return $regSddlStatus }
+        }
+    }
+    if ($regUri -cne ('\' + $name)) { return 'MISMATCH' }
+
+    if ($sections['Principals'].HasAttributes) { return 'UNVERIFIED' }
+    $principalNodes = Get-XmlElementChildren $sections['Principals']
+    if ($null -eq $principalNodes) { return 'UNVERIFIED' }
+    if ($principalNodes.Count -ne 1 -or $principalNodes[0].LocalName -cne 'Principal') { return 'MISMATCH' }
+    $pEl = $principalNodes[0]
+    $principalId = $null
+    foreach ($attr in $pEl.Attributes) {
+        if ($attr.Name -ceq 'id') { $principalId = $attr.Value; continue }
+        return 'UNVERIFIED'
+    }
+    $pChildren = Get-XmlElementChildren $pEl
+    if ($null -eq $pChildren) { return 'UNVERIFIED' }
+    $pSeen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $pUserId = $null; $pLogonType = -1; $pRunLevel = 0; $pGroupId = $null
+    foreach ($pc in $pChildren) {
+        if ($pc.LocalName -cnotin @('UserId', 'LogonType', 'GroupId', 'DisplayName', 'RunLevel')) {
+            return 'MISMATCH'
+        }
+        if (!$pSeen.Add($pc.LocalName)) { return 'UNVERIFIED' }
+        $val = Get-XmlLeafText $pc
+        if ($null -eq $val) { return 'UNVERIFIED' }
+        switch -CaseSensitive ($pc.LocalName) {
+            'UserId' { $pUserId = $val }
+            'GroupId' { $pGroupId = $val }
+            'LogonType' {
+                if ($val -ceq 'InteractiveToken') { $pLogonType = 3 }
+                else { $pLogonType = -1 }
+            }
+            'RunLevel' {
+                if ($val -ceq 'LeastPrivilege') { $pRunLevel = 0 }
+                elseif ($val -ceq 'HighestAvailable') { $pRunLevel = 1 }
+                else { return 'UNVERIFIED' }
+            }
+        }
+    }
+    $principalObj = [pscustomobject]@{
+        Id = $principalId; UserId = $pUserId; LogonType = $pLogonType; RunLevel = $pRunLevel; GroupId = $pGroupId
+    }
+
+    if ($sections['Settings'].HasAttributes) { return 'UNVERIFIED' }
+    $sChildren = Get-XmlElementChildren $sections['Settings']
+    if ($null -eq $sChildren) { return 'UNVERIFIED' }
+    $sSeen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $settingsMap = @{
+        AllowDemandStart = $true; AllowHardTerminate = $true; DisallowStartIfOnBatteries = $true
+        Enabled = $true; ExecutionTimeLimit = 'PT72H'; Hidden = $false; MultipleInstances = 2
+        RestartCount = 0; RestartInterval = $null; RunOnlyIfIdle = $false
+        RunOnlyIfNetworkAvailable = $false; StartWhenAvailable = $false
+        StopIfGoingOnBatteries = $true; WakeToRun = $false; DeleteExpiredTaskAfter = $null
+    }
+    $boolSettings = @{
+        AllowStartOnDemand = 'AllowDemandStart'; AllowHardTerminate = 'AllowHardTerminate'
+        DisallowStartIfOnBatteries = 'DisallowStartIfOnBatteries'; Enabled = 'Enabled'
+        Hidden = 'Hidden'; RunOnlyIfIdle = 'RunOnlyIfIdle'
+        RunOnlyIfNetworkAvailable = 'RunOnlyIfNetworkAvailable'; StartWhenAvailable = 'StartWhenAvailable'
+        StopIfGoingOnBatteries = 'StopIfGoingOnBatteries'; WakeToRun = 'WakeToRun'
+    }
+    foreach ($sc in $sChildren) {
+        if (!$sSeen.Add($sc.LocalName)) { return 'UNVERIFIED' }
+        if ($boolSettings.ContainsKey($sc.LocalName)) {
+            $val = Get-XmlLeafText $sc
+            $b = ConvertFrom-XmlStrictBool $val
+            if ($null -eq $b) { return 'UNVERIFIED' }
+            $settingsMap[$boolSettings[$sc.LocalName]] = $b
+        } elseif ($sc.LocalName -ceq 'MultipleInstancesPolicy') {
+            $val = Get-XmlLeafText $sc
+            $mip = switch -CaseSensitive ($val) {
+                'Parallel' { 0 }; 'Queue' { 1 }; 'IgnoreNew' { 2 }; 'StopExisting' { 3 }; default { -1 }
+            }
+            if ($mip -lt 0) { return 'UNVERIFIED' }
+            $settingsMap['MultipleInstances'] = $mip
+        } elseif ($sc.LocalName -ceq 'ExecutionTimeLimit') {
+            $val = Get-XmlLeafText $sc
+            if ($null -eq $val) { return 'UNVERIFIED' }
+            $settingsMap['ExecutionTimeLimit'] = $val
+        } elseif ($sc.LocalName -ceq 'DeleteExpiredTaskAfter') {
+            $val = Get-XmlLeafText $sc
+            if ($null -eq $val) { return 'UNVERIFIED' }
+            $settingsMap['DeleteExpiredTaskAfter'] = $val
+        } elseif ($sc.LocalName -ceq 'RestartOnFailure') {
+            if ($sc.HasAttributes) { return 'UNVERIFIED' }
+            $rfChildren = Get-XmlElementChildren $sc
+            if ($null -eq $rfChildren) { return 'UNVERIFIED' }
+            $rfSeen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            foreach ($rfc in $rfChildren) {
+                if ($rfc.LocalName -cnotin @('Count', 'Interval') -or !$rfSeen.Add($rfc.LocalName)) { return 'UNVERIFIED' }
+                $val = Get-XmlLeafText $rfc
+                if ($null -eq $val) { return 'UNVERIFIED' }
+                if ($rfc.LocalName -ceq 'Count') {
+                    if ($val -notmatch '^[0-9]{1,4}$') { return 'UNVERIFIED' }
+                    $settingsMap['RestartCount'] = [int]$val
+                } else {
+                    $settingsMap['RestartInterval'] = $val
+                }
+            }
+        } elseif ($sc.LocalName -ceq 'IdleSettings') {
+            if ($sc.HasAttributes) { return 'UNVERIFIED' }
+            $idChildren = Get-XmlElementChildren $sc
+            if ($null -eq $idChildren) { return 'UNVERIFIED' }
+            $idSeen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            foreach ($idc in $idChildren) {
+                if ($idc.LocalName -cnotin @('Duration', 'WaitTimeout', 'StopOnIdleEnd', 'RestartOnIdle') -or !$idSeen.Add($idc.LocalName)) {
+                    return 'UNVERIFIED'
+                }
+                if ($null -eq (Get-XmlLeafText $idc)) { return 'UNVERIFIED' }
+            }
+        } elseif ($sc.LocalName -ceq 'Priority') {
+            $val = Get-XmlLeafText $sc
+            if ($null -eq $val -or $val -notmatch '^([0-9]|10)$') { return 'UNVERIFIED' }
+        } elseif ($sc.LocalName -cin @('DisallowStartOnRemoteAppSession', 'Volatile')) {
+            $b = ConvertFrom-XmlStrictBool (Get-XmlLeafText $sc)
+            if ($null -eq $b) { return 'UNVERIFIED' }
+            if ($b) { return 'MISMATCH' }
+        } elseif ($sc.LocalName -ceq 'UseUnifiedSchedulingEngine') {
+            if ($null -eq (ConvertFrom-XmlStrictBool (Get-XmlLeafText $sc))) { return 'UNVERIFIED' }
+        } elseif ($sc.LocalName -ceq 'Compatibility') {
+            $val = Get-XmlLeafText $sc
+            if ($val -cnotin @('V1', 'Vista', 'Win7', 'Win8')) { return 'UNVERIFIED' }
+        } else {
+            return 'UNVERIFIED'
+        }
+    }
+    $settingsObj = [pscustomobject]$settingsMap
+
+    if ($sections['Triggers'].HasAttributes) { return 'UNVERIFIED' }
+    $triggerNodes = Get-XmlElementChildren $sections['Triggers']
+    if ($null -eq $triggerNodes) { return 'UNVERIFIED' }
+    if ($triggerNodes.Count -ne 1 -or $triggerNodes[0].LocalName -cne 'LogonTrigger') { return 'MISMATCH' }
+    $tEl = $triggerNodes[0]
+    if ($tEl.HasAttributes) { return 'UNVERIFIED' }
+    $tChildren = Get-XmlElementChildren $tEl
+    if ($null -eq $tChildren) { return 'UNVERIFIED' }
+    $tSeen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $tEnabled = $true; $tUserId = $null; $tDelay = $null; $tStart = $null; $tEnd = $null; $tExecLimit = ''
+    $repInterval = $null; $repDuration = $null; $repStop = $false; $hasRep = $false
+    foreach ($tc in $tChildren) {
+        if (!$tSeen.Add($tc.LocalName)) { return 'UNVERIFIED' }
+        switch -CaseSensitive ($tc.LocalName) {
+            'Enabled' {
+                $b = ConvertFrom-XmlStrictBool (Get-XmlLeafText $tc)
+                if ($null -eq $b) { return 'UNVERIFIED' }
+                $tEnabled = $b
+            }
+            'UserId' { $tUserId = Get-XmlLeafText $tc; if ($null -eq $tUserId) { return 'UNVERIFIED' } }
+            'Delay' { $tDelay = Get-XmlLeafText $tc; if ($null -eq $tDelay) { return 'UNVERIFIED' } }
+            'StartBoundary' { $tStart = Get-XmlLeafText $tc; if ($null -eq $tStart) { return 'UNVERIFIED' } }
+            'EndBoundary' { $tEnd = Get-XmlLeafText $tc; if ($null -eq $tEnd) { return 'UNVERIFIED' } }
+            'ExecutionTimeLimit' { $tExecLimit = Get-XmlLeafText $tc; if ($null -eq $tExecLimit) { return 'UNVERIFIED' } }
+            'Repetition' {
+                if ($tc.HasAttributes) { return 'UNVERIFIED' }
+                $rChildren = Get-XmlElementChildren $tc
+                if ($null -eq $rChildren) { return 'UNVERIFIED' }
+                $rSeen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+                foreach ($rc in $rChildren) {
+                    if (!$rSeen.Add($rc.LocalName)) { return 'UNVERIFIED' }
+                    switch -CaseSensitive ($rc.LocalName) {
+                        'Interval' { $repInterval = Get-XmlLeafText $rc; if ($null -eq $repInterval) { return 'UNVERIFIED' } }
+                        'Duration' { $repDuration = Get-XmlLeafText $rc; if ($null -eq $repDuration) { return 'UNVERIFIED' } }
+                        'StopAtDurationEnd' {
+                            $b = ConvertFrom-XmlStrictBool (Get-XmlLeafText $rc)
+                            if ($null -eq $b) { return 'UNVERIFIED' }
+                            $repStop = $b
+                        }
+                        default { return 'UNVERIFIED' }
+                    }
+                }
+                $hasRep = $true
+            }
+            default { return 'UNVERIFIED' }
+        }
+    }
+    if (!$hasRep -or !$repInterval) { return 'MISMATCH' }
+    $triggerObj = [pscustomobject]@{
+        Type = 9; Enabled = $tEnabled; UserId = $tUserId; Delay = $tDelay
+        StartBoundary = $tStart; EndBoundary = $tEnd; ExecutionTimeLimit = $tExecLimit
+        Repetition = [pscustomobject]@{ Interval = $repInterval; Duration = $repDuration; StopAtDurationEnd = $repStop }
+    }
+    $triggersObj = [pscustomobject]@{ Count = 1; Entry = $triggerObj }
+    $triggersObj | Add-Member ScriptMethod Item { param($idx) if ($idx -ne 1) { throw 'Invalid trigger index' }; $this.Entry }
+
+    $aContext = $null
+    foreach ($attr in $sections['Actions'].Attributes) {
+        if ($attr.Name -ceq 'Context') { $aContext = $attr.Value; continue }
+        return 'UNVERIFIED'
+    }
+    $actionNodes = Get-XmlElementChildren $sections['Actions']
+    if ($null -eq $actionNodes) { return 'UNVERIFIED' }
+    if ($actionNodes.Count -ne 1 -or $actionNodes[0].LocalName -cne 'Exec') { return 'MISMATCH' }
+    $aEl = $actionNodes[0]
+    if ($aEl.HasAttributes) { return 'UNVERIFIED' }
+    $aChildren = Get-XmlElementChildren $aEl
+    if ($null -eq $aChildren) { return 'UNVERIFIED' }
+    $aSeen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    $aPath = $null; $aArgs = $null; $aWorkDir = $null
+    foreach ($ac in $aChildren) {
+        if ($ac.LocalName -cnotin @('Command', 'Arguments', 'WorkingDirectory') -or !$aSeen.Add($ac.LocalName)) {
+            return 'UNVERIFIED'
+        }
+        $val = Get-XmlLeafText $ac
+        if ($null -eq $val) { return 'UNVERIFIED' }
+        switch -CaseSensitive ($ac.LocalName) {
+            'Command' { $aPath = $val }
+            'Arguments' { $aArgs = $val }
+            'WorkingDirectory' { $aWorkDir = $val }
+        }
+    }
+    $actionObj = [pscustomobject]@{ Type = 0; Path = $aPath; Arguments = $aArgs; WorkingDirectory = $aWorkDir }
+    $actionsObj = [pscustomobject]@{ Count = 1; Context = $aContext; Entry = $actionObj }
+    $actionsObj | Add-Member ScriptMethod Item { param($idx) if ($idx -ne 1) { throw 'Invalid action index' }; $this.Entry }
+
+    $parsedTask = [pscustomobject]@{
+        Enabled = [bool]$settingsObj.Enabled
+        Sddl = $aclText
+        Definition = [pscustomobject]@{
+            Principal = $principalObj
+            Settings = $settingsObj
+            Actions = $actionsObj
+            Triggers = $triggersObj
+        }
+    }
+    $parsedTask | Add-Member ScriptMethod GetSecurityDescriptor { param($flags) $this.Sddl }
+    if (!(Test-LegacyRegistration $parsedTask)) { return 'MISMATCH' }
+
+    # On live Windows COM runtime, also verify non-mutating registerable task shape via ITaskDefinition.XmlText.
+    $svcVar = Get-Variable -Name service -ErrorAction SilentlyContinue
+    if ($svcVar -and $null -ne $svcVar.Value -and $svcVar.Value.PSObject.Methods['NewTask']) {
+        try {
+            $comDef = $svcVar.Value.NewTask(0)
+            $comDef.XmlText = $xmlText
+        } catch {
+            return 'UNVERIFIED'
+        }
+        if ([string]$comDef.RegistrationInfo.URI -cne ('\' + $name)) { return 'MISMATCH' }
+        $comTask = [pscustomobject]@{
+            Enabled = [bool]$comDef.Settings.Enabled
+            Sddl = $aclText
+            Definition = $comDef
+        }
+        $comTask | Add-Member ScriptMethod GetSecurityDescriptor { param($flags) $this.Sddl }
+        if (!(Test-LegacyRegistration $comTask)) { return 'MISMATCH' }
+    }
+    return 'VALID'
+}
+
+function Get-ReconcileJournalState {
+    $key = $null
+    try {
+        $key = Open-MigrationState $false
+        if (!$key) { return 'FRESH' }
+        if ($key.PSObject.Properties['SubKeyCount'] -and $key.SubKeyCount -gt 0) {
+            return 'UNVERIFIED'
+        }
+        $names = @($key.GetValueNames())
+        $knownNames = @('AutostartPending', 'LaunchPending', 'DemandMigrationRollback', 'DemandMigrationComplete')
+        foreach ($n in $names) {
+            if ($n -isnot [string] -or $n -cnotin $knownNames) {
+                return 'MISMATCH'
+            }
+        }
+        $hasRollback = 'DemandMigrationRollback' -cin $names
+        $hasComplete = 'DemandMigrationComplete' -cin $names
+        if (!$hasRollback -and !$hasComplete) { return 'FRESH' }
+        if (!$hasRollback -and $hasComplete) { return 'COMPLETE_ONLY' }
+        if ($key.PSObject.Methods['GetValueKind']) {
+            if ($key.GetValueKind('DemandMigrationRollback') -ne [Microsoft.Win32.RegistryValueKind]::String) {
+                return 'UNVERIFIED'
+            }
+            if ($hasComplete -and $key.GetValueKind('DemandMigrationComplete') -ne [Microsoft.Win32.RegistryValueKind]::DWord) {
+                return 'UNVERIFIED'
+            }
+        }
+        $rbVal = $key.GetValue('DemandMigrationRollback')
+        $rbStatus = Test-ReconcileRollbackMetadata $rbVal
+        if ($rbStatus -cne 'VALID') { return $rbStatus }
+        if (!$hasComplete) { return 'ROLLBACK_ONLY' }
+        $cmVal = $key.GetValue('DemandMigrationComplete')
+        if ($cmVal -isnot [int] -or $cmVal -ne 1) {
+            return 'UNVERIFIED'
+        }
+        return 'COMPLETE'
+    } catch { return 'UNVERIFIED' }
+    finally { if ($key) { $key.Dispose() } }
+}
+
+function Get-ReconcileRelevantTasks {
+    $all = [Collections.Generic.List[object]]::new()
+    foreach ($t in @($folder.GetTasks(1))) {
+        if ($t) { $all.Add([pscustomobject]@{ Task = $t; Root = $true }) }
+    }
+    foreach ($sub in @($folder.GetFolders(0))) {
+        if ($sub -and $sub.Name -and ([string]$sub.Name) -match '(?i)(AI-Commerce|WakeHub|D5)') {
+            foreach ($t in @($sub.GetTasks(1))) {
+                if ($t) { $all.Add([pscustomobject]@{ Task = $t; Root = $false }) }
+            }
+        }
+    }
+    return ,$all.ToArray()
+}
+
+$taskState = 'UNAVAILABLE'
+$d5State = 'UNVERIFIED'
+$journalState = Get-ReconcileJournalState
+
+try {
+    $allTasks = Get-ReconcileRelevantTasks
+    $wakeCandidates = [Collections.Generic.List[object]]::new()
+    $d5Candidates = [Collections.Generic.List[object]]::new()
+    foreach ($item in $allTasks) {
+        $tName = [string]$item.Task.Name
+        if ($tName -match '(?i)(WakeHub.*9444|9444.*WakeHub|AI-Commerce-WakeHub)') {
+            $wakeCandidates.Add($item)
+        } elseif ($tName -match '(?i)(AI-Commerce-D5-CDP|D5-CDP-AtLogon)') {
+            $d5Candidates.Add($item)
+        } elseif ($tName -like 'AI-Commerce-*') {
+            try {
+                $otherXml = [string]$item.Task.Xml
+                $mentionsClean = $otherXml -match '(?i)WakeHub-9444-Clean' -or
+                    $otherXml.IndexOf($name, [StringComparison]::OrdinalIgnoreCase) -ge 0
+                $claims9444 = $false
+                foreach ($act in @($item.Task.Definition.Actions)) {
+                    if ($act -and $act.Type -eq 0 -and
+                        ([string]$act.Arguments -match '(?i)(--remote-debugging-port\s*[=:]\s*9444|WakeHub-9444-Clean)')) {
+                        $claims9444 = $true
+                        break
+                    }
+                }
+                if ($mentionsClean -or $claims9444) {
+                    $wakeCandidates.Add($item)
+                }
+            } catch {
+                $wakeCandidates.Add($item)
+            }
+        }
+    }
+
+    if ($wakeCandidates.Count -gt 1 -or
+        ($wakeCandidates.Count -eq 1 -and (!$wakeCandidates[0].Root -or $wakeCandidates[0].Task.Name -cne $name)) -or
+        ($registered -and $wakeCandidates.Count -ne 1)) {
+        $taskState = 'MULTIPLE_CANDIDATES'
+    } elseif (!$registered) {
+        $taskState = 'ABSENT'
+    } elseif (!(Test-ReconcileRegistrationBase $registered)) {
+        $taskState = 'CONFLICT'
+    } elseif ($registered.Definition.Triggers.Count -eq 0) {
+        if (!(Test-ReconcileDemandAction $registered)) {
+            $taskState = 'CONFLICT'
+        } elseif (!$registered.Enabled) {
+            if ($registered.State -eq 1 -and $registered.GetInstances(0).Count -eq 0) {
+                $taskState = 'DEMAND_DISABLED'
+            } else {
+                $taskState = 'DEMAND_NOT_READY'
+            }
+        } elseif (!(Test-DemandRuntime)) {
+            $taskState = 'DEMAND_RUNTIME_BAD'
+        } elseif (!(Test-Ready $registered)) {
+            $taskState = 'DEMAND_NOT_READY'
+        } else {
+            $taskState = 'DEMAND_READY'
+        }
+    } elseif ($registered.Definition.Triggers.Count -eq 1) {
+        if (!(Test-ReconcileLegacyTriggerAndAction $registered)) {
+            $taskState = 'CONFLICT'
+        } elseif (!$registered.Enabled) {
+            if ($registered.State -eq 1 -and $registered.GetInstances(0).Count -eq 0) {
+                $taskState = 'LEGACY_PT1M_DISABLED'
+            } else {
+                $taskState = 'LEGACY_PT1M_NOT_READY'
+            }
+        } elseif (!(Test-Ready $registered)) {
+            $taskState = 'LEGACY_PT1M_NOT_READY'
+        } else {
+            $taskState = 'LEGACY_PT1M_READY'
+        }
+    } else {
+        $taskState = 'CONFLICT'
+    }
+
+    $d5Task = Read-Registration 'AI-Commerce-D5-CDP-AtLogon'
+    if ($d5Candidates.Count -gt 1 -or
+        ($d5Candidates.Count -eq 1 -and (!$d5Candidates[0].Root -or $d5Candidates[0].Task.Name -cne 'AI-Commerce-D5-CDP-AtLogon')) -or
+        ($d5Task -and $d5Candidates.Count -ne 1)) {
+        $d5State = 'UNVERIFIED'
+    } elseif (!$d5Task) {
+        $d5State = 'ABSENT'
+    } elseif ($d5Task.Enabled) {
+        if ($null -ne (Get-D5Attestation $d5Task)) { $d5State = 'ENABLED_ATTESTED' }
+        else { $d5State = 'UNVERIFIED' }
+    } else {
+        if ($d5Task.State -eq 1 -and $d5Task.GetInstances(0).Count -eq 0 -and
+            $null -ne (Get-D5Attestation $d5Task $true)) {
+            $d5State = 'DISABLED_ATTESTED'
+        } else {
+            $d5State = 'UNVERIFIED'
+        }
+    }
+} catch {
+    $taskState = 'UNAVAILABLE'
+    $d5State = 'UNVERIFIED'
+}
+
+$afterSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$afterSession = [Diagnostics.Process]::GetCurrentProcess().SessionId
+if ($afterSid -cne $sid -or $afterSession -le 0 -or $afterSession -ne $session) {
+    @{ error = 'WINDOWS_OWNER_CONTEXT_UNVERIFIED' } | ConvertTo-Json -Compress
+    exit
+}
+
+@{ task = $taskState; journal = $journalState; d5 = $d5State } | ConvertTo-Json -Compress
+"""
+
+
 def _clean_task_environment(owner: tuple[Path, int, str], target: _ChromeTarget,
                             candidates: tuple[Path, ...], powershell: Path, *,
                             trusted: tuple[Path, ...] | None = None,
@@ -3474,6 +4119,67 @@ def _clean_task_powershell(bootstrap: Path) -> Path:
     if result.returncode or len(result.stdout) > 4096:
         raise AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
     return Path(result.stdout.decode("utf-8").rstrip("\r\n"))
+
+
+_CLEAN_RECONCILE_TASK_VALUES = frozenset({
+    "DEMAND_READY", "DEMAND_DISABLED", "DEMAND_NOT_READY", "DEMAND_RUNTIME_BAD",
+    "LEGACY_PT1M_READY", "LEGACY_PT1M_DISABLED", "LEGACY_PT1M_NOT_READY",
+    "ABSENT", "MULTIPLE_CANDIDATES", "CONFLICT", "UNAVAILABLE",
+})
+_CLEAN_RECONCILE_JOURNAL_VALUES = frozenset({
+    "FRESH", "COMPLETE", "MISMATCH", "ROLLBACK_ONLY", "COMPLETE_ONLY", "UNVERIFIED",
+})
+_CLEAN_RECONCILE_D5_VALUES = frozenset({
+    "ENABLED_ATTESTED", "DISABLED_ATTESTED", "ABSENT", "UNVERIFIED",
+})
+
+
+def _clean_reconcile_read(owner: tuple[Path, int, str], target: _ChromeTarget,
+                          candidates: tuple[Path, ...]) -> dict[str, str]:
+    """Read-only post-UNKNOWN reconciler for WakeHub 9444 task, journal and D5."""
+    trusted = _trusted_powershells()
+    if len(trusted) == 1:
+        powershell = trusted[0]
+    else:
+        try:
+            powershell = _powershell()
+            if powershell not in trusted:
+                powershell = trusted[0]
+        except AcquisitionBlocked:
+            powershell = trusted[0]
+    child_env = _clean_task_environment(owner, target, candidates, powershell,
+                                        trusted=trusted, include_legacy=True)
+    stdin_runner = (
+        "[Console]::InputEncoding=[Text.UTF8Encoding]::new(); "
+        "& ([ScriptBlock]::Create([Console]::In.ReadToEnd()))"
+    )
+    fallback = {"task": "UNAVAILABLE", "journal": "UNVERIFIED", "d5": "UNVERIFIED"}
+    try:
+        result = subprocess.run(
+            [str(powershell), "-NoProfile", "-NonInteractive", "-Command", stdin_runner],
+            input=_CLEAN_9444_TASK_RECONCILE_SCRIPT.encode("utf-8"),
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=25, check=False, env=child_env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode or not 0 < len(result.stdout) <= 512:
+            return fallback
+        raw = result.stdout.decode("utf-8").strip()
+        if raw == "WINDOWS_OWNER_CONTEXT_UNVERIFIED":
+            return {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}
+        data = json.loads(raw)
+        if type(data) is not dict:
+            return fallback
+        if data == {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}:
+            return {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}
+        if (set(data) == {"task", "journal", "d5"}
+                and data["task"] in _CLEAN_RECONCILE_TASK_VALUES
+                and data["journal"] in _CLEAN_RECONCILE_JOURNAL_VALUES
+                and data["d5"] in _CLEAN_RECONCILE_D5_VALUES):
+            return {"task": data["task"], "journal": data["journal"], "d5": data["d5"]}
+    except (OSError, subprocess.TimeoutExpired, UnicodeError, ValueError):
+        pass
+    return fallback
 
 
 def _clean_task(owner: tuple[Path, int, str], target: _ChromeTarget,
