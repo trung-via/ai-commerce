@@ -133,7 +133,8 @@ Options:
         cases.extend(event("read", self.OP, {key: "private"}) for key in (
             "executable", "path", "command", "model", "effort", "home", "env", "url", "args", "shell", "output",
         ))
-        with patch.object(hostops, "_a10_collect_readiness") as collect:
+        with (patch.object(hostops, "_a10_collect_r7_internal_evidence") as collect_r7,
+              patch.object(hostops, "_a10_collect_readiness") as collect_legacy):
             for value in cases:
                 with self.subTest(value=value):
                     code, result = self._main(value, self._protected_env())
@@ -141,11 +142,13 @@ Options:
                     self.assertNotIn("a10_readiness", result)
             code, result = self._main(event("write", self.OP, {}), self._protected_env(), mode="write")
             self.assertEqual(result["code"], "WRITE_SCOPE_DENIED")
-        collect.assert_not_called()
+        collect_r7.assert_not_called()
+        collect_legacy.assert_not_called()
 
     def test_guard_and_direct_perform_keep_source_only(self):
         value = event("read", self.OP, {})
-        with patch.object(hostops, "_a10_collect_readiness") as collect:
+        with (patch.object(hostops, "_a10_collect_r7_internal_evidence") as collect_r7,
+              patch.object(hostops, "_a10_collect_readiness") as collect_legacy):
             result = hostops.perform(hostops.parse_event(value, "read"))
             self.assertEqual(result["a10_readiness"]["state"], "SOURCE_PRESENT")
             self.assertIsNone(result["a10_readiness"]["public_observation_sha256"])
@@ -162,7 +165,8 @@ Options:
                     self.assertEqual(record["a10_readiness"]["state"], "SOURCE_PRESENT")
             code, record = self._main(value, self._protected_env(), os_name="posix")
             self.assertEqual((code, record["code"]), (2, "WINDOWS_ONLY"))
-        collect.assert_not_called()
+        collect_r7.assert_not_called()
+        collect_legacy.assert_not_called()
         self.assertNotIn("a10_readiness", hostops.PERSONAL_PUBLIC_FIELDS)
         self.assertEqual(len(hostops.STANDING_READ_CATEGORIES), 16)
 
@@ -391,8 +395,8 @@ Options:
                         with self.assertRaisesRegex(hostops.Denied, "A10_PROBE_DENIED"):
                             probe(args)
                 self.assertEqual(runner.call_args_list, expected_calls)
-                self.assertEqual(executable.open.call_args_list, [call("rb")] * 3)
-                self.assertEqual(native.call_args_list, [call(executable)] * 3)
+                self.assertEqual(executable.open.call_args_list, [call("rb")] * 4)
+                self.assertEqual(native.call_args_list, [call(executable)] * 4)
                 pin.assert_not_called()
                 self.assertEqual((code, result["status"], result["code"]), (2, "HOLD", "HOST_UNVERIFIED"))
                 readiness = result["a10_readiness"]
@@ -444,12 +448,29 @@ Options:
                                  [["--version"]] if version_observed else [])
 
     def test_public_receipt_is_closed_and_digest_binds_observed_binary_issue_and_source(self):
+        from ai_commerce.opportunity.core import models
+
         binary_sha = hashlib.sha256(b"observed executable").hexdigest()
-        observed = {"binary": "OBSERVED", "observed_binary_sha256": binary_sha, "account_config": "secret",
-                    "stdout": "private", "host_verification_sha256": "b" * 64}
-        with patch.object(hostops, "_a10_collect_readiness", return_value=observed) as collect:
+        observed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        evidence = models.make_codex_effective_config_evidence(
+            source_sha=self.SHA,
+            observed_at=observed_at,
+            binary={"state": "OBSERVED", "sha256": binary_sha, "version_status": "UNKNOWN",
+                    "version": None, "help_sha256": None},
+            cli_declarations=dict.fromkeys(
+                ("root_help", "root_flags", "exec_help", "exec_flags",
+                 "config_override_flags", "feature_disable_flag"),
+                "UNKNOWN",
+            ),
+            system_config={"status": "UNKNOWN", "basis": "NOT_CHECKED", "known_paths_checked": 0},
+            account_config={"status": "UNKNOWN", "basis": "REMOTE_ACCOUNT_POLICY_UNPROVABLE_OFFLINE"},
+            windows_boundary=True,
+        )
+        with (patch.object(hostops, "_a10_collect_r7_internal_evidence", return_value=evidence) as collect,
+              patch.object(hostops, "_a10_collect_readiness") as legacy_collect):
             code, result = self._main(event("read", self.OP, {}), self._protected_env())
-        collect.assert_called_once_with()
+        collect.assert_called_once_with(self.SHA)
+        legacy_collect.assert_not_called()
         self.assertEqual(code, 2)
         self.assertEqual(result, {
             "status": "HOLD", "code": "HOST_UNVERIFIED", "operation": self.OP,
@@ -467,6 +488,11 @@ Options:
         })
         canonical = json.dumps(result, sort_keys=True, separators=(",", ":")).encode("ascii")
         self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
+        observed = {"binary": "OBSERVED", "observed_binary_sha256": binary_sha, "account_config": "secret",
+                    "stdout": "private", "host_verification_sha256": "b" * 64}
+        stripped = hostops._a10_readiness_receipt(17, self.SHA, observations=observed)
+        self.assertEqual(stripped["a10_readiness"]["public_observation_sha256"], digest)
+        self.assertEqual(stripped["a10_readiness"]["account_config"], "UNKNOWN")
         for issue, sha, bytes_sha in ((18, self.SHA, binary_sha), (17, "b" * 40, binary_sha),
                                       (17, self.SHA, "c" * 64)):
             changed = hostops._a10_readiness_receipt(
@@ -758,6 +784,440 @@ const script = fs.readFileSync(process.argv[2],'utf8');
             )
         self.assertEqual(completed.returncode, 0, completed.stderr[-3000:])
         self.assertIn("A10_VERIFIED_CASES=" + str(len(cases)), completed.stdout)
+
+    def _emit_r7c_public_receipt(
+        self,
+        *,
+        sha=None,
+        version="0.170.0",
+        exec_help=None,
+        pin_effects=None,
+        binary_state="OBSERVED",
+        post_probe_drift=False,
+        program_data=r"C:\ProgramData",
+        user_profile=None,
+    ):
+        from ai_commerce.opportunity.core import models
+
+        target_sha = self.SHA if sha is None else sha
+        raw = b"observed r7c binary"
+        binary_sha = hashlib.sha256(raw).hexdigest()
+        full_exec_help = self.EXEC_HELP.replace(
+            b"      --json", b"      --ignore-user-config\n      --strict-config\n      --json"
+        )
+        chosen_exec_help = full_exec_help if exec_help is None else exec_help
+        env = {**self._protected_env(), "GITHUB_SHA": target_sha, "GITHUB_WORKFLOW_SHA": target_sha}
+        if program_data is not None:
+            env["ProgramData"] = program_data
+        if user_profile is not None:
+            env["USERPROFILE"] = user_profile
+        executable = self._binary(PureWindowsPath("D:/Codex/codex.exe"), raw)
+        executable.resolve.return_value = executable
+        if post_probe_drift:
+            executable.open.side_effect = [BytesIO(raw), BytesIO(raw), BytesIO(raw), BytesIO(b"drifted-binary")]
+        else:
+            executable.open.side_effect = lambda _: BytesIO(raw)
+        find_result = (
+            ("OBSERVED", executable, binary_sha) if binary_state == "OBSERVED"
+            else (binary_state, None, None)
+        )
+        pin_side_effect = FileNotFoundError if pin_effects is None else pin_effects
+        with (patch.object(hostops, "_a10_find_executable", return_value=find_result),
+              patch.object(hostops, "_a10_is_native_executable", return_value=True),
+              patch.object(hostops, "_a10_pin_local_path", side_effect=pin_side_effect),
+              patch.object(hostops.tempfile, "TemporaryDirectory", return_value=nullcontext(r"C:\Temp\a10-r7c")),
+              patch.object(Path, "read_bytes", side_effect=AssertionError("must not read private files")),
+              patch.object(Path, "read_text", side_effect=AssertionError("must not read private files")),
+              patch.object(hostops, "_a10_collect_readiness") as legacy_collect,
+              patch.object(models, "_bounded_native_codex", side_effect=[
+                  self._output(f"codex-cli {version}".encode()),
+                  self._output(self.ROOT_HELP),
+                  self._output(chosen_exec_help),
+              ]) as runner):
+            code, receipt = self._main(event("read", self.OP, {}), env)
+        legacy_collect.assert_not_called()
+        if binary_state == "OBSERVED":
+            self.assertEqual([c.args[0][1:] for c in runner.call_args_list],
+                             [["--version"], ["--help"], ["exec", "--help"]])
+        else:
+            runner.assert_not_called()
+        return code, receipt, binary_sha
+
+    def test_r7c_check_codes_match_protected_r7b_negative_only_vocabulary(self):
+        self.assertEqual(hostops._A10_CHECK_CODES["system_config"], ("CONFLICTING_POLICY_PRESENT", "UNSAFE"))
+        self.assertEqual(hostops._A10_CHECK_CODES["account_config"],
+                         ("MISSING_PRIVATE_CONFIG", "CONFLICTING_PRIVATE_CONFIG", "UNSAFE"))
+        self.assertEqual(hostops._A10_CHECK_CODES["disabled_features"], ("NOT_DECLARED", "UNSAFE"))
+        self.assertEqual(hostops._A10_CHECK_CODES["read_only_policy"], ("NOT_DECLARED", "UNSAFE"))
+        all_codes = {c for codes in hostops._A10_CHECK_CODES.values() for c in codes}
+        self.assertNotIn("VERIFIED", all_codes)
+        self.assertNotIn("HOST_READINESS_VERIFIED", all_codes)
+
+    def test_r7c_end_to_end_negative_observations_and_no_private_read_or_inference(self):
+        full_exec_help = self.EXEC_HELP.replace(
+            b"      --json", b"      --ignore-user-config\n      --strict-config\n      --json"
+        )
+        missing_disable_help = full_exec_help.replace(
+            b"      --disable <FEATURE>", b"          --disable <FEATURE>"
+        )
+
+        # 1. System config present (metadata-only, no file read, no path leaked)
+        code, rec, bin_sha = self._emit_r7c_public_receipt(
+            pin_effects=[FileNotFoundError, nullcontext(Path("unused"))],
+        )
+        self.assertEqual((code, rec["status"], rec["code"]), (2, "HOLD", "HOST_UNVERIFIED"))
+        row = rec["a10_readiness"]
+        self.assertEqual(row["system_config"], "CONFLICTING_POLICY_PRESENT")
+        self.assertEqual(row["account_config"], "UNKNOWN")
+        self.assertEqual(row["disabled_features"], "UNKNOWN")
+        self.assertEqual(row["read_only_policy"], "UNKNOWN")
+        self.assertEqual(row["observed_binary_sha256"], bin_sha)
+        self.assertFalse(row["native_inference_executed"])
+        self.assertNotIn("ProgramData", json.dumps(rec))
+
+        # 2. System config unsafe (reparse/access failure)
+        code, rec, _ = self._emit_r7c_public_receipt(pin_effects=[OSError("reparse")])
+        self.assertEqual((code, rec["status"], rec["code"]), (2, "HOLD", "HOST_UNVERIFIED"))
+        self.assertEqual(rec["a10_readiness"]["system_config"], "UNSAFE")
+        self.assertEqual(rec["a10_readiness"]["account_config"], "UNKNOWN")
+
+        # 3. Missing config override flags -> read_only_policy NOT_DECLARED, disabled_features UNKNOWN
+        code, rec, _ = self._emit_r7c_public_receipt(exec_help=self.EXEC_HELP)
+        row = rec["a10_readiness"]
+        self.assertEqual(row["exec_flags"], "NOT_DECLARED")
+        self.assertEqual(row["config_override_flags"], "NOT_DECLARED")
+        self.assertEqual(row["feature_disable_flag"], "DECLARED")
+        self.assertEqual(row["read_only_policy"], "NOT_DECLARED")
+        self.assertEqual(row["disabled_features"], "UNKNOWN")
+
+        # 4. Missing --disable flag -> both disabled_features and read_only_policy NOT_DECLARED
+        code, rec, _ = self._emit_r7c_public_receipt(exec_help=missing_disable_help)
+        row = rec["a10_readiness"]
+        self.assertEqual(row["feature_disable_flag"], "NOT_DECLARED")
+        self.assertEqual(row["exec_flags"], "NOT_DECLARED")
+        self.assertEqual(row["disabled_features"], "NOT_DECLARED")
+        self.assertEqual(row["read_only_policy"], "NOT_DECLARED")
+
+        # 5. Post-probe binary drift -> UNSAFE binary/disabled_features/read_only_policy, CLI UNKNOWN
+        code, rec, _ = self._emit_r7c_public_receipt(post_probe_drift=True)
+        row = rec["a10_readiness"]
+        self.assertEqual(row["binary"], "UNSAFE")
+        self.assertIsNone(row["observed_binary_sha256"])
+        self.assertEqual(row["disabled_features"], "UNSAFE")
+        self.assertEqual(row["read_only_policy"], "UNSAFE")
+        for field in ("version", "root_help", "exec_help", "root_flags", "exec_flags",
+                      "config_override_flags", "feature_disable_flag", "catalog", "account_config"):
+            self.assertEqual(row[field], "UNKNOWN")
+
+        # 6. Discovery-time unsafe binary + system conflict
+        code, rec, _ = self._emit_r7c_public_receipt(
+            binary_state="UNSAFE", pin_effects=[nullcontext(Path("unused"))],
+        )
+        row = rec["a10_readiness"]
+        self.assertEqual(row["binary"], "UNSAFE")
+        self.assertIsNone(row["observed_binary_sha256"])
+        self.assertEqual(row["system_config"], "CONFLICTING_POLICY_PRESENT")
+        self.assertEqual(row["disabled_features"], "UNSAFE")
+        self.assertEqual(row["read_only_policy"], "UNSAFE")
+
+        # 7. #1251 baseline with default cache present, all flags declared, all 4 layers UNKNOWN
+        code, rec, _ = self._emit_r7c_public_receipt(
+            user_profile=r"C:\Users\operator",
+            pin_effects=[FileNotFoundError, FileNotFoundError, FileNotFoundError, nullcontext(Path("unused"))],
+        )
+        row = rec["a10_readiness"]
+        self.assertEqual(row["catalog"], "DEFAULT_CACHE_PRESENT")
+        for layer in ("system_config", "account_config", "disabled_features", "read_only_policy"):
+            self.assertEqual(row[layer], "UNKNOWN")
+        self.assertNotIn("operator", json.dumps(rec))
+
+    def test_r7c_binding_tampering_downgrades_to_unknown_hold_without_leaks(self):
+        from ai_commerce.opportunity.core import models
+
+        bin_sha = "b" * 64
+        help_sha = "c" * 64
+        now = datetime.now(timezone.utc)
+        now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        stale_iso = (now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        future_iso = (now + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def make_ev(*, source_sha=self.SHA, observed_at=now_iso, windows_boundary=True,
+                    account_config=None):
+            return models.make_codex_effective_config_evidence(
+                source_sha=source_sha,
+                observed_at=observed_at,
+                binary={"state": "OBSERVED", "sha256": bin_sha, "version_status": "STABLE_SEMVER",
+                        "version": "0.170.0", "help_sha256": help_sha},
+                cli_declarations={
+                    "root_help": "USAGE_OBSERVED", "root_flags": "DECLARED",
+                    "exec_help": "USAGE_OBSERVED", "exec_flags": "DECLARED",
+                    "config_override_flags": "DECLARED", "feature_disable_flag": "DECLARED",
+                },
+                system_config={"status": "CONFLICTING_POLICY_PRESENT",
+                               "basis": "KNOWN_SYSTEM_POLICY_FILE_PRESENT", "known_paths_checked": 1},
+                account_config=account_config or {
+                    "status": "UNKNOWN", "basis": "REMOTE_ACCOUNT_POLICY_UNPROVABLE_OFFLINE",
+                },
+                windows_boundary=windows_boundary,
+            )
+
+        valid_ev = make_ev()
+        # Direct binding checks fail closed on stale, future, source, policy, binary, version, help, digest drift
+        for name, ev, kwargs, expected_code in (
+            ("stale", make_ev(observed_at=stale_iso), {"source_sha": self.SHA, "as_of": now_iso}, "CODEX_EVIDENCE_STALE"),
+            ("future", make_ev(observed_at=future_iso), {"source_sha": self.SHA, "as_of": now_iso}, "CODEX_EVIDENCE_FUTURE"),
+            ("source_drift", make_ev(source_sha="e" * 40), {"source_sha": self.SHA, "as_of": now_iso}, "CODEX_EVIDENCE_SOURCE_MISMATCH"),
+            ("policy_drift", valid_ev, {"source_sha": self.SHA, "as_of": now_iso, "policy_sha256": "0" * 64}, "CODEX_EVIDENCE_POLICY_MISMATCH"),
+            ("binary_drift", valid_ev, {"source_sha": self.SHA, "as_of": now_iso, "binary_sha256": "0" * 64}, "CODEX_EVIDENCE_BINARY_MISMATCH"),
+            ("version_drift", valid_ev, {"source_sha": self.SHA, "as_of": now_iso, "version": "0.164.0"}, "CODEX_EVIDENCE_VERSION_MISMATCH"),
+            ("help_drift", valid_ev, {"source_sha": self.SHA, "as_of": now_iso, "help_sha256": "0" * 64}, "CODEX_EVIDENCE_HELP_MISMATCH"),
+            ("grant_drift", valid_ev, {"source_sha": self.SHA, "as_of": now_iso, "host_verification_sha256": "0" * 64}, "CODEX_EVIDENCE_GRANT_MISMATCH"),
+        ):
+            with self.subTest(binding=name), self.assertRaisesRegex(models.SignalValidationError, expected_code):
+                hostops._a10_project_public_observations(ev, **kwargs)
+
+        # Non-Windows read_only_policy UNSAFE with observed binary downgrades to UNKNOWN (R7b requires binary=UNSAFE)
+        non_win = make_ev(windows_boundary=False)
+        projected_non_win = hostops._a10_project_public_observations(non_win, source_sha=self.SHA, as_of=now_iso)
+        self.assertNotIn("read_only_policy", projected_non_win)
+
+        # Dedicated-home negative account_config projects only for exact deterministic bases
+        for acct_status, acct_basis in (
+            ("MISSING_PRIVATE_CONFIG", "DEDICATED_HOME_AUTH_ABSENT"),
+            ("CONFLICTING_PRIVATE_CONFIG", "DEDICATED_HOME_FORBIDDEN_CONFIG_PRESENT"),
+            ("UNSAFE", "DEDICATED_HOME_UNSAFE"),
+        ):
+            ev_acct = make_ev(account_config={"status": acct_status, "basis": acct_basis})
+            proj = hostops._a10_project_public_observations(ev_acct, source_sha=self.SHA, as_of=now_iso)
+            self.assertEqual(proj["account_config"], acct_status)
+
+        # Protected READ downgrades any tampered/stale/malformed/exception evidence to all-UNKNOWN HOLD
+        tampered_policy = copy.deepcopy(valid_ev)
+        tampered_policy["policy_sha256"] = "0" * 64
+        tampered_digest = copy.deepcopy(valid_ev)
+        tampered_digest["evidence_sha256"] = "0" * 64
+        forged_verified = copy.deepcopy(valid_ev)
+        forged_verified["layers"]["system_config"] = {"status": "VERIFIED", "basis": "KNOWN_SYSTEM_POLICY_FILE_PRESENT", "known_paths_checked": 1}
+        forged_inf = copy.deepcopy(valid_ev)
+        forged_inf["native_inference_executed"] = True
+        contradictory = copy.deepcopy(valid_ev)
+        contradictory["layers"]["disabled_features"] = {"status": "NOT_DECLARED", "basis": "DISABLE_FLAG_NOT_DECLARED"}
+
+        bad_returns = [
+            ("stale", make_ev(observed_at=stale_iso)),
+            ("future", make_ev(observed_at=future_iso)),
+            ("wrong_source", make_ev(source_sha="e" * 40)),
+            ("tampered_policy", tampered_policy),
+            ("tampered_digest", tampered_digest),
+            ("forged_verified", forged_verified),
+            ("forged_inference", forged_inf),
+            ("contradictory_layer", contradictory),
+            ("malformed_none", None),
+            ("malformed_private", {"private_bytes": "PRIVATE_SECRET_BYTES"}),
+            ("collector_exception", RuntimeError("PRIVATE_STACK_SECRET")),
+        ]
+        for name, bad in bad_returns:
+            with self.subTest(tamper=name):
+                mock_kwargs = {"side_effect": bad} if isinstance(bad, Exception) else {"return_value": bad}
+                with patch.object(hostops, "_a10_collect_r7_internal_evidence", **mock_kwargs):
+                    code, rec = self._main(event("read", self.OP, {}), self._protected_env())
+                self.assertEqual((code, rec["status"], rec["code"]), (2, "HOLD", "HOST_UNVERIFIED"))
+                row = rec["a10_readiness"]
+                self.assertIsNone(row["observed_binary_sha256"])
+                self.assertFalse(row["native_inference_executed"])
+                for field in hostops._A10_CHECK_CODES:
+                    self.assertEqual(row[field], "UNKNOWN")
+                serialized = json.dumps(rec)
+                self.assertNotIn("PRIVATE_SECRET_BYTES", serialized)
+                self.assertNotIn("PRIVATE_STACK_SECRET", serialized)
+
+        # Defense-in-depth receipt normalization strips contradictory negative claims
+        contradictory_obs = {
+            "binary": "OBSERVED", "observed_binary_sha256": bin_sha,
+            "exec_help": "USAGE_OBSERVED", "exec_flags": "DECLARED",
+            "config_override_flags": "DECLARED", "feature_disable_flag": "DECLARED",
+            "disabled_features": "NOT_DECLARED", "read_only_policy": "NOT_DECLARED",
+            "system_config": "VERIFIED", "account_config": "VERIFIED",
+        }
+        rec = hostops._a10_readiness_receipt(17, self.SHA, observations=contradictory_obs)
+        for field in ("disabled_features", "read_only_policy", "system_config", "account_config"):
+            self.assertEqual(rec["a10_readiness"][field], "UNKNOWN")
+        unsafe_obs = {
+            "binary": "OBSERVED", "observed_binary_sha256": bin_sha,
+            "disabled_features": "UNSAFE", "read_only_policy": "UNSAFE",
+        }
+        rec2 = hostops._a10_readiness_receipt(17, self.SHA, observations=unsafe_obs)
+        self.assertEqual(rec2["a10_readiness"]["disabled_features"], "UNKNOWN")
+        self.assertEqual(rec2["a10_readiness"]["read_only_policy"], "UNKNOWN")
+
+    def test_r7c_emitted_python_receipts_pass_actual_protected_r7b_js_sanitizer(self):
+        """Run newly emitted R7c Python receipts through actual .github/workflows/issue-ingress.yml JS in Node."""
+        import os
+        import shutil
+        from ai_commerce.opportunity.core import models
+
+        node = shutil.which("node") or shutil.which("node.exe")
+        if not node and os.name == "nt" and os.environ.get("RUNNER_TEMP"):
+            runner_root = Path(os.environ["RUNNER_TEMP"]).parents[1]
+            for version in ("node24", "node20"):
+                candidate = runner_root / "externals" / version / "bin" / "node.exe"
+                if candidate.is_file():
+                    node = str(candidate)
+                    break
+        if not node:
+            self.skipTest("Node CLI unavailable: hosted Windows JS sanitizer verification required")
+        workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+        workflow = workflow.split("  hostops-d5-carrier:", 1)[0]
+        script = "\n".join(line[12:] if line.startswith("            ") else line
+                           for line in workflow.split("          script: |\n", 1)[1].splitlines())
+        encode = lambda x: json.dumps(x, ensure_ascii=True, separators=(",", ":"))
+
+        def rehash_public(rec):
+            cloned = copy.deepcopy(rec)
+            cloned["a10_readiness"].pop("public_observation_sha256", None)
+            digest = hashlib.sha256(
+                json.dumps(cloned, sort_keys=True, separators=(",", ":")).encode("ascii")
+            ).hexdigest()
+            cloned["a10_readiness"]["public_observation_sha256"] = digest
+            return cloned
+
+        sha = "f" * 40
+        full_exec_help = self.EXEC_HELP.replace(
+            b"      --json", b"      --ignore-user-config\n      --strict-config\n      --json"
+        )
+        missing_disable_help = full_exec_help.replace(
+            b"      --disable <FEATURE>", b"          --disable <FEATURE>"
+        )
+        _, rec_sys_conflict, _ = self._emit_r7c_public_receipt(
+            sha=sha, pin_effects=[nullcontext(Path("unused"))],
+        )
+        _, rec_sys_unsafe, _ = self._emit_r7c_public_receipt(
+            sha=sha, pin_effects=[OSError("reparse")],
+        )
+        _, rec_ro_not_declared, _ = self._emit_r7c_public_receipt(
+            sha=sha, exec_help=self.EXEC_HELP,
+        )
+        _, rec_disable_not_declared, _ = self._emit_r7c_public_receipt(
+            sha=sha, exec_help=missing_disable_help,
+        )
+        _, rec_unsafe_binary, _ = self._emit_r7c_public_receipt(
+            sha=sha, post_probe_drift=True,
+        )
+        _, rec_baseline_1251, _ = self._emit_r7c_public_receipt(
+            sha=sha, user_profile=r"C:\Users\operator",
+            pin_effects=[FileNotFoundError, FileNotFoundError, FileNotFoundError, nullcontext(Path("unused"))],
+        )
+        stale_iso = (datetime.now(timezone.utc) - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        stale_ev = models.make_codex_effective_config_evidence(
+            source_sha=sha, observed_at=stale_iso,
+            binary={"state": "OBSERVED", "sha256": "b" * 64, "version_status": "STABLE_SEMVER",
+                    "version": "0.170.0", "help_sha256": "c" * 64},
+            cli_declarations={
+                "root_help": "USAGE_OBSERVED", "root_flags": "DECLARED",
+                "exec_help": "USAGE_OBSERVED", "exec_flags": "DECLARED",
+                "config_override_flags": "DECLARED", "feature_disable_flag": "DECLARED",
+            },
+            system_config={"status": "CONFLICTING_POLICY_PRESENT",
+                           "basis": "KNOWN_SYSTEM_POLICY_FILE_PRESENT", "known_paths_checked": 1},
+            account_config={"status": "UNKNOWN", "basis": "REMOTE_ACCOUNT_POLICY_UNPROVABLE_OFFLINE"},
+            windows_boundary=True,
+        )
+        with patch.object(hostops, "_a10_collect_r7_internal_evidence", return_value=stale_ev):
+            _, rec_stale_downgraded = self._main(
+                event("read", self.OP, {}),
+                {**self._protected_env(), "GITHUB_SHA": sha, "GITHUB_WORKFLOW_SHA": sha},
+            )
+
+        base_ctx = {
+            "eventName": "issues",
+            "repo": {"owner": "trung-via", "repo": "ai-commerce"},
+            "issue": {"number": 17},
+            "sha": sha,
+            "payload": {
+                "action": "opened",
+                "sender": {"login": "trung-via"},
+                "issue": {
+                    "user": {"login": "trung-via"},
+                    "title": "[HOSTOPS READ] A10-O2b R7c readiness",
+                    "body": encode({"schema": hostops.SCHEMA, "operation": self.OP, "parameters": {}}),
+                },
+            },
+        }
+        cases = [
+            {"name": "r7c_system_conflict", "body": encode(rec_sys_conflict), "ctx": base_ctx,
+             "status": "HOLD", "code": "HOST_UNVERIFIED", "expected": rec_sys_conflict},
+            {"name": "r7c_system_unsafe", "body": encode(rec_sys_unsafe), "ctx": base_ctx,
+             "status": "HOLD", "code": "HOST_UNVERIFIED", "expected": rec_sys_unsafe},
+            {"name": "r7c_ro_not_declared", "body": encode(rec_ro_not_declared), "ctx": base_ctx,
+             "status": "HOLD", "code": "HOST_UNVERIFIED", "expected": rec_ro_not_declared},
+            {"name": "r7c_disable_not_declared", "body": encode(rec_disable_not_declared), "ctx": base_ctx,
+             "status": "HOLD", "code": "HOST_UNVERIFIED", "expected": rec_disable_not_declared},
+            {"name": "r7c_unsafe_binary", "body": encode(rec_unsafe_binary), "ctx": base_ctx,
+             "status": "HOLD", "code": "HOST_UNVERIFIED", "expected": rec_unsafe_binary},
+            {"name": "r7c_baseline_1251", "body": encode(rec_baseline_1251), "ctx": base_ctx,
+             "status": "HOLD", "code": "HOST_UNVERIFIED", "expected": rec_baseline_1251},
+            {"name": "r7c_stale_downgraded", "body": encode(rec_stale_downgraded), "ctx": base_ctx,
+             "status": "HOLD", "code": "HOST_UNVERIFIED", "expected": rec_stale_downgraded},
+        ]
+        # Negative tampered receipts must be BLOCKED by actual protected R7b JS sanitizer
+        for name, mutate in (
+            ("contradictory_disabled_not_declared", lambda r: r["a10_readiness"].__setitem__("disabled_features", "NOT_DECLARED")),
+            ("contradictory_ro_not_declared", lambda r: r["a10_readiness"].__setitem__("read_only_policy", "NOT_DECLARED")),
+            ("contradictory_disabled_unsafe", lambda r: r["a10_readiness"].__setitem__("disabled_features", "UNSAFE")),
+            ("contradictory_ro_unsafe", lambda r: r["a10_readiness"].__setitem__("read_only_policy", "UNSAFE")),
+            ("forged_system_verified", lambda r: r["a10_readiness"].__setitem__("system_config", "VERIFIED")),
+            ("forged_inference", lambda r: r["a10_readiness"].__setitem__("native_inference_executed", True)),
+        ):
+            bad = copy.deepcopy(rec_baseline_1251)
+            mutate(bad)
+            cases.append({"name": name, "body": encode(rehash_public(bad)), "ctx": base_ctx,
+                          "status": "BLOCKED", "code": "INVALID_PUBLIC_A10_READINESS_RECEIPT"})
+        bad_unsafe_cli = copy.deepcopy(rec_unsafe_binary)
+        bad_unsafe_cli["a10_readiness"]["version"] = "DIFFERS_FROM_SOURCE_VERSION"
+        cases.append({"name": "unsafe_binary_with_version", "body": encode(rehash_public(bad_unsafe_cli)),
+                      "ctx": base_ctx, "status": "BLOCKED", "code": "INVALID_PUBLIC_A10_READINESS_RECEIPT"})
+        wrong_owner_ctx = copy.deepcopy(base_ctx)
+        wrong_owner_ctx["payload"]["issue"]["user"]["login"] = "attacker"
+        cases.append({"name": "wrong_issue_owner", "body": encode(rec_sys_conflict), "ctx": wrong_owner_ctx,
+                      "status": "BLOCKED", "code": "INVALID_PUBLIC_A10_READINESS_RECEIPT"})
+        private_leak = {**rec_sys_conflict, "private_dump": "PRIVATE_SECRET"}
+        cases.append({"name": "private_bytes_leak", "body": encode(private_leak), "ctx": base_ctx,
+                      "status": "BLOCKED", "code": "INVALID_PUBLIC_A10_READINESS_RECEIPT"})
+
+        harness = r"""
+const fs = require('fs'), path = require('path'), vm = require('vm');
+const cases = JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
+const script = fs.readFileSync(process.argv[2],'utf8');
+(async () => {
+  for (const item of cases) {
+    fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'personal-hostops-result.json'),item.body,'utf8');
+    const comments = [];
+    const github = {rest:{issues:{createComment:async args => { comments.push(args.body); }}}};
+    await vm.runInNewContext('(async () => {\n'+script+'\n})()',
+      {require,process,context:item.ctx,github,Buffer});
+    if (comments.length !== 1 || !comments[0].startsWith('AI_COMMERCE_PERSONAL_HOSTOPS_RESULT_V1\n'))
+      throw new Error(item.name+': missing result');
+    const result = JSON.parse(comments[0].split('\n').slice(1).join('\n'));
+    if (result.status !== item.status || result.code !== item.code)
+      throw new Error(item.name+': unexpected '+JSON.stringify(result));
+    if (item.expected) require('assert').deepStrictEqual(result,item.expected,item.name+': changed receipt');
+    if (JSON.stringify(result).includes('PRIVATE_SECRET'))
+      throw new Error(item.name+': private data leak');
+  }
+  process.stdout.write('R7C_VERIFIED_CASES='+cases.length);
+})().catch(error => { console.error(error); process.exitCode=1; });
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            (path / "cases.json").write_text(encode(cases), encoding="utf-8")
+            (path / "workflow.js").write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [node, "-e", harness, str(path / "cases.json"), str(path / "workflow.js")],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=30, env={**os.environ, "RUNNER_TEMP": str(path)}, check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr[-3000:])
+        self.assertIn("R7C_VERIFIED_CASES=" + str(len(cases)), completed.stdout)
 
 
 class PersonalHostOpsContractTests(unittest.TestCase):

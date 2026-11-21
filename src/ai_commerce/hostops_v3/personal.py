@@ -4425,10 +4425,10 @@ _A10_CHECK_CODES = {
     "config_override_flags": ("DECLARED", "NOT_DECLARED"),
     "feature_disable_flag": ("DECLARED", "NOT_DECLARED"),
     "catalog": ("DEFAULT_CACHE_PRESENT", "DEFAULT_CACHE_ABSENT"),
-    "system_config": (),
-    "account_config": (),
-    "disabled_features": (),
-    "read_only_policy": (),
+    "system_config": ("CONFLICTING_POLICY_PRESENT", "UNSAFE"),
+    "account_config": ("MISSING_PRIVATE_CONFIG", "CONFLICTING_PRIVATE_CONFIG", "UNSAFE"),
+    "disabled_features": ("NOT_DECLARED", "UNSAFE"),
+    "read_only_policy": ("NOT_DECLARED", "UNSAFE"),
 }
 _A10_HELP_OPTION = re.compile(r"(?m)^ {2,8}(?:-[A-Za-z], )?(--[a-z][a-z0-9-]*)(?=[ \t=,]|$)")
 _A10_CONFIG_FLAGS = frozenset({"--config", "--ignore-user-config", "--strict-config"})
@@ -4450,7 +4450,7 @@ def _a10_readiness_receipt(issue_number, source_sha=None, *, observations=None):
     if source_sha is not None or observations is not None:
         if type(source_sha) is not str or not re.fullmatch(r"[0-9a-f]{40}", source_sha):
             deny("PROTECTED_HOSTOPS_ONLY")
-    observed = observations if observations is not None else {}
+    observed = observations if type(observations) is dict else {}
     checks = dict.fromkeys(_A10_CHECK_CODES, "UNKNOWN")
     for field, allowed in _A10_CHECK_CODES.items():
         value = observed.get(field)
@@ -4462,6 +4462,25 @@ def _a10_readiness_receipt(issue_number, source_sha=None, *, observations=None):
         binary_sha = None
         if checks["binary"] == "OBSERVED":
             checks["binary"] = "UNKNOWN"
+    if checks["binary"] != "OBSERVED":
+        for field in ("version", "root_help", "exec_help", "root_flags", "exec_flags",
+                      "config_override_flags", "feature_disable_flag"):
+            checks[field] = "UNKNOWN"
+    if checks["root_help"] != "USAGE_OBSERVED":
+        checks["root_flags"] = "UNKNOWN"
+    if checks["exec_help"] != "USAGE_OBSERVED":
+        for field in ("exec_flags", "config_override_flags", "feature_disable_flag"):
+            checks[field] = "UNKNOWN"
+    if checks["disabled_features"] == "NOT_DECLARED" and checks["feature_disable_flag"] != "NOT_DECLARED":
+        checks["disabled_features"] = "UNKNOWN"
+    if (checks["read_only_policy"] == "NOT_DECLARED"
+            and checks["exec_flags"] != "NOT_DECLARED"
+            and checks["config_override_flags"] != "NOT_DECLARED"):
+        checks["read_only_policy"] = "UNKNOWN"
+    if checks["disabled_features"] == "UNSAFE" and checks["binary"] != "UNSAFE":
+        checks["disabled_features"] = "UNKNOWN"
+    if checks["read_only_policy"] == "UNSAFE" and checks["binary"] != "UNSAFE":
+        checks["read_only_policy"] = "UNKNOWN"
 
     state: _A10ReadinessState
     if observations is None:
@@ -4624,10 +4643,11 @@ def _a10_is_native_executable(path):
     return bool(binary_type(str(path), ctypes.byref(kind))) and kind.value in (0, 6)
 
 
-def _a10_default_catalog_state():
+def _a10_default_catalog_state(env=None):
     # Probe attributes of this one conventional cache on the runner account.
     # Effective CODEX_HOME, cache bytes, config and auth are all out of scope.
-    profile = _a10_local_path(os.environ.get("USERPROFILE"))
+    current_env = os.environ if env is None else env
+    profile = _a10_local_path(current_env.get("USERPROFILE"))
     if profile is not None:
         try:
             with _a10_pin_local_path(profile / ".codex/models_cache.json"):
@@ -4841,15 +4861,93 @@ def _a10_collect_r7_internal_evidence(source_sha, *, as_of=None, env=None, max_a
     )
 
 
-def _a10_project_public_observations(evidence, *, catalog="UNKNOWN"):
-    """Downgrade R7a internal evidence to backwards-compatible A10CodexHostReadiness.v1 observations."""
+def _a10_project_public_observations(
+    evidence,
+    *,
+    catalog="UNKNOWN",
+    source_sha=None,
+    as_of=None,
+    binary_sha256=None,
+    version=None,
+    help_sha256=None,
+    policy_sha256=None,
+    host_verification_sha256=None,
+):
+    """Validate R7a internal evidence and project negative-only public observations."""
     from ai_commerce.opportunity.core import models
 
-    validated = models.validate_codex_effective_config_evidence(evidence)
+    binding_requested = any(
+        value is not None
+        for value in (source_sha, as_of, binary_sha256, version, help_sha256, policy_sha256, host_verification_sha256)
+    )
+    if binding_requested:
+        if type(source_sha) is not str or re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+            raise models.SignalValidationError("CODEX_EVIDENCE_SOURCE_MISMATCH")
+        verify_as_of = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if as_of is None else as_of
+        validated = models.verify_codex_effective_config_binding(
+            evidence,
+            source_sha=source_sha,
+            as_of=verify_as_of,
+            binary_sha256=binary_sha256,
+            version=version,
+            help_sha256=help_sha256,
+            policy_sha256=policy_sha256,
+            host_verification_sha256=host_verification_sha256,
+        )
+    else:
+        validated = models.validate_codex_effective_config_evidence(evidence)
+        expected_policy = models.native_codex_policy_contract()["policy_sha256"]
+        if validated["policy_sha256"] != expected_policy:
+            raise models.SignalValidationError("CODEX_EVIDENCE_POLICY_MISMATCH")
+
     binary = validated["binary"]
-    observations = {"binary": binary["state"]}
+    cli = validated["cli_declarations"]
+    layers = validated["layers"]
+    observations = {}
+    if binary["state"] in _A10_CHECK_CODES["binary"]:
+        observations["binary"] = binary["state"]
+
+    sys_layer = layers["system_config"]
+    if (sys_layer["status"] == "CONFLICTING_POLICY_PRESENT"
+            and sys_layer["basis"] == "KNOWN_SYSTEM_POLICY_FILE_PRESENT"
+            and sys_layer["known_paths_checked"] >= 1):
+        observations["system_config"] = "CONFLICTING_POLICY_PRESENT"
+    elif (sys_layer["status"] == "UNSAFE"
+            and sys_layer["basis"] == "SYSTEM_PATH_UNSAFE"
+            and sys_layer["known_paths_checked"] >= 1):
+        observations["system_config"] = "UNSAFE"
+
+    acct_layer = layers["account_config"]
+    if acct_layer in (
+        {"status": "MISSING_PRIVATE_CONFIG", "basis": "DEDICATED_HOME_AUTH_ABSENT"},
+        {"status": "CONFLICTING_PRIVATE_CONFIG", "basis": "DEDICATED_HOME_FORBIDDEN_CONFIG_PRESENT"},
+        {"status": "UNSAFE", "basis": "DEDICATED_HOME_UNSAFE"},
+    ):
+        observations["account_config"] = acct_layer["status"]
+
+    disabled_layer = layers["disabled_features"]
+    if (disabled_layer == {"status": "NOT_DECLARED", "basis": "DISABLE_FLAG_NOT_DECLARED"}
+            and binary["state"] == "OBSERVED"
+            and cli["exec_help"] == "USAGE_OBSERVED"
+            and cli["feature_disable_flag"] == "NOT_DECLARED"):
+        observations["disabled_features"] = "NOT_DECLARED"
+    elif (disabled_layer == {"status": "UNSAFE", "basis": "BINARY_OR_PROBE_UNSAFE"}
+            and binary["state"] == "UNSAFE"):
+        observations["disabled_features"] = "UNSAFE"
+
+    ro_layer = layers["read_only_policy"]
+    if (ro_layer == {"status": "NOT_DECLARED", "basis": "SANDBOX_OR_CONFIG_FLAGS_NOT_DECLARED"}
+            and binary["state"] == "OBSERVED"
+            and cli["exec_help"] == "USAGE_OBSERVED"
+            and (cli["exec_flags"] == "NOT_DECLARED" or cli["config_override_flags"] == "NOT_DECLARED")):
+        observations["read_only_policy"] = "NOT_DECLARED"
+    elif (ro_layer == {"status": "UNSAFE", "basis": "BINARY_OR_PROBE_UNSAFE"}
+            and binary["state"] == "UNSAFE"):
+        observations["read_only_policy"] = "UNSAFE"
+
     if binary["state"] != "OBSERVED":
         return observations
+
     observations["observed_binary_sha256"] = binary["sha256"]
     observations["catalog"] = catalog if catalog in _A10_CHECK_CODES["catalog"] else "UNKNOWN"
     if binary["version_status"] == "STABLE_SEMVER":
@@ -4859,11 +4957,44 @@ def _a10_project_public_observations(evidence, *, catalog="UNKNOWN"):
         )
     elif binary["version_status"] == "PRERELEASE_UNSUPPORTED":
         observations["version"] = "DIFFERS_FROM_SOURCE_VERSION"
-    for field, value in validated["cli_declarations"].items():
+    for field, value in cli.items():
         if value != "UNKNOWN":
             observations[field] = value
-    # R7a two-phase contract: these four layers stay UNKNOWN in outward GitHub receipts until R7b.
     return observations
+
+
+def _a10_collect_protected_observations(source_sha, *, as_of=None, env=None):
+    """Collect R7a evidence once, verify binding, and project negative-only public fields."""
+    from ai_commerce.opportunity.core import models
+
+    try:
+        kwargs = {}
+        if as_of is not None:
+            kwargs["as_of"] = as_of
+        if env is not None:
+            kwargs["env"] = env
+        evidence = _a10_collect_r7_internal_evidence(source_sha, **kwargs)
+        verify_as_of = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if as_of is None else as_of
+        policy_sha = models.native_codex_policy_contract()["policy_sha256"]
+        validated = models.verify_codex_effective_config_binding(
+            evidence, source_sha=source_sha, as_of=verify_as_of, policy_sha256=policy_sha,
+        )
+        binary = validated["binary"]
+        catalog = _a10_default_catalog_state(env) if binary["state"] == "OBSERVED" else "UNKNOWN"
+        return _a10_project_public_observations(
+            validated,
+            catalog=catalog,
+            source_sha=source_sha,
+            as_of=verify_as_of,
+            binary_sha256=binary["sha256"] if binary["state"] == "OBSERVED" else None,
+            version=binary["version"] if binary["version_status"] == "STABLE_SEMVER" else None,
+            help_sha256=binary["help_sha256"],
+            policy_sha256=policy_sha,
+            host_verification_sha256=validated["evidence_sha256"],
+        )
+    except Exception:
+        # Downgrade invalid, stale, drifted, or unprovable evidence to UNKNOWN/HOLD.
+        return {}
 
 
 def _a10_collect_readiness():
@@ -4893,7 +5024,9 @@ def _protected_a10_readiness(issue_number):
     if ("PYTEST_CURRENT_TEST" in os.environ
             or os.environ.get("HOSTOPS_A10_READINESS_DISPATCH") != _A10_READINESS_SCHEMA):
         return _a10_readiness_receipt(issue_number, sha)
-    return _a10_readiness_receipt(issue_number, sha, observations=_a10_collect_readiness())
+    return _a10_readiness_receipt(
+        issue_number, sha, observations=_a10_collect_protected_observations(sha),
+    )
 
 
 def perform(request):
