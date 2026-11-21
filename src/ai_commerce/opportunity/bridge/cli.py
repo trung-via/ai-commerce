@@ -27,9 +27,15 @@ next_step and exact provenance. Resume with identical job bytes/semantic manifes
 job_id, source pin, execution mode and state directory. Default decision_mode is
 autonomous: offline uses A10EligibleFallback.v1, execute requires an authenticated
 structured model chooser. No selection file, Human observation or review is
-required. Completion is READY_FOR_A03_DISPATCH. The callable's optional trusted
-production owner can persist and dispatch that success to local A03; ordinary
-CLI invocations retain their existing producer-only behavior.
+required. Completion is READY_FOR_A03_DISPATCH. To opt in to local A03 brief
+intake, add --handoff-a03 --handoff-grant GRANT.json. GRANT.json is a trusted
+runner-supplied LocalAuthorization with journey_id, cycle_id, job_id,
+source_sha, authorization_ref, route_id="a10-m05-to-a03" and
+scope="SOURCE_ONLY_LOCAL". The A10 --result still holds only the producer event.
+The CLI prints a separate dispatch outcome backed by the existing production
+journal and CreativeStore in STATE_DIR/.production. For dispatch-only recovery,
+use opportunity resume-a03 with the same --handoff-grant, --source-sha and
+--state-dir. An unresolved reservation is reported as UNKNOWN (exit 4).
 Optional decision_mode:"manual" accepts a separate A10OpportunitySelection.v1
 using selection_template and a trusted runner --human-identity attestation
 {actor:"HUMAN",subject,selection_sha256}. Identity must come from an actual user
@@ -40,7 +46,8 @@ via --attended-output. No UI/CDP Send exists. A reserved/uncertain invocation is
 never replayed. Results and state receipts are immutable; use a fresh --result
 filename for each changed event (an identical replay may reuse its filename).
 The authorized trigger must retain the same local state directory between runs.
-Exit codes: 0 PLAN/COMPLETE, 3 WAIT, 2 FAIL or rejected transport input.
+Exit codes: 0 PLAN/COMPLETE or successful intake, 2 FAIL or blocked input,
+3 WAIT or held dispatch, 4 UNKNOWN local dispatch.
 
 CLI capabilities are trusted operator files, not fields in an untrusted job:
 --capability JSON follows run_ai_research's exact-argv contract. Real invocations
@@ -155,6 +162,12 @@ def add_parser(commands) -> None:
     automate.add_argument("--human-identity", type=Path, help="Trusted actual user identity bound to the exact manual selection")
     automate.add_argument("--capability", type=Path, help="Trusted operator CLI capability; never from model output")
     automate.add_argument("--attended-output", type=Path, help="Manually returned ChatGPT structured output; no automated Send")
+    automate.add_argument("--handoff-a03", action="store_true", help="Opt in to SOURCE_ONLY_LOCAL A03 brief intake")
+    automate.add_argument("--handoff-grant", type=Path, help="Independent trusted LocalAuthorization JSON")
+    resume = operations.add_parser("resume-a03", help="Reconcile existing local A10 to A03 dispatch")
+    resume.add_argument("--handoff-grant", type=Path, required=True, help="Independent trusted LocalAuthorization JSON")
+    resume.add_argument("--source-sha", required=True, help="Independent authorized runner checkout SHA pin")
+    resume.add_argument("--state-dir", type=Path, required=True, help="Same trusted local state as the initial handoff")
 
 
 def _json(path: Path, *, limit: int = MAX_RECORD_BYTES) -> dict:
@@ -205,18 +218,12 @@ def _audience(args) -> dict | list:
 def execute(args):
     op = args.opportunity_operation
     if op == "automate":
+        if getattr(args, "handoff_a03", False) or getattr(args, "handoff_grant", None) is not None:
+            return _dispatch_a03(args)
         manifest_path = local_path(args.manifest)
-        result = run_automation(
-            _json(manifest_path, limit=MAX_JOB_BYTES), base_dir=manifest_path.parent,
-            source_sha=args.source_sha, state_dir=args.state_dir, mode=args.mode,
-            permissions=args.allow_effect,
-            selection=_json(args.selection) if args.selection else None,
-            human_identity=_json(args.human_identity) if args.human_identity else None,
-            capability=_json(args.capability, limit=MAX_JOB_BYTES) if args.capability else None,
-            attended_output=read_local(args.attended_output, limit=AI_MAX_BYTES) if args.attended_output else None,
-        )
-        _write_job_record(args.result, result)
-        return result
+        return _execute_automation(args, manifest_path, _json(manifest_path, limit=MAX_JOB_BYTES))
+    if op == "resume-a03":
+        return _dispatch_a03(args)
     if op == "import":
         return SignalLedger(args.ledger).import_file(
             args.file, source_snapshot=load_source_snapshot(str(args.snapshot)),
@@ -268,6 +275,67 @@ def execute(args):
     raise CreativeBridgeError("OPPORTUNITY_OPERATION_UNKNOWN")
 
 
+def _execute_automation(args, manifest_path: Path, manifest: dict, *, production=None) -> dict:
+    return run_automation(
+        manifest, base_dir=manifest_path.parent, source_sha=args.source_sha,
+        state_dir=args.state_dir, mode=args.mode, permissions=args.allow_effect,
+        selection=_json(args.selection) if args.selection else None,
+        human_identity=_json(args.human_identity) if args.human_identity else None,
+        capability=_json(args.capability, limit=MAX_JOB_BYTES) if args.capability else None,
+        attended_output=read_local(args.attended_output, limit=AI_MAX_BYTES) if args.attended_output else None,
+        production=production, result_path=args.result,
+    )
+
+
+def _dispatch_a03(args) -> dict:
+    from ai_commerce.production_orchestration import (
+        LocalAuthorization, OrchestrationError, ProductionPipelineOrchestrator,
+    )
+
+    response = {"schema_version": "A10A03DispatchResult.v1", "scope": "SOURCE_ONLY_LOCAL",
+                "status": "BLOCKED", "reason": None, "producer_status": None,
+                "accepted_consumer": None, "completed": None, "event": None}
+    resume = args.opportunity_operation == "resume-a03"
+    try:
+        require(resume or args.handoff_a03, "HANDOFF_OPT_IN_REQUIRED")
+        require(args.handoff_grant is not None, "LOCAL_AUTHORIZATION_REQUIRED")
+        grant = LocalAuthorization.from_dict(_json(args.handoff_grant, limit=MAX_JOB_BYTES))
+        require(grant.route_id == "a10-m05-to-a03", "LOCAL_ROUTE_MISMATCH")
+        require(grant.source_sha == args.source_sha, "SOURCE_SHA_MISMATCH")
+        require(_valid_job_id(grant.job_id), "JOB_ID_INVALID")
+        production_dir = local_path(local_path(args.state_dir) / ".production")
+        owner = ProductionPipelineOrchestrator(state_dir=production_dir, source_sha=args.source_sha,
+                                               local_authorization=grant)
+        if resume:
+            attempts = owner.resume_local()
+            if not attempts:
+                return {**response, "status": "HOLD", "reason": "COMPLETED_NOT_FOUND"}
+            downstream, = attempts
+        else:
+            manifest_path = local_path(args.manifest)
+            manifest = _json(manifest_path, limit=MAX_JOB_BYTES)
+            require(manifest.get("job_id") == grant.job_id, "JOB_ID_MISMATCH")
+            require(manifest.get("source_sha") == grant.source_sha, "JOB_SOURCE_SHA_MISMATCH")
+            require(not local_path(args.result).is_relative_to(production_dir), "HANDOFF_OUTPUT_OVERLAPS_STATE")
+            producer = _execute_automation(args, manifest_path, manifest, production=owner)
+            response["producer_status"] = producer["status"]
+            downstream = owner.last_result
+            if downstream is None:
+                status = {"WAIT": "HOLD", "FAIL": "BLOCKED"}.get(producer["status"], "NOT_DISPATCHED")
+                return {**response, "status": status, "reason": producer["reason"]}
+    except OpportunityError as exc:
+        return {**response, "reason": exc.code}
+    except OrchestrationError as exc:
+        return {**response, "reason": str(exc)}
+    except (OSError, ValueError, TypeError, KeyError, RecursionError):
+        return {**response, "reason": "HANDOFF_INPUT_OR_STORAGE_INVALID"}
+
+    return {**response, "status": downstream.status, "reason": downstream.reason,
+            "accepted_consumer": downstream.accepted_consumer,
+            "completed": downstream.completed.to_dict() if downstream.completed else None,
+            "event": downstream.event.to_dict() if downstream.event else None}
+
+
 def run(args) -> int:
     try:
         result = execute(args)
@@ -279,6 +347,15 @@ def run(args) -> int:
         return 2
     # JSON ASCII escaping keeps exact Unicode portable across Windows consoles.
     print(json.dumps(result, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False))
+    if isinstance(result, dict) and result.get("schema_version") == "A10A03DispatchResult.v1":
+        status = result["status"]
+        if status == "UNKNOWN":
+            return 4
+        if status in ("BLOCKED", "FAILED"):
+            return 2
+        if status in ("HOLD", "PENDING", "RUNNING", "RETRY_SAFE"):
+            return 3
+        return 0
     if args.opportunity_operation == "automate":
         return 2 if result["status"] == "FAIL" else 3 if result["status"] == "WAIT" else 0
     return 0
@@ -293,14 +370,17 @@ def _job_object(value, required: set[str], optional: set[str] = frozenset()) -> 
     require(isinstance(value, dict) and required <= set(value) <= required | optional, "JOB_MANIFEST_INVALID")
 
 
+def _valid_job_id(value) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}", value) is not None
+
+
 def validate_automation_manifest(manifest: dict) -> dict:
     """Strict, bounded transport envelope; embedded records use their A10 owners."""
     require(len(canonical_bytes(manifest)) <= MAX_JOB_BYTES, "JOB_MANIFEST_TOO_LARGE")
     _job_object(manifest, {"schema_version", "job_id", "source_sha", "topic", "as_of", "sources",
                            "provider", "ai_assessment", "allowed_effects"}, {"audience", "decision_mode"})
     require(manifest["schema_version"] == "A10AutomationJob.v1", "JOB_MANIFEST_VERSION")
-    require(isinstance(manifest["job_id"], str)
-            and re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}", manifest["job_id"]) is not None, "JOB_ID_INVALID")
+    require(_valid_job_id(manifest["job_id"]), "JOB_ID_INVALID")
     # Reuse existing clock validation without writing any source or proposal.
     propose_opportunities(as_of=manifest["as_of"])
     require(isinstance(manifest["source_sha"], str)
@@ -361,7 +441,7 @@ def run_automation(manifest: dict, *, base_dir: Path, source_sha: str, state_dir
                    mode: str, permissions=(), selection: dict | None = None,
                    capability: dict | None = None, runner=None,
                    attended_output: bytes | None = None, human_identity: dict | None = None,
-                   production=None) -> dict:
+                   production=None, result_path: Path | None = None) -> dict:
     """Run genuine M01-M05, then optionally hand its committed result to P1.
 
     ``production`` is a caller-owned ProductionPipelineOrchestrator with an
@@ -369,6 +449,7 @@ def run_automation(manifest: dict, *, base_dir: Path, source_sha: str, state_dir
     Its typed ``last_result`` reports downstream state separately from the
     immutable A10 result. A downstream failure cannot rewrite producer success.
     No completion event is offered on WAIT/FAIL/no-suitable/provider uncertainty.
+    A requested immutable transport result must be written before delivery.
     """
     if production is not None:
         from ai_commerce.production_orchestration import ProductionPipelineOrchestrator
@@ -378,6 +459,8 @@ def run_automation(manifest: dict, *, base_dir: Path, source_sha: str, state_dir
     result = _run_automation(manifest, base_dir=base_dir, source_sha=source_sha, state_dir=state_dir,
         mode=mode, permissions=permissions, selection=selection, capability=capability, runner=runner,
         attended_output=attended_output, human_identity=human_identity)
+    if result_path is not None:
+        _write_job_record(result_path, result)
     if production is not None and (result["status"], result["reason"], result["next_step"]) == (
             "COMPLETE", "A03_BRIEF_CREATED", "READY_FOR_A03_DISPATCH"):
         job_dir = local_path(state_dir) / result["job_id"]
