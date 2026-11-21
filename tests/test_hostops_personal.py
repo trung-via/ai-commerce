@@ -1,11 +1,13 @@
 """Portable source tests; live effect requires existing AI Commerce Windows runner."""
 import asyncio
+import base64
 import builtins
 import importlib.util
 import copy
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 import hashlib
+import io
 import json
 from pathlib import Path, PureWindowsPath
 import re
@@ -15,6 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, call, mock_open, patch
 import tempfile
 import unittest
+from urllib.parse import parse_qs, urlsplit
 
 MODULE = Path(__file__).resolve().parents[1] / "src" / "ai_commerce" / "hostops_v3" / "personal.py"
 spec = importlib.util.spec_from_file_location("hostops_personal", MODULE)
@@ -4280,8 +4283,9 @@ class HostOpsExecV1Tests(unittest.TestCase):
                  "PROTECTED_WORKFLOW_DISPATCH_DISABLED"),
             ):
                 with patch.object(hostops, "os", SimpleNamespace(name="nt", environ=bad_env)):
-                    with self.assertRaisesRegex(hostops.Denied, code):
-                        hostops._default_hostops_exec_v1_runner("Get-Date", 5, 1024)
+                    with patch.object(hostops, "sys", SimpleNamespace(modules={})):
+                        with self.assertRaisesRegex(hostops.Denied, code):
+                            hostops._default_hostops_exec_v1_runner("Get-Date", 5, 1024)
             native.assert_not_called()
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -4297,14 +4301,15 @@ class HostOpsExecV1Tests(unittest.TestCase):
             event_file.write_text(json.dumps(self._issue_event(req, private=False)), encoding="utf-8")
             out_file = root / "receipt.json"
 
-            # Unenrolled CLI call fails closed with DISABLED / BLOCKED_NOT_ENROLLED.
-            rc = hostops.hostops_exec_v1_cli(
-                ["--action", "execute", "--event", str(event_file), "--output", str(out_file)],
-                env={"RUNNER_NAME": "AI-COMMERCE-EF02-02"},
-            )
+            # Source CI is refused before output paths, enrollment or the event are touched.
+            with redirect_stdout(io.StringIO()) as stdout:
+                rc = hostops.hostops_exec_v1_cli(
+                    ["--action", "execute", "--event", str(event_file), "--output", str(out_file)],
+                    env={"RUNNER_NAME": "AI-COMMERCE-EF02-02"},
+                )
             self.assertEqual(rc, 2)
-            unenrolled_receipt = json.loads(out_file.read_text(encoding="utf-8"))
-            self.assertEqual((unenrolled_receipt["status"], unenrolled_receipt["code"]), ("DISABLED", "BLOCKED_NOT_ENROLLED"))
+            self.assertEqual(json.loads(stdout.getvalue())["code"], "SOURCE_CI_EXECUTION_FORBIDDEN")
+            self.assertFalse(out_file.exists())
 
             # GitHub Actions without protected dispatch flag fails closed with DISABLED.
             no_dispatch_env = self._protected_actions_env(HOSTOPS_EXEC_V1_PROTECTED_DISPATCH="OFF")
@@ -4330,6 +4335,7 @@ class HostOpsExecV1Tests(unittest.TestCase):
 
             # Future protected workflow env + enrolled broker + valid HMAC plans and executes cleanly.
             dispatch_env = self._protected_actions_env(HOSTOPS_EXEC_V1_AUTH_TOKEN=token)
+            source = self.enterContext(patch.object(hostops, "_exec_v1_verify_source"))
             runner = Mock(return_value=hostops.HostOpsExecV1ProcessResult(0, b"2026-11-20T10:00:00Z", b""))
             ready_broker = hostops.HostOpsExecV1Broker(
                 enrollment=enrollment,
@@ -4357,7 +4363,577 @@ class HostOpsExecV1Tests(unittest.TestCase):
             done = json.loads(out_file.read_text(encoding="utf-8"))
             self.assertEqual((done["status"], done["code"]), ("EXECUTED", "EXECUTION_COMPLETED"))
             self.assertEqual(done["issue_number"], 1201)
+            self.assertEqual(source.call_args_list, [call(self.SHA, enrollment_sha=self.SHA)] * 2)
             runner.assert_called_once_with("Get-Date -Format o", 30, hostops.HOSTOPS_EXEC_V1_MAX_OUTPUT_BYTES)
+
+    def _exec_cli_receipt(self, argv, *, via_main=False, **kwargs):
+        with redirect_stdout(io.StringIO()) as stdout, redirect_stderr(io.StringIO()) as stderr:
+            if via_main:
+                with patch.object(hostops.sys, "argv", ["personal.py", "--hostops-exec-v1", *argv]):
+                    code = hostops.main()
+            else:
+                code = hostops.hostops_exec_v1_cli(argv, **kwargs)
+        self.assertEqual(stderr.getvalue(), "")
+        receipt = hostops.validate_hostops_exec_v1_receipt(json.loads(stdout.getvalue()))
+        self.assertEqual(stdout.getvalue(), hostops._exec_v1_canonical(receipt).decode("ascii") + "\n")
+        return code, receipt
+
+    def test_native_runtime_disregards_spoofed_token_and_runner_environment(self):
+        env = self._protected_actions_env(USER_SID=self.SID, SESSIONNAME="Console", HOSTOPS_ELEVATED="false")
+        sid = self.SID
+        with (patch.object(hostops, "os", SimpleNamespace(name="nt", environ=env)),
+              patch.object(hostops.sys, "version_info", (3, 14)),
+              patch.object(hostops, "_exec_v1_source_ci", return_value=False),
+              patch.object(hostops, "_exec_v1_interactive_token", return_value=(4, False, sid, sid)) as token,
+              patch.object(hostops, "_exec_v1_runner_lineage", return_value=hostops.HOSTOPS_EXEC_V1_RUNNER_NAME) as lineage):
+            ctx = hostops._default_hostops_exec_v1_runtime(env)
+            hostops._verify_hostops_exec_v1_runtime(ctx, expected_owner_sid=sid, require_protected_workflow=True)
+            lineage.assert_called_once_with(4, sid)
+
+            for facts, code in (
+                ((0, False, sid, sid), "WRONG_SESSION_OR_ELEVATED"),
+                ((4, True, sid, sid), "WRONG_SESSION_OR_ELEVATED"),
+                ((4, False, sid, sid + "9"), "OWNER_SID_MISMATCH"),
+                ((4, False, "", ""), "OWNER_SID_MISMATCH"),
+            ):
+                with self.subTest(facts=facts), self.assertRaisesRegex(hostops.Denied, code):
+                    token.return_value = facts
+                    hostops._default_hostops_exec_v1_runtime(env)
+            token.side_effect = OSError("native token required")
+            with self.assertRaisesRegex(hostops.Denied, "PROTECTED_HOSTOPS_ONLY"):
+                hostops._default_hostops_exec_v1_runtime(env)
+            token.side_effect = None
+            token.return_value = (4, False, sid, sid)
+            lineage.return_value = "OTHER"
+            with self.assertRaisesRegex(hostops.Denied, "WRONG_RUNNER_FORBIDDEN"):
+                hostops._verify_hostops_exec_v1_runtime(hostops._default_hostops_exec_v1_runtime(env),
+                                                       require_protected_workflow=True)
+            with self.assertRaisesRegex(hostops.Denied, "SOURCE_CI_EXECUTION_FORBIDDEN"):
+                hostops._default_hostops_exec_v1_runtime({})
+
+    def test_native_enrollment_staging_dispatch_and_revocation(self):
+        from ai_commerce.remote import local_completion_handoff as private_acl
+
+        key = bytes(range(1, 33))
+        script = "Write-Output 'private-é'\r\n".encode("utf-8")
+        later_sha = "b" * 40
+        rotated_sha = "c" * 40
+        active_head = self.SHA
+        env = self._protected_actions_env(GITHUB_SHA=later_sha, GITHUB_WORKFLOW_SHA=later_sha)
+        approved = b"# enrolled source\n"
+        rotated = b"# reviewed upgrade\n"
+        revisions = {self.SHA: approved, later_sha: approved, rotated_sha: rotated}
+
+        def read_source(git_dir, sha, *, head=False):
+            self.assertEqual(git_dir, workspace / ".git")
+            selected = active_head if head else sha
+            if (sha is not None and selected != sha) or selected not in revisions:
+                hostops.deny("SOURCE_REVISION_MISMATCH")
+            return selected, revisions[selected]
+
+        state = self._runtime(env={})
+        with (tempfile.TemporaryDirectory() as tmp,
+              patch.object(hostops, "_exec_v1_source_ci", return_value=False),
+              patch.object(hostops, "_default_hostops_exec_v1_runtime", return_value=state) as runtime,
+              patch.object(hostops, "_exec_v1_pinned_source", side_effect=read_source) as source,
+              patch.object(hostops, "_exec_v1_https_read", side_effect=OSError(11001, "DNS offline")) as network,
+              patch.object(hostops, "_exec_v1_check_oidc") as oidc,
+              patch.object(hostops, "_default_hostops_exec_v1_runner", return_value=hostops.HostOpsExecV1ProcessResult(
+                  0, b"private output", b"")) as runner,
+              patch.object(hostops.secrets, "token_bytes", return_value=key) as random_key,
+              patch.object(hostops.secrets, "token_hex", return_value="a" * 32) as random_enrollment_id,
+              patch.object(private_acl, "_windows_acl", return_value=(self.SID, (("allow", self.SID),))) as acl):
+            root = Path(tmp) / "private"
+            workspace = Path(tmp) / "workspace"
+            (workspace / ".git/objects").mkdir(parents=True)
+            module = workspace / hostops._EXEC_V1_SOURCE_PATH
+            module.parent.mkdir(parents=True)
+            module.write_bytes(approved.replace(b"\n", b"\r\n"))
+            with (patch.object(hostops, "_exec_v1_native_state_root", return_value=root),
+                  patch.object(hostops, "__file__", str(module)),
+                  patch.object(hostops.sys, "stdin", SimpleNamespace(isatty=lambda: True))):
+                # Enrollment is only available when stdout is also attended.
+                rc, result = self._exec_cli_receipt(["--action", "enroll", "--source-sha", self.SHA], env={})
+                self.assertEqual((rc, result["code"]), (2, "ATTENDED_OWNER_REQUIRED"))
+                self.assertFalse(root.exists())
+
+                def attended(action, extra=(), data=None):
+                    output = io.StringIO()
+                    stdin = SimpleNamespace(isatty=lambda: data is None, buffer=io.BytesIO(data or b""))
+                    with redirect_stdout(output), patch.object(hostops.sys, "stdin", stdin):
+                        with patch.object(output, "isatty", return_value=True):
+                            rc = hostops.hostops_exec_v1_cli(["--action", action, *extra], env={})
+                    return rc, hostops.validate_hostops_exec_v1_receipt(json.loads(output.getvalue()))
+
+                rc, receipt = attended("enroll", ["--source-sha", self.SHA])
+                self.assertEqual((rc, receipt["code"]), (0, "ENROLLMENT_RECORDED"))
+                self.assertNotIn(str(root), json.dumps(receipt))
+                random_key.assert_called_once_with(32)
+                key_path = root / hostops._EXEC_V1_KEY_FILENAME
+                record = root / hostops.HOSTOPS_EXEC_V1_ENROLLMENT_FILENAME
+                self.assertEqual(key_path.read_bytes(), key)
+                original_record = record.read_bytes()
+                self.assertNotIn(key.hex().encode("ascii"), original_record)
+                self.assertEqual(attended("enroll", ["--source-sha", self.SHA])[1]["code"], "ALREADY_ENROLLED_NO_OVERWRITE")
+                random_key.assert_called_once_with(32)
+                random_enrollment_id.assert_called_once_with(16)
+
+                self.assertEqual(attended("stage", data=b"\xff")[1]["code"], "PAYLOAD_OVERSIZED_OR_INVALID")
+                rc, staged = attended("stage", data=script)
+                digest = hashlib.sha256(script).hexdigest()
+                self.assertEqual((rc, staged["code"], staged["script_sha256"]), (0, "PAYLOAD_STAGED", digest))
+                self.assertNotIn("private-", json.dumps(staged))
+                self.assertEqual(attended("stage", data=script)[1]["code"], "PAYLOAD_ALREADY_STAGED")
+
+                request = hostops.build_hostops_exec_v1_request(job_id="job-native-001", nonce="f" * 32, script_sha256=digest)
+                event_file = Path(tmp) / "event.json"
+                event_file.write_text(json.dumps(self._issue_event(request)), encoding="utf-8")
+                env["GITHUB_EVENT_PATH"] = str(event_file)
+                active_head = later_sha
+                runtime.return_value = self._runtime(env=env)
+                with patch.object(hostops, "_exec_v1_event_path", return_value=event_file) as checked_path:
+                    source.reset_mock()
+                    rc, plan = self._exec_cli_receipt(["--action", "plan"], env=env)
+                    self.assertEqual((rc, plan["code"], plan["source_sha"]), (0, "READY_TO_EXECUTE", self.SHA))
+                    runner.assert_not_called()
+                    checked_path.assert_called_once_with(str(event_file), runtime.return_value)
+                    oidc.assert_called_once_with(env, request["request_digest"], action="plan")
+                    self.assertEqual(
+                        source.call_args_list,
+                        [call(workspace / ".git", later_sha, head=True), call(workspace / ".git", self.SHA)],
+                    )
+
+                    journal = hostops.HostOpsExecV1Journal(root / hostops.HOSTOPS_EXEC_V1_JOURNAL_FILENAME, existing=True)
+                    enrollment = hostops.load_hostops_exec_v1_enrollment(record)
+                    self.assertIsNone(journal.source_approval(enrollment, key))
+                    with patch.dict(revisions, {later_sha: approved}, clear=True):
+                        rc, missing = self._exec_cli_receipt(["--action", "execute"], env=env)
+                        self.assertEqual((rc, missing["code"]), (2, "SOURCE_REVISION_MISMATCH"))
+                    self.assertIsNone(journal.record(request["job_id"]))
+                    tampered = b"# changed source\n"
+                    for action in ("plan", "execute"):
+                        for committed in (approved, tampered, approved.replace(b"\n", b"\r\n")):
+                            with self.subTest(action=action, committed=committed):
+                                module.write_bytes(tampered)
+                                if committed.endswith(b"\r\n"):
+                                    module.write_bytes(approved)
+                                with patch.dict(revisions, {later_sha: committed}):
+                                    rc, rejected = self._exec_cli_receipt(["--action", action], env=env)
+                                self.assertEqual((rc, rejected["code"]), (2, "SOURCE_REVISION_MISMATCH"))
+                                self.assertIsNone(journal.record(request["job_id"]))
+                    runner.assert_not_called()
+                    module.write_bytes(approved)
+
+                    payload = root / hostops.HOSTOPS_EXEC_V1_PAYLOAD_DIRNAME / (digest + ".ps1")
+                    self.assertEqual(payload.read_bytes(), script)
+                    payload.write_bytes(b"Different bytes")
+                    rc, mismatch = self._exec_cli_receipt(["--action", "execute", "--event", str(event_file)], env=env)
+                    self.assertEqual((rc, mismatch["code"]), (2, "PAYLOAD_DIGEST_MISMATCH"))
+                    payload.write_bytes(script)
+                    runner.assert_not_called()
+                    rc, done = self._exec_cli_receipt(["--action", "execute"], env=env)
+                    self.assertEqual((rc, done["code"], done["source_sha"]), (0, "EXECUTION_COMPLETED", self.SHA))
+                    self.assertNotIn("private output", json.dumps(done))
+                    self.assertNotIn(str(root), json.dumps(done))
+                    runner.assert_called_once_with(script.decode("utf-8"), 30, hostops.HOSTOPS_EXEC_V1_MAX_OUTPUT_BYTES)
+                    self.assertEqual(self._exec_cli_receipt(["--action", "execute"], env=env)[1]["code"], "DUPLICATE_JOB_ID")
+                    runner.assert_called_once()
+
+                    original_job = journal.record(request["job_id"])
+                    active_head = rotated_sha
+                    module.write_bytes(rotated)
+                    request_c = hostops.build_hostops_exec_v1_request(
+                        job_id="job-native-002", nonce="e" * 32, script_sha256=digest,
+                    )
+                    event_file.write_text(json.dumps(self._issue_event(request_c)), encoding="utf-8")
+                    env_c = {**env, "GITHUB_SHA": rotated_sha, "GITHUB_WORKFLOW_SHA": rotated_sha}
+                    runtime.return_value = self._runtime(env=env_c)
+                    for dispatch_env in (env, env_c):
+                        runtime.return_value = self._runtime(env=dispatch_env)
+                        self.assertEqual(self._exec_cli_receipt(["--action", "execute"], env=dispatch_env)[1]["code"],
+                                         "SOURCE_REVISION_MISMATCH")
+                    self.assertIsNone(journal.record(request_c["job_id"]))
+                    runner.assert_called_once()
+
+                    runtime.return_value = self._runtime(env={}, owner_sid=self.SID + "9")
+                    rotation_args = ["--source-sha", rotated_sha]
+                    self.assertNotEqual(attended("rotate-source", rotation_args)[0], 0)
+                    self.assertIsNone(journal.source_approval(enrollment, key))
+                    runtime.return_value = state
+                    rc, no_tty = self._exec_cli_receipt(["--action", "rotate-source", *rotation_args], env={})
+                    self.assertEqual((rc, no_tty["code"]), (2, "ATTENDED_OWNER_REQUIRED"))
+                    self.assertEqual(attended("rotate-source", ["--source-sha", later_sha])[1]["code"],
+                                     "SOURCE_REVISION_MISMATCH")
+                    rc, approval = attended("rotate-source", rotation_args)
+                    self.assertEqual((rc, approval["code"], approval["source_sha"], approval["readback_verified"]),
+                                     (0, "SOURCE_ROTATION_RECORDED", rotated_sha, True))
+                    self.assertEqual(attended("rotate-source", rotation_args)[1]["code"], "SOURCE_ALREADY_APPROVED")
+                    self.assertEqual(journal.source_approval(enrollment, key), (rotated_sha, hashlib.sha256(rotated).hexdigest()))
+                    self.assertEqual(journal.record(request["job_id"]), original_job)
+                    self.assertEqual(key_path.read_bytes(), key)
+                    self.assertEqual(record.read_bytes(), original_record)
+                    stale_journal = hostops.HostOpsExecV1Journal(
+                        enrollment.journal_path, existing=True, native_source=(key, None),
+                    )
+                    with self.assertRaisesRegex(hostops.Denied, "SOURCE_REVISION_MISMATCH"):
+                        stale_journal.reserve(request_c, enrollment, hostops._exec_v1_stamp(self.NOW))
+                    self.assertIsNone(journal.record(request_c["job_id"]))
+
+                    runtime.return_value = self._runtime(env=env_c)
+                    replay = hostops.build_hostops_exec_v1_request(
+                        job_id="job-native-003", nonce=request["nonce"], script_sha256=digest,
+                    )
+                    event_file.write_text(json.dumps(self._issue_event(replay)), encoding="utf-8")
+                    self.assertEqual(self._exec_cli_receipt(["--action", "execute"], env=env_c)[1]["code"], "REPLAY_DENIED")
+                    self.assertIsNone(journal.record(replay["job_id"]))
+                    event_file.write_text(json.dumps(self._issue_event(request_c)), encoding="utf-8")
+                    del revisions[self.SHA]  # The approved fingerprint survives loss of legacy objects.
+                    rc, planned = self._exec_cli_receipt(["--action", "plan"], env=env_c)
+                    self.assertEqual((rc, planned["code"], planned["source_sha"]), (0, "READY_TO_EXECUTE", rotated_sha))
+                    with patch.dict(revisions, clear=True):
+                        self.assertEqual(self._exec_cli_receipt(["--action", "execute"], env=env_c)[1]["code"],
+                                         "SOURCE_REVISION_MISMATCH")
+                    self.assertIsNone(journal.record(request_c["job_id"]))
+                    runner.assert_called_once()
+                    rc, completed = self._exec_cli_receipt(["--action", "execute"], env=env_c)
+                    self.assertEqual((rc, completed["code"], completed["source_sha"]),
+                                     (0, "EXECUTION_COMPLETED", rotated_sha))
+                    self.assertEqual(runner.call_count, 2)
+
+                    runtime.return_value = state
+                    self.assertEqual(attended("revoke")[0], 0)
+                    self.assertEqual(attended("rotate-source", rotation_args)[1]["code"], "ENROLLMENT_REVOKED")
+                    self.assertEqual(attended("unenroll")[1]["code"], "REQUEST_INVALID")
+                    self.assertEqual(attended("enroll", ["--source-sha", later_sha])[1]["code"], "ALREADY_ENROLLED_NO_OVERWRITE")
+                    self.assertEqual(key_path.read_bytes(), key)
+                    self.assertEqual(record.read_bytes(), original_record)
+                    self.assertEqual(journal.record(request["job_id"])["state"], "EXECUTED")
+                    self.assertEqual((root / hostops._EXEC_V1_REVOKED_FILENAME).read_bytes(), b"revoked\n")
+                    random_key.assert_called_once_with(32)
+                    runtime.return_value = self._runtime(env=env_c)
+                    acl.reset_mock()
+                    self.assertEqual(self._exec_cli_receipt(["--action", "execute"], env=env_c)[1]["code"], "ENROLLMENT_REVOKED")
+                    self.assertNotIn(call(key_path), acl.call_args_list)
+                    (root / hostops._EXEC_V1_REVOKED_FILENAME).unlink()
+                    self.assertEqual(self._exec_cli_receipt(["--action", "execute"], env=env_c)[1]["code"], "ENROLLMENT_REVOKED")
+                    runtime.return_value = state
+                    self.assertEqual(attended("rotate-source", rotation_args)[1]["code"], "ENROLLMENT_REVOKED")
+                    self.assertEqual(runner.call_count, 2)
+                    network.assert_not_called()
+
+    def test_native_state_rejects_foreign_acl_and_key_tampering(self):
+        from ai_commerce.remote import local_completion_handoff as private_acl
+
+        state = self._runtime(env={})
+        with (tempfile.TemporaryDirectory() as tmp,
+              patch.object(private_acl, "_windows_acl", return_value=(self.SID, (("allow", self.SID),))) as acl,
+              patch.object(hostops.secrets, "token_bytes", return_value=b"X" * 32)):
+            root = Path(tmp) / "private"
+            hostops._exec_v1_enroll_native(root, state, self.SHA)
+            record = root / hostops.HOSTOPS_EXEC_V1_ENROLLMENT_FILENAME
+            original = record.read_bytes()
+            record.write_text(json.dumps({**json.loads(original), "enabled": False}), encoding="utf-8")
+            with self.assertRaisesRegex(hostops.Denied, "ENROLLMENT_DISABLED"):
+                hostops._exec_v1_load_native(root, state)
+            record.write_bytes(original)
+            key = root / hostops._EXEC_V1_KEY_FILENAME
+            key.write_bytes(b"Y" * 32)
+            with self.assertRaisesRegex(hostops.Denied, "AUTHENTICATION_UNPROVEN"):
+                hostops._exec_v1_load_native(root, state)
+            key.unlink()
+            with self.assertRaisesRegex(hostops.Denied, "PRIVATE_STATE_UNSAFE"):
+                hostops._exec_v1_load_native(root, state)
+            key.write_bytes(b"X" * 32)
+            acl.return_value = self.SID, (("allow", self.SID), ("allow", "S-1-1-0"))
+            with self.assertRaisesRegex(hostops.Denied, "PRIVATE_STATE_UNSAFE"):
+                hostops._exec_v1_load_native(root, state)
+            denied_root = Path(tmp) / "foreign-acl"
+            with self.assertRaisesRegex(hostops.Denied, "PRIVATE_STATE_UNSAFE"):
+                hostops._exec_v1_enroll_native(denied_root, state, self.SHA)
+            self.assertFalse((denied_root / hostops._EXEC_V1_KEY_FILENAME).exists())
+
+    def test_rotation_transaction_recovery_and_unknown_effect_hold(self):
+        from ai_commerce.remote import local_completion_handoff as private_acl
+
+        state = self._runtime(env={})
+        c_sha, d_sha = "c" * 40, "d" * 40
+        c_digest, d_digest = "1" * 64, "2" * 64
+        with (tempfile.TemporaryDirectory() as tmp,
+              patch.object(private_acl, "_windows_acl", return_value=(self.SID, (("allow", self.SID),))),
+              patch.object(hostops, "_exec_v1_verify_source", return_value=c_digest) as verify,
+              patch.object(hostops, "_exec_v1_legacy_source_digest", return_value="0" * 64)):
+            root = Path(tmp) / "private"
+            hostops._exec_v1_enroll_native(root, state, self.SHA)
+            enrollment, key = hostops._exec_v1_load_native(root, state)
+            journal = hostops.HostOpsExecV1Journal(enrollment.journal_path, existing=True)
+            session = journal._session
+
+            @contextmanager
+            def interrupt_before_commit():
+                with session() as db:
+                    yield db
+                    raise KeyboardInterrupt
+
+            with patch.object(journal, "_session", side_effect=interrupt_before_commit):
+                with self.assertRaises(KeyboardInterrupt):
+                    journal.rotate_source(enrollment, key, c_sha)
+            self.assertIsNone(journal.source_approval(enrollment, key))
+            with session() as db:
+                self.assertEqual(db.execute("PRAGMA user_version").fetchone(), (0,))
+                self.assertIsNone(db.execute("SELECT 1 FROM sqlite_master WHERE name='source_approvals'").fetchone())
+
+            with patch.object(journal, "source_approval", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    journal.rotate_source(enrollment, key, c_sha)
+            self.assertEqual(journal.source_approval(enrollment, key), (c_sha, c_digest))
+            self.assertEqual(journal.rotate_source(enrollment, key, c_sha), "SOURCE_ALREADY_APPROVED")
+
+            request = hostops.build_hostops_exec_v1_request(job_id="job-hold-001", nonce="f" * 32, script_sha256="a" * 64)
+            journal.reserve(request, enrollment, hostops._exec_v1_stamp(self.NOW))
+            verify.reset_mock()
+            verify.return_value = d_digest
+            with self.assertRaisesRegex(hostops.Denied, "UNKNOWN_EFFECT_HOLD"):
+                journal.rotate_source(enrollment, key, d_sha)
+            journal.finalize(request["job_id"], hostops.HostOpsExecV1Broker()._error_receipt("UNKNOWN_EFFECT_HOLD"))
+            prior = journal.record(request["job_id"])
+            self.assertEqual(prior["state"], "UNKNOWN_EFFECT")
+            with self.assertRaisesRegex(hostops.Denied, "UNKNOWN_EFFECT_HOLD"):
+                journal.rotate_source(enrollment, key, d_sha)
+            other = hostops.build_hostops_exec_v1_request(job_id="job-hold-002", nonce="e" * 32, script_sha256="a" * 64)
+            with self.assertRaisesRegex(hostops.Denied, "UNKNOWN_EFFECT_HOLD"):
+                journal.reserve(other, enrollment, hostops._exec_v1_stamp(self.NOW))
+            self.assertIsNone(journal.record(other["job_id"]))
+            self.assertEqual(journal.record(request["job_id"]), prior)
+            self.assertEqual(journal.source_approval(enrollment, key), (c_sha, c_digest))
+            verify.assert_not_called()
+
+            with session() as db:
+                db.execute("UPDATE source_approvals SET source_sha256=?", (d_digest,))
+            with self.assertRaisesRegex(hostops.Denied, "JOURNAL_UNAVAILABLE"):
+                journal.source_approval(enrollment, key)
+            with session() as db:
+                db.execute("DELETE FROM source_approvals")
+            with self.assertRaisesRegex(hostops.Denied, "JOURNAL_UNAVAILABLE"):
+                journal.rotate_source(enrollment, key, d_sha)
+            self.assertEqual(journal.record(request["job_id"]), prior)
+
+    def test_native_source_and_event_are_bound_to_the_fixed_runner_paths(self):
+        from ai_commerce.hostops_v3 import security
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = Path(tmp) / "runner"
+            workspace = runner / "_work/ai-commerce/ai-commerce"
+            (workspace / ".git/objects").mkdir(parents=True)
+            module = workspace / hostops._EXEC_V1_SOURCE_PATH
+            module.parent.mkdir(parents=True)
+            module.write_bytes(b"pass\n")
+            event_file = runner / "_work/_temp/_github_workflow/event.json"
+            event_file.parent.mkdir(parents=True)
+            event_file.write_bytes(b"{}")
+            ctx = self._runtime(env=self._protected_actions_env(GITHUB_EVENT_PATH=str(event_file), GITHUB_WORKSPACE=str(workspace)))
+            with (patch.object(hostops, "_EXEC_V1_RUNNER_ROOT", runner),
+                  patch.object(hostops, "__file__", str(module)),
+                  patch.object(security, "windows_acl") as acl,
+                  patch.object(hostops, "_exec_v1_pinned_source", return_value=(self.SHA, b"pass\n")) as source):
+                self.assertEqual(hostops._exec_v1_event_path(str(event_file), ctx), event_file)
+                self.assertEqual(acl.call_count, 3)
+                with self.assertRaisesRegex(hostops.Denied, "PROTECTED_HOSTOPS_ONLY"):
+                    hostops._exec_v1_event_path(str(event_file.with_name("other.json")), ctx)
+                hostops._exec_v1_verify_source(self.SHA)
+                source.assert_called_once_with(workspace / ".git", self.SHA, head=True)
+                source.return_value = self.SHA, b"raise RuntimeError\n"
+                with self.assertRaisesRegex(hostops.Denied, "SOURCE_REVISION_MISMATCH"):
+                    hostops._exec_v1_verify_source(self.SHA)
+
+                real_lstat = type(event_file).lstat
+
+                def marked_lstat(path):
+                    if path == event_file.parent:
+                        return SimpleNamespace(st_mode=stat.S_IFDIR, st_file_attributes=0x400)
+                    return real_lstat(path)
+
+                with patch.object(type(event_file), "lstat", marked_lstat):
+                    with self.assertRaisesRegex(hostops.Denied, "PROTECTED_HOSTOPS_ONLY"):
+                        hostops._exec_v1_event_path(str(event_file), ctx)
+
+    def test_source_adapter_rehashes_commit_trees_and_blob_using_offline_cat_file(self):
+        objects = {}
+
+        def save(kind, raw):
+            oid = hashlib.sha1(f"{kind} {len(raw)}\0".encode("ascii") + raw).hexdigest()
+            objects[oid] = kind, raw
+            return oid
+
+        blob = b"# pinned first line\n# pinned second line\n"
+        blob_oid = save("blob", blob)
+        tree_oid = blob_oid
+        for entry in reversed(hostops._EXEC_V1_SOURCE_PATH.parts):
+            mode = b"100644" if entry == hostops._EXEC_V1_SOURCE_PATH.name else b"40000"
+            tree_oid = save("tree", mode + b" " + entry.encode("ascii") + b"\0" + bytes.fromhex(tree_oid))
+        commit_oid = save("commit", f"tree {tree_oid}\n\nFixture commit\n".encode("ascii"))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            git_dir = workspace / ".git"
+            (git_dir / "objects").mkdir(parents=True)
+            module = workspace / hostops._EXEC_V1_SOURCE_PATH
+            module.parent.mkdir(parents=True)
+            module.write_bytes(blob.replace(b"\n", b"\r\n"))
+
+            def git(argv, **kwargs):
+                self.assertEqual(argv[:5], ["git", "--no-replace-objects", "--no-lazy-fetch",
+                                           f"--git-dir={git_dir}", "cat-file"])
+                self.assertEqual(kwargs, {"cwd": workspace, "stdin": subprocess.DEVNULL,
+                                          "capture_output": True, "check": True, "timeout": 5})
+                operation, ref = argv[5:]
+                if ref == "HEAD":
+                    ref = commit_oid
+                if ref not in objects:
+                    raise subprocess.CalledProcessError(128, argv, stderr=b"missing object")
+                kind, raw = objects[ref]
+                if operation == "-s":
+                    return subprocess.CompletedProcess(argv, 0, str(len(raw)).encode("ascii") + b"\n")
+                self.assertEqual(operation, kind)
+                return subprocess.CompletedProcess(argv, 0, raw)
+
+            with (patch.object(hostops, "__file__", str(module)),
+                  patch.object(hostops.subprocess, "run", side_effect=git) as adapter):
+                self.assertEqual(hostops._exec_v1_verify_source(commit_oid), hashlib.sha256(blob).hexdigest())
+                for oid in (commit_oid, tree_oid, blob_oid):
+                    kind, raw = objects[oid]
+                    corrupted = raw[:-1] + bytes([raw[-1] ^ 1])
+                    with self.subTest(kind=kind), patch.dict(objects, {oid: (kind, corrupted)}):
+                        with self.assertRaisesRegex(hostops.Denied, "SOURCE_REVISION_MISMATCH"):
+                            hostops._exec_v1_verify_source(commit_oid)
+                with self.assertRaisesRegex(hostops.Denied, "SOURCE_REVISION_MISMATCH"):
+                    hostops._exec_v1_verify_source(self.SHA)
+                del objects[blob_oid]
+                with self.assertRaisesRegex(hostops.Denied, "SOURCE_REVISION_MISMATCH"):
+                    hostops._exec_v1_verify_source(commit_oid)
+                adapter.side_effect = subprocess.TimeoutExpired("git", 5)
+                with self.assertRaisesRegex(hostops.Denied, "SOURCE_REVISION_MISMATCH"):
+                    hostops._exec_v1_verify_source(commit_oid)
+
+    def test_native_dispatch_rejects_malformed_or_public_raw_events_and_suppresses_errors(self):
+        ctx = self._runtime(env=self._protected_actions_env())
+        with (tempfile.TemporaryDirectory() as tmp,
+              patch.object(hostops, "_exec_v1_source_ci", return_value=False),
+              patch.object(hostops, "_default_hostops_exec_v1_runtime", return_value=ctx),
+              patch.object(hostops, "_exec_v1_event_path") as checked_path,
+              patch.object(hostops, "_exec_v1_native_state_root") as state,
+              patch.object(hostops, "_exec_v1_check_oidc") as oidc):
+            path = Path(tmp) / "event.json"
+            checked_path.return_value = path
+            inline = hostops.build_hostops_exec_v1_request(job_id="job-inline-001", nonce="e" * 32,
+                                                          payload_mode="PRIVATE_INLINE_UTF8", script_utf8="private-body")
+            for raw, code in (
+                (b"{PRIVATE-ERROR", "EVENT_SHAPE_OR_STATE_DENIED"),
+                (json.dumps(self._issue_event(inline)).encode(), "PUBLIC_ISSUE_RAW_SCRIPT_DENIED"),
+                (json.dumps(self._issue_event(inline, sender="foreign")).encode(), "EVENT_OWNER_OR_REPO_DENIED"),
+            ):
+                path.write_bytes(raw)
+                rc, receipt = self._exec_cli_receipt(["--action", "execute"], via_main=True)
+                self.assertEqual((rc, receipt["code"]), (2, code))
+                self.assertNotIn("private-body", json.dumps(receipt))
+            oidc.assert_not_called()
+            checked_path.side_effect = OSError("SECRET native credential and path")
+            self.assertEqual(self._exec_cli_receipt(["--action", "execute"], via_main=True)[1]["code"], "PROTECTED_HOSTOPS_ONLY")
+            self.assertEqual(self._exec_cli_receipt(["--secret-value"], via_main=True)[1]["code"], "REQUEST_INVALID")
+            state.assert_not_called()
+
+    def test_protected_job_checks_signed_claims_and_authority_before_loading_state(self):
+        later_sha = "b" * 40
+        env = self._protected_actions_env(
+            GITHUB_SHA=later_sha,
+            GITHUB_WORKFLOW_SHA=later_sha,
+            ACTIONS_ID_TOKEN_REQUEST_URL="https://pipelinesghubeus10.actions.githubusercontent.com/scope/idtoken?api-version=2.0",
+            ACTIONS_ID_TOKEN_REQUEST_TOKEN="fixture-oidc-job-token",
+            GITHUB_RUN_ID="1234567",
+        )
+        now = int(self.NOW.timestamp())
+        expected = {
+            "iss": hostops._EXEC_V1_OIDC_ISSUER, "environment": "hostops-exec-v1",
+            "repository": hostops.REPO, "repository_owner": hostops.OWNER, "repository_visibility": "public",
+            "actor": hostops.OWNER, "event_name": "issues", "ref": "refs/heads/main", "ref_type": "branch",
+            "ref_protected": "true", "workflow_ref": hostops.HOSTOPS_EXEC_V1_WORKFLOW_REF, "workflow_sha": later_sha,
+            "sha": later_sha, "runner_environment": "self-hosted", "run_attempt": "1", "run_id": "1234567",
+            "iat": now, "nbf": now, "exp": now + 300,
+        }
+        request = hostops.build_hostops_exec_v1_request(
+            job_id="job-oidc-001", nonce="f" * 32, script_sha256="a" * 64,
+        )
+        digest = request["request_digest"]
+        ctx = self._runtime(env=env)
+        args = SimpleNamespace(event=None, action="execute")
+
+        def b64(value):
+            return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+        def fake_read(url, _limit, *, bearer=None):
+            if bearer is None:
+                self.assertEqual(url, hostops._EXEC_V1_OIDC_ISSUER + "/.well-known/jwks")
+                return b'{"keys":[{"kid":"test","kty":"RSA","alg":"RS256"}]}'
+            self.assertEqual(bearer, env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"])
+            audience = parse_qs(urlsplit(url).query)["audience"][0]
+            self.assertTrue(audience.startswith(f"ai-commerce:hostops-exec-v1:execute:{digest}:"))
+            header = b64(b'{"kid":"test","alg":"RS256"}')
+            claims = b64(json.dumps({"aud": audience, **expected}).encode())
+            return json.dumps({"value": f"{header}.{claims}.{b64(b'fixture-signature')}"}).encode()
+
+        with (patch.object(hostops, "_exec_v1_https_read", side_effect=fake_read) as fetch,
+              patch.object(hostops, "_exec_v1_verify_rs256") as verify,
+              patch.object(hostops, "_exec_v1_event_path"),
+              patch.object(hostops, "_exec_v1_read_event", return_value=self._issue_event(request)),
+              patch.object(hostops, "_exec_v1_native_state_root") as state,
+              patch.object(hostops.secrets, "token_hex", return_value="b" * 32),
+              patch.object(hostops.time, "time", return_value=now)):
+            hostops._exec_v1_check_oidc(env, digest, action="execute")
+            verify.assert_called_once()
+            for claim, denied in (("actor", "foreign"), ("repository_owner", "foreign"), ("event_name", "push"),
+                                  ("ref", "refs/heads/topic"), ("sha", self.SHA), ("workflow_sha", self.SHA),
+                                  ("ref_protected", "false"), ("environment", "other"),
+                                  ("exp", now - 1), ("aud", "replay")):
+                with self.subTest(claim=claim), patch.dict(expected, {claim: denied}):
+                    with self.assertRaisesRegex(hostops.Denied, "PROTECTED_HOSTOPS_ONLY"):
+                        hostops._exec_v1_protected_dispatch(args, ctx)
+            verify.side_effect = hostops.Denied("PROTECTED_HOSTOPS_ONLY")
+            with self.assertRaisesRegex(hostops.Denied, "PROTECTED_HOSTOPS_ONLY"):
+                hostops._exec_v1_protected_dispatch(args, ctx)
+            state.assert_not_called()
+            fetch.reset_mock()
+            spoofed = {**env, "ACTIONS_ID_TOKEN_REQUEST_URL": "https://example.invalid/idtoken"}
+            with self.assertRaisesRegex(hostops.Denied, "PROTECTED_HOSTOPS_ONLY"):
+                hostops._exec_v1_check_oidc(spoofed, digest, action="execute")
+            fetch.assert_not_called()
+            fetch.side_effect = OSError(11001, "DNS unavailable")
+            with (patch.object(hostops, "_exec_v1_source_ci", return_value=False),
+                  patch.object(hostops, "_default_hostops_exec_v1_runtime", return_value=ctx)):
+                rc, receipt = self._exec_cli_receipt(["--action", "execute"], env=env)
+            self.assertEqual((rc, receipt["code"]), (2, "PROTECTED_HOSTOPS_ONLY"))
+            self.assertFalse(receipt["executed"])
+            state.assert_not_called()
+
+    def test_native_cli_ci_guard_precedes_all_private_and_process_effects(self):
+        with (patch.object(hostops, "_default_hostops_exec_v1_runtime") as runtime,
+              patch.object(hostops, "_exec_v1_native_state_root") as state,
+              patch.object(hostops, "_exec_v1_check_oidc") as oidc,
+              patch.object(hostops, "_exec_v1_verify_source") as source,
+              patch.object(hostops, "_default_hostops_exec_v1_runner") as runner):
+            for env in ({"GITHUB_ACTIONS": "true"}, {"PYTEST_CURRENT_TEST": "offline"},
+                        {"AI_COMMERCE_GIT_GUARD_ACTIVE": "1"}, {"CI": "true"}):
+                for action in ("enroll", "rotate-source"):
+                    with self.subTest(env=env, action=action):
+                        rc, receipt = self._exec_cli_receipt(["--action", action, "--source-sha", self.SHA], env=env)
+                        self.assertEqual((rc, receipt["code"]), (2, "SOURCE_CI_EXECUTION_FORBIDDEN"))
+            env = self._protected_actions_env(AI_COMMERCE_GIT_GUARD_ACTIVE="1")
+            for action in ("plan", "execute"):
+                rc, receipt = self._exec_cli_receipt(["--action", action], env=env)
+                self.assertEqual((rc, receipt["code"]), (2, "SOURCE_CI_EXECUTION_FORBIDDEN"))
+            runtime.assert_not_called()
+            state.assert_not_called()
+            oidc.assert_not_called()
+            source.assert_not_called()
+            runner.assert_not_called()
 
 
 if __name__ == "__main__":
