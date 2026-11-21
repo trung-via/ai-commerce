@@ -1,5 +1,6 @@
 """A03 v1.1 contract tests. All structured-client responses are explicit fakes."""
 
+import base64
 from dataclasses import FrozenInstanceError, replace
 from datetime import datetime
 import io
@@ -38,6 +39,7 @@ from ai_commerce.creative import (
     NSM_V1_VERSION, NSM_V1_WEIGHTS,
     aggregate_benchmark_telemetry, calculate_nsm_v1_score, compare_benchmark_observations,
     evaluate_benchmark_structure, observe_benchmark_run,
+    verified_model_transport,
 )
 from ai_commerce.providers.base import ProviderCapabilities, ProviderError
 from ai_commerce.creative.v2 import (
@@ -1087,7 +1089,7 @@ class FakeInstalledCreativeCLI:
             raise subprocess.TimeoutExpired(argv, timeout, stderr=b"SECRET_SHOULD_NOT_BE_ECHOED")
         if self.fault == "oversize":
             return subprocess.CompletedProcess(argv, 0, b"x" * (max_bytes + 1), b"")
-        thread_id = str(uuid.uuid4())
+        thread_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" if self.fault == "reused-session" else str(uuid.uuid4())
         context = {"model": "spoofed-model" if self.fault == "model" else self.config.model,
                    "effort": "spoofed-effort" if self.fault == "effort" else self.config.effort}
         if self.fault == "missing-model":
@@ -1095,8 +1097,11 @@ class FakeInstalledCreativeCLI:
         if self.fault == "missing-effort":
             context.pop("effort")
         records = [
-            {"type": "session_meta", "payload": {"id": thread_id, "cli_version": self.version,
-                                                   "model_provider": "openai"}},
+            {"type": "session_meta", "payload": {
+                "id": thread_id,
+                "cli_version": "forged-version" if self.fault == "session-version" else self.version,
+                "model_provider": "forged-provider" if self.fault == "session-provider" else "openai",
+            }},
             {"type": "turn_context", "payload": context},
             {"type": "response_item", "payload": {"type": "message", "role": "user", "content": [
                 {"type": "input_text", "text": "rebound" if self.fault == "session-binding" else input.decode()}]}},
@@ -1230,6 +1235,9 @@ def install_fake_popen(monkeypatch, cli):
 def test_cli_native_process_branch_is_simulated_not_live_provider_proof(installed_cli, tmp_path, monkeypatch):
     cli = installed_cli
     install_fake_popen(monkeypatch, cli)
+    client = CodexCliCreativeClient(cli.capability())
+    assert client.complete(StructuredModelRequest(cli.config, explore())).error_code == "UNAUTHORIZED"
+    assert cli.calls == []
     stage = cli_stage(cli, tmp_path / "creative", native=True, purpose="PRODUCTION")
     assert stage.status == "CREATIVE_COMPLETE"  # Synthetic coverage of native branch only.
     assert stage.reasoning.execution.kind == "AUTHENTICATED_CLI_PROBE"
@@ -1259,6 +1267,7 @@ def test_cli_native_pipe_bounds_and_timeout_never_retry(installed_cli, tmp_path,
     ("auth", "UNAUTHORIZED", False), ("model", "CONFIGURATION_MISMATCH", True),
     ("missing-model", "CONFIGURATION_MISMATCH", True), ("missing-effort", "CONFIGURATION_MISMATCH", True),
     ("effort", "CONFIGURATION_MISMATCH", True), ("missing-session", "CONFIGURATION_MISMATCH", True),
+    ("session-version", "CONFIGURATION_MISMATCH", True), ("session-provider", "CONFIGURATION_MISMATCH", True),
     ("session-binding", "CONFIGURATION_MISMATCH", True), ("binding", "CONFIGURATION_MISMATCH", True),
     ("spoofed-identity", "UNKNOWN_EFFECT", True), ("malformed", "UNKNOWN_EFFECT", True),
     ("extra-json", "UNKNOWN_EFFECT", True), ("duplicate-json", "UNKNOWN_EFFECT", True),
@@ -1607,6 +1616,62 @@ def test_r2_asserted_model_without_independent_session_effort_evidence_cannot_co
     assert result.failure == "UNVERIFIED_MODEL_ADAPTER"
 
 
+def test_r2_fixture_receipt_uses_its_own_transport_verifier_without_model_admission(monkeypatch):
+    config = ModelConfiguration("fixture-provider", "fixture-model", "fixture-effort")
+    request = creative_v2._cycle_request(cycle_job(seed_options={"configuration": config}), "explore", "EXPLORE")
+    grant = InvocationAuthorization(authorization_ref="fixture:offline")
+    attempt = "TEST_ONLY_MOCK:fixture-attempt"
+
+    class FixtureTransport(CycleFakeClient):
+        def invoke(self, model_request, authorization):
+            response = self.complete(model_request)
+            packet = canonical_bytes(model_request.to_dict())
+            schema = canonical_bytes(model_request.output_schema)
+            output = response.output_json.encode()
+            transport_digest = sha256_bytes(b"TEST_ONLY_MOCK fixture transport")
+            execution = creative_v2.CLIExecutionObservation(
+                "TEST_ONLY_MOCK", transport_digest, "fixture-version", transport_digest, transport_digest,
+                request.digest, sha256_bytes(canonical_bytes(config.to_dict())), sha256_bytes(packet),
+                sha256_bytes(schema), "PROCESS_INVOKED", stdout_sha256=sha256_bytes(output),
+                session_sha256=sha256_bytes(attempt.encode() + packet), observed_model=config.model,
+                observed_effort=config.effort, cli_thread_id=attempt, authorization_ref=authorization.authorization_ref,
+            )
+            return replace(response, execution=execution, cli_stdin_json=packet.decode(), cli_schema_json=schema.decode(),
+                           cli_stdout_base64=base64.b64encode(output).decode())
+
+    def verify_receipt(model_request, response):
+        packet = canonical_bytes(model_request.to_dict())
+        if (response.cli_stdin_json != packet.decode()
+                or response.cli_schema_json != canonical_bytes(model_request.output_schema).decode()
+                or base64.b64decode(response.cli_stdout_base64) != response.output_json.encode()
+                or response.execution.cli_thread_id != attempt
+                or response.execution.session_sha256 != sha256_bytes(attempt.encode() + packet)):
+            raise CreativeValidationError("fixture native receipt mismatch")
+
+    transport = creative_live._SourceTransport(
+        "fixture-wire", config.provider, FixtureTransport, None, lambda _: "TEST_ONLY_MOCK",
+        FixtureTransport.invoke, verify_receipt, lambda _: "TEST_ONLY_MOCK",
+    )
+    client = FixtureTransport()
+    monkeypatch.setattr(creative_live, "_SOURCE_TRANSPORTS", (*creative_live._SOURCE_TRANSPORTS, transport))
+    result = reason_v2(request, LiveCreativeReasoner(config, client, authorization=grant))
+    assert result.state == "OK" and result.observation == MOCK and len(client.calls) == 1
+    assert creative_live._receipt_transport(config).transport_id == "fixture-wire"
+    assert ReasoningResult.from_dict(result.to_dict()).digest == result.digest
+    alleged_model = ProviderObservation(config.provider, config.model, "MODEL")
+    alleged_execution = replace(result.execution, kind="AUTHENTICATED_CLI_PROBE")
+    assert verified_model_transport(config, alleged_model, alleged_execution) is None
+
+    wire = result.to_dict()
+    raw = json.loads(wire["response_json"])
+    raw["cli_schema_json"] = "{}"
+    raw["execution"]["schema_sha256"] = sha256_bytes(b"{}")
+    wire["execution"] = raw["execution"]
+    wire["response_json"] = json.dumps(raw)
+    with pytest.raises(CreativeValidationError, match="fixture native receipt mismatch"):
+        ReasoningResult.from_dict(wire)
+
+
 def test_r2_external_source_bytes_are_separate_from_generated_hypotheses(tmp_path):
     content = "Exact external source quotation e\u0301\r\n"
     source = CreativeEvidenceSource("external:rain", content, sha256_bytes(content.encode("utf-8")), "fixture:verified-source-bytes")
@@ -1809,6 +1874,24 @@ def test_r2_cli_failures_preserve_observed_raw_transport_and_never_retry(install
     assert raw.cli_stdout_base64 is not None and raw.cli_stdin_json is not None and raw.cli_schema_json is not None
     assert run_creative_cycle(job, tmp_path / "creative", reasoner, authorization=grant) == result
     assert len(cli.calls) == 4
+
+
+def test_r2_cli_duplicate_session_holds_without_reinvoking(installed_cli, tmp_path, monkeypatch):
+    cli, sampler = installed_cli, CycleFakeClient()
+    cli.fault = "reused-session"
+    cli.creative_output = lambda packet: json.loads(sampler.complete(StructuredModelRequest(
+        cli.config, ReasoningRequest.from_dict(packet["request"]["creative"]),
+    )).output_json)
+    install_fake_popen(monkeypatch, cli)
+    job = cycle_job(seed_options={"configuration": cli.config, "purpose": "PRODUCTION"})
+    grant = InvocationAuthorization(True, True, "fixture:duplicate-session")
+    reasoner = LiveCreativeReasoner(cli.config, CodexCliCreativeClient(cli.capability()))
+    result = run_creative_cycle(job, tmp_path / "creative", reasoner, authorization=grant)
+    assert result.status == "HOLD" and result.failure == "REPLAYED_INFERENCE" and result.output is None
+    assert len(result.steps) == 2 and len(cli.packets) == 2
+    assert result.steps[0].reasoning.execution.cli_thread_id == result.steps[1].reasoning.execution.cli_thread_id
+    assert run_creative_cycle(job, tmp_path / "creative", reasoner, authorization=grant) == result
+    assert len(cli.packets) == 2
 
 
 @pytest.mark.parametrize("count,budget", [(1, 1), (4, 1), (2, -1), (2, 3), (2, True)])
@@ -2211,6 +2294,22 @@ def test_r3_cli_injected_runner_and_simulated_native_model_branch(installed_cli,
     assert native_res.package.observation == ProviderObservation("codex-cli", cli.config.model, "MODEL")
     assert native_res.package.execution.kind == "AUTHENTICATED_CLI_PROBE"
     assert native_res.package.usage == UsageObservation("OBSERVED", 11, 7)
+    assert verified_model_transport(cli.config, native_res.package.observation, native_res.package.execution,
+                                    authorization=grant) == "codex-exec-jsonl"
+    assert verified_model_transport(cli.config, mock_res.package.observation, mock_res.package.execution,
+                                    authorization=grant) is None
+    assert verified_model_transport(cli.config, native_res.package.observation, native_res.package.execution,
+                                    authorization=replace(grant, authorization_ref="fixture:wrong-grant")) is None
+    assert verified_model_transport(cli.config, native_res.package.observation, native_res.package.execution,
+                                    authorization=InvocationAuthorization()) is None
+    response = StructuredModelResponse.from_dict(json.loads(native_res.stage.reasoning.response_json))
+
+    class ImpersonatingClient(FakeClient):
+        execution_mode = "MODEL"
+
+    forged = ImpersonatingClient(response)
+    rejected = LiveCreativeReasoner(cli.config, forged, authorization=grant).reason(native_res.stage.job.request)
+    assert rejected.error_code == "UNVERIFIED_MODEL_ADAPTER" and forged.calls == []
     before_calls = len(cli.calls)
     assert run_creative_production(native_job, native_root) == native_res
     assert len(cli.calls) == before_calls

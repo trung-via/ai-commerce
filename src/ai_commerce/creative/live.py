@@ -1,4 +1,4 @@
-"""Structured client seam and opt-in, installed-capability-pinned Codex CLI.
+"""Structured client seam and source-verified native transports.
 
 A separately supplied client owns transport. Every invocation checks its actual
 capabilities against explicit authorization. Constructing/configuring this
@@ -29,7 +29,8 @@ from .models import EDITABLE_FIELDS, ConceptChange, ConceptDraft, ProductionPack
 from .decisions import CreativeModelSelection
 from .v2 import (
     CLIExecutionObservation, BenchmarkLiveTrialGrant, BenchmarkResearchTarget, BenchmarkRoleTrace, CreativeEvidenceSource,
-    ModelConfiguration, ReasoningRequest, ReasoningResult, UsageObservation, _require_iso_timestamp, _result_schema,
+    ModelConfiguration, ReasoningRequest, ReasoningResult, UsageObservation, _VERIFIED_EXECUTION_KIND,
+    _require_iso_timestamp, _result_schema,
 )
 
 
@@ -301,6 +302,17 @@ def _cli_request(request: StructuredModelRequest) -> tuple[str, dict[str, Any], 
     return request_hash, schema, packet
 
 
+def _codex_output(request: StructuredModelRequest, generation: str, request_hash: str,
+                  schema: dict[str, Any]) -> dict[str, Any]:
+    envelope = exact_fields(read_json(generation), {"request_sha256", "output"})
+    _need(envelope["request_sha256"] == request_hash)
+    value = exact_fields(envelope["output"], set(schema["properties"]["output"]["required"]))
+    if request.creative.operation in ("REFRAME", "DEVELOP"):
+        value["edits"] = {k: v for k, v in exact_fields(value["edits"], set(EDITABLE_FIELDS)).items()
+                          if v is not None}
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class StructuredModelResponse:
     state: Literal["OK", "REFUSED", "ERROR"]
@@ -565,6 +577,10 @@ def _need(condition: bool, code: str = "CONFIGURATION_MISMATCH") -> None:
         raise _CLIStopped(code)
 
 
+def _known_native_identity(value: str | None) -> bool:
+    return bool(value and value != "UNKNOWN" and value == value.strip() and value.isprintable())
+
+
 def _bounded_cli_process(argv: list[str], *, input: bytes, cwd: str, timeout: float,
                          max_bytes: int) -> subprocess.CompletedProcess:
     """Drain both pipes concurrently, killing on overflow/timeout without retry.
@@ -685,7 +701,7 @@ def codex_creative_argv(executable: str, config: ModelConfiguration) -> tuple[st
 class CodexCliCreativeClient:
     """One real Codex exec transport. Construction does no I/O or inference.
 
-    complete() is called only behind LiveCreativeReasoner's authorization check.
+    Native invocation requires the LiveCreativeReasoner's runner authorization.
     All installed probes run even for injected runners; injecting any runner
     labels the result TEST_ONLY_MOCK and can never prove real model execution.
     Native session metadata supplies identity/effort independently of model text.
@@ -723,12 +739,14 @@ class CodexCliCreativeClient:
         _need(len(response.stdout) <= CLI_MAX_BYTES and len(response.stderr) <= CLI_MAX_BYTES, "UNKNOWN_EFFECT")
         return response
 
-    def _probe(self, cap, config, runner, directory) -> str:
+    @staticmethod
+    def _probe(cap, config, runner, directory) -> str:
         executable = Path(cap.executable)
         _need(executable.is_absolute() and executable.name.lower() in ("codex", "codex.exe"))
         _need(executable.is_file(), "PROVIDER_UNAVAILABLE")
         _need(_binary_digest(executable) == cap.executable_sha256)
-        _need(config.provider == "codex-cli" and config.effort not in (None, "UNKNOWN")
+        _need(config.provider == "codex-cli"
+              and all(_known_native_identity(value) for value in (config.model, config.effort, cap.version))
               and cap.argv == codex_creative_argv(cap.executable, config))
         _need(Path(cap.model_catalog).is_absolute() and Path(cap.sessions_dir).is_absolute())
         _need(Path(cap.sessions_dir).is_dir(), "PROVIDER_UNAVAILABLE")
@@ -737,7 +755,7 @@ class CodexCliCreativeClient:
         # login; it is probed via exec help and applied only to the exec command.
         for name, args in (("version", ("--version",)), ("capability", ("exec", "--help")),
                            ("authentication", ("login", "status"))):
-            checked = self._process(runner, (cap.executable, *args), b"", directory, 15)
+            checked = CodexCliCreativeClient._process(runner, (cap.executable, *args), b"", directory, 15)
             _need(checked.returncode == 0, "UNAUTHORIZED" if name == "authentication" else "PROVIDER_UNAVAILABLE")
             if name == "version":
                 _need(checked.stdout.decode("utf-8").strip() == "codex-cli " + cap.version,
@@ -842,8 +860,17 @@ class CodexCliCreativeClient:
         return model, effort, sha256_bytes(raw)
 
     def complete(self, request: StructuredModelRequest) -> StructuredModelResponse:
+        return CodexCliCreativeClient._complete(self, request, InvocationAuthorization())
+
+    def _complete(self, request: StructuredModelRequest,
+                  authorization: InvocationAuthorization) -> StructuredModelResponse:
         if isinstance(request, StructuredModelRequest) and request.creative.benchmark is not None:
-            return StructuredModelResponse("ERROR", error_code="HOLD_BUDGET", message=self.benchmark_budget_hold(None))
+            return StructuredModelResponse("ERROR", error_code="HOLD_BUDGET",
+                                           message=CodexCliCreativeClient.benchmark_budget_hold(None))
+        injected_runner = self._runner
+        native = injected_runner is None
+        if native and not (authorization.allow_network and authorization.allow_spend and authorization.authorization_ref):
+            return StructuredModelResponse("ERROR", error_code="UNAUTHORIZED")
         evidence, native_output, packet, schema_bytes, stdout = None, None, None, None, None
         strict_transport = isinstance(request, StructuredModelRequest) and (
             request.creative.cycle is not None or request.creative.production is not None
@@ -859,14 +886,13 @@ class CodexCliCreativeClient:
         try:
             _need(isinstance(request, StructuredModelRequest))
             request = StructuredModelRequest(request.config, request.creative)
-            cap, runner, timeout = self._capability, self._runner or _bounded_cli_process, self._timeout
-            kind = "AUTHENTICATED_CLI_PROBE" if self._runner is None else "TEST_ONLY_MOCK"
+            cap, runner, timeout = self._capability, _bounded_cli_process if native else injected_runner, self._timeout
+            kind = _VERIFIED_EXECUTION_KIND if native else "TEST_ONLY_MOCK"
             with tempfile.TemporaryDirectory(prefix="a03-creative-") as directory:
-                probe_digest = self._probe(cap, request.config, runner, directory)
+                probe_digest = CodexCliCreativeClient._probe(cap, request.config, runner, directory)
                 # Codex strict schemas require every property to be required.
                 # Null means an unchanged field for edit operations only.
                 request_hash, schema, packet = _cli_request(request)
-                output_schema = schema["properties"]["output"]
                 schema_path = Path(directory) / "output-schema.json"
                 schema_bytes = canonical_bytes(schema)
                 schema_path.write_bytes(schema_bytes)
@@ -877,26 +903,21 @@ class CodexCliCreativeClient:
                 evidence = CLIExecutionObservation(kind, cap.executable_sha256, cap.version,
                     sha256_bytes(canonical_bytes(list(argv))), probe_digest, request.creative.digest,
                     sha256_bytes(canonical_bytes(request.config.to_dict())), sha256_bytes(packet),
-                    sha256_bytes(schema_bytes), "UNKNOWN")
+                    sha256_bytes(schema_bytes), "UNKNOWN", authorization_ref=authorization.authorization_ref)
                 started = time.time()
-                process = self._process(runner, argv, packet, directory, timeout)
+                process = CodexCliCreativeClient._process(runner, argv, packet, directory, timeout)
                 evidence = replace(evidence, stdout_sha256=sha256_bytes(process.stdout),
                                    stderr_sha256=sha256_bytes(process.stderr))
                 stdout = process.stdout
                 _need(process.returncode == 0, "UNKNOWN_EFFECT")
-                thread_id, output, usage = self._events(process.stdout)
+                thread_id, output, usage = CodexCliCreativeClient._events(process.stdout)
                 native_output = output
-                model, effort, session_hash = self._session(cap, thread_id, packet, started)
+                model, effort, session_hash = CodexCliCreativeClient._session(cap, thread_id, packet, started)
                 evidence = replace(evidence, effect="PROCESS_INVOKED", session_sha256=session_hash,
                                    observed_model=model, observed_effort=effort, cli_thread_id=thread_id)
                 _need((model, effort) == (request.config.model, request.config.effort))
-                value = exact_fields(read_json(output), {"request_sha256", "output"})
-                _need(value["request_sha256"] == request_hash)
-                value = exact_fields(value["output"], set(output_schema["required"]))
-                if request.creative.operation in ("REFRAME", "DEVELOP"):
-                    value["edits"] = {k: v for k, v in exact_fields(value["edits"], set(EDITABLE_FIELDS)).items()
-                                      if v is not None}
-                observation = (ProviderObservation("codex-cli", model, "MODEL") if kind == "AUTHENTICATED_CLI_PROBE"
+                value = _codex_output(request, output, request_hash, schema)
+                observation = (ProviderObservation("codex-cli", model, "MODEL") if native
                                else ProviderObservation("codex-cli-test-only", "UNKNOWN", "TEST_ONLY_MOCK"))
                 return StructuredModelResponse("OK", canonical_bytes(value).decode("utf-8"), observation,
                                                usage, execution=evidence, **transport())
@@ -911,6 +932,95 @@ class CodexCliCreativeClient:
             code = "CONFIGURATION_MISMATCH" if evidence is None else "UNKNOWN_EFFECT"
         return StructuredModelResponse("ERROR", error_code=code, execution=evidence, **transport(),
             message="CLI invocation unavailable or unresolved; identity/usage UNKNOWN, no retry performed")
+
+
+def _verify_codex_receipt(request: StructuredModelRequest, response: StructuredModelResponse) -> None:
+    """Recheck the retained native bytes. The session/probe hashes come from the live adapter."""
+    if any(value is None for value in (response.output_envelope_json, response.cli_stdin_json,
+                                       response.cli_schema_json, response.cli_stdout_base64)):
+        raise CreativeValidationError("Codex completion requires exact native transport bytes")
+    request_hash, schema, packet = _cli_request(request)
+    try:
+        thread, output, usage = CodexCliCreativeClient._events(base64.b64decode(response.cli_stdout_base64))
+        normalized = _codex_output(request, output, request_hash, schema)
+    except (_CLIStopped, ValueError, UnicodeError) as exc:
+        raise CreativeValidationError("invalid saved native output stream") from exc
+    if (thread != response.execution.cli_thread_id or output != response.output_envelope_json
+            or usage != response.usage or normalized != read_json(response.output_json)):
+        raise CreativeValidationError("native output/usage/session evidence mismatch")
+    if (response.cli_stdin_json.encode("utf-8") != packet
+            or response.cli_schema_json.encode("utf-8") != canonical_bytes(schema)):
+        raise CreativeValidationError("native stdin/schema rebound its model request")
+
+
+@dataclass(frozen=True, slots=True)
+class _SourceTransport:
+    transport_id: str
+    provider: str
+    adapter_type: type[StructuredCreativeClient]
+    authenticated_kind: str | None
+    execution_mode: Callable[[StructuredCreativeClient], str]
+    invoke: Callable[[StructuredCreativeClient, StructuredModelRequest, InvocationAuthorization], StructuredModelResponse]
+    verify_receipt: Callable[[StructuredModelRequest, StructuredModelResponse], None]
+    benchmark_hold: Callable[[BenchmarkLiveTrialGrant], str]
+
+
+# Only source-reviewed entries can invoke or verify a native transport. Job
+# JSON, generic clients and fixture runners cannot register an adapter. The
+# immutable legacy wire selects its verifier by provider, so a provider has
+# one receipt verifier under this format.
+_SOURCE_TRANSPORTS = (
+    _SourceTransport("codex-exec-jsonl", "codex-cli", CodexCliCreativeClient,
+                     _VERIFIED_EXECUTION_KIND,
+                     CodexCliCreativeClient.execution_mode.fget, CodexCliCreativeClient._complete,
+                     _verify_codex_receipt, CodexCliCreativeClient.benchmark_budget_hold),
+)
+
+
+def _client_transport(client: StructuredCreativeClient | None) -> _SourceTransport | None:
+    return next((entry for entry in _SOURCE_TRANSPORTS if type(client) is entry.adapter_type), None)
+
+
+def _receipt_transport(config: ModelConfiguration | None) -> _SourceTransport | None:
+    if config is None:
+        return None
+    return next((entry for entry in _SOURCE_TRANSPORTS if config.provider == entry.provider), None)
+
+
+def _bound_transport_execution(config: ModelConfiguration, execution: CLIExecutionObservation) -> bool:
+    return (execution.effect == "PROCESS_INVOKED"
+            and all(execution.attempt_evidence) and execution.authorization_ref is not None
+            and (execution.observed_model, execution.observed_effort) == (config.model, config.effort)
+            and execution.configuration_digest == sha256_bytes(canonical_bytes(config.to_dict())))
+
+
+def verified_model_transport(
+    config: ModelConfiguration | None, observed: ProviderObservation, execution: CLIExecutionObservation | None,
+    *, authorization: InvocationAuthorization | None = None,
+) -> str | None:
+    """Return the transport identity of an already validated, trusted local receipt.
+
+    This checks completion and the expected runner grant where available. A
+    detached assertion of these fields cannot authenticate a process or grant.
+    """
+    transport = _receipt_transport(config)
+    if (transport is None or config is None or execution is None or execution.kind != transport.authenticated_kind
+            or observed.mode != "MODEL" or (observed.provider, observed.model) != (transport.provider, config.model)
+            or not all(_known_native_identity(value) for value in (config.model, config.effort, execution.version))
+            or not _bound_transport_execution(config, execution)):
+        return None
+    if authorization is not None and (not (authorization.allow_network and authorization.allow_spend)
+                                      or execution.authorization_ref != authorization.authorization_ref):
+        return None
+    return transport.transport_id
+
+
+def _verify_saved_transport(request: StructuredModelRequest, response: StructuredModelResponse) -> None:
+    transport = _receipt_transport(request.config)
+    if (transport is None or response.execution is None
+            or not _bound_transport_execution(request.config, response.execution)):
+        raise CreativeValidationError("unbound native transport completion")
+    transport.verify_receipt(request, response)
 
 
 class LiveCreativeReasoner:
@@ -941,6 +1051,17 @@ class LiveCreativeReasoner:
     def observation(self) -> ProviderObservation:
         return ProviderObservation()
 
+    @property
+    def execution_mode(self) -> str:
+        client = self.client
+        transport = _client_transport(client)
+        try:
+            if transport is not None:
+                return transport.execution_mode(client)
+            return client.execution_mode if client is not None else "UNKNOWN"
+        except Exception:
+            return "UNKNOWN"
+
     def research(self, request: BenchmarkResearchRequest, authorization_ref: str) -> BenchmarkResearchReceipt | None:
         provider = self.research_provider
         if type(provider) is not LocalResearchFixtureProvider:
@@ -955,9 +1076,11 @@ class LiveCreativeReasoner:
                 or not (authorization.allow_network and authorization.allow_spend)
                 or authorization.authorization_ref != grant.authorization_ref):
             return "HOLD_AUTHORIZATION", "MATCHING_LIVE_TRANSPORT_AUTHORIZATION_REQUIRED"
-        client = self.client
-        if type(client) is CodexCliCreativeClient and client.execution_mode == "MODEL" and grant.provider == "codex-cli":
-            return "HOLD_BUDGET", client.benchmark_budget_hold(grant)
+        client, config = self.client, self.config
+        transport = _client_transport(client)
+        if (transport is not None and transport.authenticated_kind is not None and _receipt_transport(config) is transport
+                and grant.provider == transport.provider and self.execution_mode == "MODEL"):
+            return "HOLD_BUDGET", transport.benchmark_hold(grant)
         return "HOLD_DEPENDENCY", "NO_ACCOUNT_BOUND_BUDGET_ENFORCING_TRANSPORT"
 
     def reason(self, request: ReasoningRequest) -> ReasoningResult:
@@ -987,9 +1110,10 @@ class LiveCreativeReasoner:
         if config is None or client is None or "UNKNOWN" in (config.provider, config.model):
             return outcome("NO_MODEL_CONFIGURED", error_code="NO_MODEL_CONFIGURED",
                                    message="Supply an explicit model configuration and structured client")
+        transport = _client_transport(client)
         try:
-            caps = client.capabilities
-            mode = client.execution_mode
+            caps = client.capabilities if transport is None else transport.adapter_type.capabilities
+            mode = client.execution_mode if transport is None else transport.execution_mode(client)
             if not isinstance(caps, ProviderCapabilities):
                 raise CreativeValidationError("invalid client capabilities")
             require_text(caps.name, "client name")
@@ -1002,22 +1126,26 @@ class LiveCreativeReasoner:
             return outcome("ERROR", error_code="INVALID_CLIENT",
                                    message="Client must declare valid capabilities and execution mode")
         if ((caps.network_required and not authorization.allow_network)
-                or (caps.external_spend_possible and not authorization.allow_spend)):
+                or (caps.external_spend_possible and not authorization.allow_spend)
+                or (transport is not None and mode == "MODEL"
+                    and not (authorization.allow_network and authorization.allow_spend and authorization.authorization_ref))):
             return outcome("UNAUTHORIZED", error_code="UNAUTHORIZED",
                                    message="Client network/spend capabilities require explicit authorization")
-        if request.benchmark is not None and (mode != "TEST_ONLY_MOCK" or type(client) is CodexCliCreativeClient
+        if request.benchmark is not None and (mode != "TEST_ONLY_MOCK" or transport is not None
                                                or caps.network_required or caps.external_spend_possible):
             return outcome("ERROR", error_code="HOLD_DEPENDENCY",
                            message="Benchmark requires a verified budget-enforcing live transport or offline fixture")
         strict_provenance = request.cycle is not None or request.production is not None or request.benchmark is not None
-        if strict_provenance and mode == "MODEL" and type(client) is not CodexCliCreativeClient:
-            # R2/R3 MODEL evidence must originate at the native, probed transport.
-            # A generic injected client's self-reported CLI/session JSON cannot
-            # manufacture legitimate process provenance. R1 stays compatible.
+        if strict_provenance and mode == "MODEL" and (transport is None or transport.authenticated_kind is None):
             return outcome("ERROR", error_code="UNVERIFIED_MODEL_ADAPTER",
-                           message="R2/R3 model execution requires the native verified CLI transport")
+                           message="R2/R3 model execution requires a source-verified native transport")
+        if transport is not None and _receipt_transport(config) is not transport:
+            return outcome("ERROR", error_code="CONFIGURATION_MISMATCH",
+                           message="Configured provider does not match the selected native transport")
         try:
-            response = client.complete(StructuredModelRequest(config, request))
+            model_request = StructuredModelRequest(config, request)
+            response = (client.complete(model_request) if transport is None
+                        else transport.invoke(client, model_request, authorization))
         except Exception:
             return outcome("ERROR", error_code="MODEL_ERROR",
                                    message="Model client failed; outcome/usage UNKNOWN, no retry performed")
@@ -1026,12 +1154,22 @@ class LiveCreativeReasoner:
                 raise CreativeValidationError("expected typed structured model response")
             response = StructuredModelResponse.from_dict(response.to_dict())
             if response.execution is not None:
-                response = replace(response, execution=replace(response.execution,
-                                   authorization_ref=authorization.authorization_ref))
+                if transport is None and response.execution.kind != "TEST_ONLY_MOCK":
+                    raise CreativeValidationError("unregistered client supplied native authentication evidence")
+                if response.execution.authorization_ref not in (None, authorization.authorization_ref):
+                    raise CreativeValidationError("response disagrees with invocation authorization")
+                if transport is None or mode != "MODEL":
+                    response = replace(response, execution=replace(response.execution,
+                                       authorization_ref=authorization.authorization_ref))
             if response.observation.mode != mode and (response.state == "OK" or response.observation.mode != "UNKNOWN"):
                 raise CreativeValidationError("response disagrees with declared client execution mode")
             if mode == "TEST_ONLY_MOCK" and response.observation.model != "UNKNOWN":
                 raise CreativeValidationError("fake client cannot assert real-model inference")
+            if transport is not None and mode == "MODEL" and response.state == "OK" and (
+                verified_model_transport(config, response.observation, response.execution,
+                                         authorization=authorization) != transport.transport_id
+            ):
+                raise CreativeValidationError("native model response lacks a verified transport attestation")
         except (CreativeValidationError, TypeError, ValueError):
             rejected = {}
             if strict_provenance and isinstance(response, StructuredModelResponse):

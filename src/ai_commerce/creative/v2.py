@@ -165,6 +165,11 @@ class UsageObservation:
         return _mark_verified(cls(**value), cls)
 
 
+# Historical wire label for native verified execution. The source registry
+# identifies the transport and selects its verifier independently of this label.
+_VERIFIED_EXECUTION_KIND = "AUTHENTICATED_CLI_PROBE"
+
+
 @dataclass(frozen=True, slots=True)
 class CLIExecutionObservation:
     """Local process evidence, never supplied by the generated creative JSON.
@@ -192,7 +197,7 @@ class CLIExecutionObservation:
     authorization_ref: str | None = None
 
     def __post_init__(self) -> None:
-        if self.kind not in ("AUTHENTICATED_CLI_PROBE", "TEST_ONLY_MOCK"):
+        if self.kind not in (_VERIFIED_EXECUTION_KIND, "TEST_ONLY_MOCK"):
             raise CreativeValidationError("invalid CLI evidence kind")
         if self.effect not in ("PROCESS_INVOKED", "UNKNOWN"):
             raise CreativeValidationError("invalid CLI effect")
@@ -210,6 +215,10 @@ class CLIExecutionObservation:
 
     def to_dict(self) -> dict[str, Any]:
         return {f.name: getattr(self, f.name) for f in fields(self)}
+
+    @property
+    def attempt_evidence(self) -> tuple[str | None, str | None, str | None]:
+        return self.cli_thread_id, self.session_sha256, self.stdout_sha256
 
     @classmethod
     def from_dict(cls, data: object) -> CLIExecutionObservation:
@@ -988,8 +997,8 @@ class ReasoningResult:
                 if self.response_json is not None:
                     # Retain the exact output string and independently check that
                     # normalized outputs/metadata are what the adapter observed.
-                    from .live import (CodexCliCreativeClient, StructuredModelRequest, StructuredModelResponse,
-                                       _CLIStopped, _cli_request, parse_creative_output)
+                    from .live import (StructuredModelRequest, StructuredModelResponse, _verify_saved_transport,
+                                       parse_creative_output)
                     raw = read_json(self.response_json)
                     rejected = self.state == "ERROR" and self.error_code == "INVALID_MODEL_RESPONSE"
                     response = None if rejected else StructuredModelResponse.from_dict(raw)
@@ -1004,34 +1013,10 @@ class ReasoningResult:
                         parsed = parse_creative_output(self.request, response.output_json)
                         if any(getattr(self, name) != val for name, val in parsed.items()):
                             raise CreativeValidationError("result differs from immutable model output")
-                        model_request = None
-                        if response.output_envelope_json is not None:
-                            envelope = exact_fields(read_json(response.output_envelope_json), {"request_sha256", "output"})
-                            model_request = StructuredModelRequest(self.configuration, self.request)
-                            if envelope["request_sha256"] != sha256_bytes(canonical_bytes(model_request.to_dict())):
-                                raise CreativeValidationError("native output envelope rebound request")
-                            output = envelope["output"]
-                            if self.request.operation == "DEVELOP":
-                                output["edits"] = {k: v for k, v in exact_fields(output["edits"], set(EDITABLE_FIELDS)).items()
-                                                   if v is not None}
-                            if output != read_json(response.output_json):
-                                raise CreativeValidationError("normalized result lost native model output")
                         if self.execution is not None:
-                            import base64
-                            if any(getattr(response, n) is None for n in
-                                   ("output_envelope_json", "cli_stdin_json", "cli_schema_json", "cli_stdout_base64")):
-                                raise CreativeValidationError("R2/R3 CLI success needs exact transport bytes")
-                            try:
-                                thread, output, usage = CodexCliCreativeClient._events(base64.b64decode(response.cli_stdout_base64))
-                            except (_CLIStopped, ValueError, UnicodeError) as exc:
-                                raise CreativeValidationError("invalid saved native output stream") from exc
-                            if (thread != self.execution.cli_thread_id or output != response.output_envelope_json
-                                    or usage != self.usage):
-                                raise CreativeValidationError("native output/usage/session evidence mismatch")
-                            _, schema, packet = _cli_request(model_request)
-                            if (response.cli_stdin_json.encode("utf-8") != packet
-                                    or response.cli_schema_json.encode("utf-8") != canonical_bytes(schema)):
-                                raise CreativeValidationError("native stdin/schema rebound its model request")
+                            _verify_saved_transport(StructuredModelRequest(self.configuration, self.request), response)
+                        elif response.output_envelope_json is not None or self.observation.mode == "MODEL":
+                            raise CreativeValidationError("reasoning completion requires native transport evidence")
                 elif self.state == "OK" or (benchmark is not None and self.state == "REFUSED"):
                     raise CreativeValidationError("reasoning outcome requires immutable observed model response")
             if self.state not in ("OK", "NO_MODEL_CONFIGURED", "UNAUTHORIZED", "REFUSED", "ERROR"):
@@ -1052,15 +1037,12 @@ class ReasoningResult:
                         or self.execution.configuration_digest != sha256_bytes(canonical_bytes(self.configuration.to_dict()))):
                     raise CreativeValidationError("CLI evidence request/configuration mismatch")
                 if self.state == "OK":
-                    expected_mode = "MODEL" if self.execution.kind == "AUTHENTICATED_CLI_PROBE" else "TEST_ONLY_MOCK"
-                    if (self.execution.effect != "PROCESS_INVOKED" or self.observation.mode != expected_mode
-                            or self.execution.session_sha256 is None or self.execution.stdout_sha256 is None
-                            or self.execution.cli_thread_id is None or self.execution.authorization_ref is None
-                            or self.execution.observed_model != self.configuration.model
-                            or self.execution.observed_effort != self.configuration.effort):
+                    from .live import _bound_transport_execution, verified_model_transport
+
+                    mock = (self.execution.kind == "TEST_ONLY_MOCK" and self.observation.mode == "TEST_ONLY_MOCK"
+                            and _bound_transport_execution(self.configuration, self.execution))
+                    if not mock and verified_model_transport(self.configuration, self.observation, self.execution) is None:
                         raise CreativeValidationError("unbound CLI completion")
-                    if expected_mode == "MODEL" and self.observation.model != self.execution.observed_model:
-                        raise CreativeValidationError("CLI observation identity mismatch")
             for name, expected in (("drafts", ConceptDraft), ("edits", ConceptChange)):
                 value = getattr(self, name)
                 if not isinstance(value, (list, tuple)) or any(not isinstance(v, expected) for v in value):
@@ -1256,6 +1238,13 @@ def reason_v2(request: ReasoningRequest, reasoner: CreativeReasonerV2 | None = N
         result = ReasoningResult.from_dict(result.to_dict())
         if result.request != valid:
             raise CreativeValidationError("reasoner rebound the request or source revision")
+        if (result.state == "OK" and result.observation.mode == "MODEL"
+                and (result.execution is not None or valid.cycle is not None or valid.production is not None
+                     or valid.benchmark is not None)):
+            from .live import LiveCreativeReasoner
+
+            if type(reasoner) is not LiveCreativeReasoner:
+                raise CreativeValidationError("native model execution requires the live reasoner")
         return result
     except CreativeValidationError:
         return ReasoningResult(valid, "ERROR", error_code="INVALID_REASONER_RESULT",
@@ -1406,10 +1395,10 @@ def inference_failure(result: ReasoningResult) -> str | None:
     config, observed = result.configuration, result.observation
     if config is None or "UNKNOWN" in (config.provider, config.model):
         return "NO_MODEL_CONFIGURED"
-    cli_bound = (result.execution is not None and result.execution.effect == "PROCESS_INVOKED"
-                 and result.execution.cli_thread_id is not None and result.execution.session_sha256 is not None)
+    transport_bound = (result.execution is not None and result.execution.effect == "PROCESS_INVOKED"
+                       and all(result.execution.attempt_evidence))
     if (observed.mode == "UNKNOWN" or observed.provider == "UNKNOWN"
-            or (result.provider_request_id is None and not cli_bound)):
+            or (result.provider_request_id is None and not transport_bound)):
         return "UNBOUND_PROVIDER"
     if observed.mode == "TEST_ONLY_MOCK":
         return None if observed.model == "UNKNOWN" else "INVALID_MOCK_IDENTITY"
@@ -1713,19 +1702,15 @@ class _CycleHalt(Exception):
 
 def _cycle_step_failure(stage: A03CreativeStageResult, previous: list[A03CreativeStageResult],
                         authorization: InvocationAuthorization) -> str | None:
+    from .live import verified_model_transport
+
     if stage.status not in ("CREATIVE_COMPLETE", "TEST_ONLY_MOCK"):
         return stage.failure or "UNKNOWN_INFERENCE"
-    result, config = stage.reasoning, stage.job.configuration
-    if result.observation.mode == "MODEL":
-        e = result.execution
-        if (e is None or e.kind != "AUTHENTICATED_CLI_PROBE" or e.effect != "PROCESS_INVOKED"
-                or e.session_sha256 is None or e.stdout_sha256 is None or e.cli_thread_id is None
-                or e.authorization_ref != authorization.authorization_ref or config.effort in (None, "UNKNOWN")
-                or (e.observed_model, e.observed_effort) != (config.model, config.effort)):
-            return "UNVERIFIED_MODEL_EXECUTION"
-        response = read_json(result.response_json)
-        if any(response.get(n) is None for n in ("output_envelope_json", "cli_stdin_json", "cli_schema_json", "cli_stdout_base64")):
-            return "MISSING_NATIVE_OUTPUT"
+    result = stage.reasoning
+    if result.observation.mode == "MODEL" and verified_model_transport(
+        stage.job.configuration, result.observation, result.execution, authorization=authorization,
+    ) is None:
+        return "UNVERIFIED_MODEL_EXECUTION"
     for prior in previous:
         other = prior.reasoning
         if other.observation != result.observation or (other.execution is None) != (result.execution is None):
@@ -1733,12 +1718,15 @@ def _cycle_step_failure(stage: A03CreativeStageResult, previous: list[A03Creativ
         if (other.digest == result.digest or other.request.digest == result.request.digest
                 or (result.provider_request_id is not None and other.provider_request_id == result.provider_request_id)):
             return "REPLAYED_INFERENCE"
-        if result.execution is not None:
-            if any(getattr(result.execution, name) is not None and
-                   getattr(result.execution, name) == getattr(other.execution, name)
-                   for name in ("cli_thread_id", "session_sha256", "stdout_sha256")):
-                return "REPLAYED_INFERENCE"
+        if _replayed_transport_attempt(result.execution, other.execution):
+            return "REPLAYED_INFERENCE"
     return None
+
+
+def _replayed_transport_attempt(left: CLIExecutionObservation | None, right: CLIExecutionObservation | None) -> bool:
+    return left is not None and right is not None and any(
+        identity is not None and identity == seen for identity, seen in zip(left.attempt_evidence, right.attempt_evidence)
+    )
 
 
 def _creative_cycle_flow(job: A03CreativeCycleJob, authorization: InvocationAuthorization):
@@ -1901,7 +1889,7 @@ def run_creative_cycle(job: A03CreativeCycleJob, store: CreativeStore | Creative
                        authorization: InvocationAuthorization | None = None) -> A03CreativeCycleResult:
     """Run R2 without Human relays, provider defaults, retries or other effects.
 
-    The existing LiveCreativeReasoner/CLI seam owns every actual inference.
+    The live reasoner and its source-verified transports own model inference.
     Completed steps replay from disk. Interrupted claims only reconstruct saved
     observations and HOLD; they never re-invoke a provider.
     """
@@ -1938,7 +1926,7 @@ def run_creative_cycle(job: A03CreativeCycleJob, store: CreativeStore | Creative
             else:
                 if reasoner is not None and reasoner.client is not None:
                     expected_mode = "MODEL" if job.seed.purpose == "PRODUCTION" else "TEST_ONLY_MOCK"
-                    if reasoner.client.execution_mode != expected_mode:
+                    if reasoner.execution_mode != expected_mode:
                         failure = "ADAPTER_MODE_MISMATCH"
                         break
                 stage = run_creative_stage(pending, sidecars, reasoner, authorization=grant)
@@ -2140,32 +2128,28 @@ def _production_step_failure(
     stage: A03CreativeStageResult, cycle: A03CreativeCycleResult,
     authorization: InvocationAuthorization, parent: A03CreativeProductionPackage | None,
 ) -> str | None:
+    from .live import verified_model_transport
+
     if stage.status not in ("CREATIVE_COMPLETE", "TEST_ONLY_MOCK"):
         return stage.failure or "UNKNOWN_INFERENCE"
-    result, config = stage.reasoning, stage.job.configuration
-    if result.observation.mode == "MODEL":
-        e = result.execution
-        if (e is None or e.kind != "AUTHENTICATED_CLI_PROBE" or e.effect != "PROCESS_INVOKED"
-                or e.session_sha256 is None or e.stdout_sha256 is None or e.cli_thread_id is None
-                or e.authorization_ref != authorization.authorization_ref or config.effort in (None, "UNKNOWN")
-                or (e.observed_model, e.observed_effort) != (config.model, config.effort)):
-            return "UNVERIFIED_MODEL_EXECUTION"
-        response = read_json(result.response_json)
-        if any(response.get(n) is None for n in
-               ("output_envelope_json", "cli_stdin_json", "cli_schema_json", "cli_stdout_base64")):
-            return "MISSING_NATIVE_OUTPUT"
+    result = stage.reasoning
+    if result.observation.mode == "MODEL" and verified_model_transport(
+        stage.job.configuration, result.observation, result.execution, authorization=authorization,
+    ) is None:
+        return "UNVERIFIED_MODEL_EXECUTION"
     for prior in cycle.steps:
         other = prior.reasoning
         if (other.digest == result.digest or other.request.digest == result.request.digest
                 or (result.provider_request_id is not None and other.provider_request_id == result.provider_request_id)):
             return "REPLAYED_INFERENCE"
-        if result.execution is not None and other.execution is not None:
-            if any(getattr(result.execution, name) is not None
-                   and getattr(result.execution, name) == getattr(other.execution, name)
-                   for name in ("cli_thread_id", "session_sha256", "stdout_sha256")):
-                return "REPLAYED_INFERENCE"
-    if parent is not None and result.production_spec == parent.spec:
-        return "NO_MATERIAL_CHANGE"
+        if _replayed_transport_attempt(result.execution, other.execution):
+            return "REPLAYED_INFERENCE"
+    if parent is not None:
+        if ((result.provider_request_id is not None and result.provider_request_id == parent.provider_request_id)
+                or _replayed_transport_attempt(result.execution, parent.execution)):
+            return "REPLAYED_INFERENCE"
+        if result.production_spec == parent.spec:
+            return "NO_MATERIAL_CHANGE"
     return None
 
 
@@ -2183,7 +2167,7 @@ class A03CreativeProductionResult:
     schema_version: str = "A03CreativeProductionResult.v1"
 
     def __post_init__(self) -> None:
-        from .live import InvocationAuthorization
+        from .live import InvocationAuthorization, verified_model_transport
         with _parse_scope():
             if self.schema_version != "A03CreativeProductionResult.v1" or not isinstance(self.job, A03CreativeProductionJob):
                 raise CreativeValidationError("expected typed R3 production result")
@@ -2247,12 +2231,9 @@ class A03CreativeProductionResult:
                             or p.edit_reason != self.job.edit_reason):
                         raise CreativeValidationError("production revision disagrees with pinned parent package")
                 if self.status == "CREATIVE_COMPLETE":
-                    e = p.execution
                     if (self.job.purpose != "PRODUCTION" or p.lineage.cycle_status != "CREATIVE_COMPLETE"
-                            or p.observation.mode != "MODEL" or e is None or e.kind != "AUTHENTICATED_CLI_PROBE"
-                            or e.effect != "PROCESS_INVOKED" or e.authorization_ref != self.authorization.authorization_ref
-                            or self.job.configuration is None
-                            or (e.observed_model, e.observed_effort) != (self.job.configuration.model, self.job.configuration.effort)):
+                            or verified_model_transport(p.configuration, p.observation, p.execution,
+                                                        authorization=self.authorization) is None):
                         raise CreativeValidationError("CREATIVE_COMPLETE production result requires verified native MODEL execution")
                 else:
                     if (self.job.purpose != "TEST_ONLY_MOCK" or p.observation.mode != "TEST_ONLY_MOCK"
@@ -2392,7 +2373,7 @@ def run_creative_production(
         hold_failure = "NO_MODEL_CONFIGURED"
     elif reasoner.config is not None and reasoner.config != job.configuration:
         hold_failure = "CONFIGURATION_MISMATCH"
-    elif reasoner.client.execution_mode != ("MODEL" if job.purpose == "PRODUCTION" else "TEST_ONLY_MOCK"):
+    elif reasoner.execution_mode != ("MODEL" if job.purpose == "PRODUCTION" else "TEST_ONLY_MOCK"):
         hold_failure = "ADAPTER_MODE_MISMATCH"
 
     if hold_failure is not None:
@@ -4397,6 +4378,7 @@ def observe_benchmark_run(
     Never invokes any provider, network, spend, or orchestrator. Re-verifies every
     referenced artifact on disk via CreativeSidecarStore.
     """
+    from .live import verified_model_transport
     from .sidecars import CreativeSidecarStore
     from ai_commerce.media.generation import A04CreativeHandoffReceipt, load_a04_handoff_receipt
 
@@ -4641,13 +4623,10 @@ def observe_benchmark_run(
                 errors.append(st.failure)
             elif st.reasoning.error_code:
                 errors.append(st.reasoning.error_code)
-        elif st.reasoning.observation.mode == "MODEL":
-            e = st.reasoning.execution
-            cfg = st.job.configuration
-            if (e is None or e.kind != "AUTHENTICATED_CLI_PROBE" or e.effect != "PROCESS_INVOKED"
-                    or cfg is None or cfg.effort in (None, "UNKNOWN")
-                    or (e.observed_model, e.observed_effort) != (cfg.model, cfg.effort)):
-                hold_reasons.append("UNVERIFIED_MODEL_EXECUTION")
+        elif st.reasoning.observation.mode == "MODEL" and verified_model_transport(
+            st.job.configuration, st.reasoning.observation, st.reasoning.execution,
+        ) is None:
+            hold_reasons.append("UNVERIFIED_MODEL_EXECUTION")
 
     research_status: Literal["VERIFIED_SOURCE_BYTES", "UNKNOWN"] = (
         "VERIFIED_SOURCE_BYTES" if evidence_sources else "UNKNOWN"
