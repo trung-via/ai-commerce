@@ -4437,6 +4437,7 @@ _A10_CONFIG_FLAGS = frozenset({"--config", "--ignore-user-config", "--strict-con
 _A10_PROBE_ARGS = (("--version",), ("--help",), ("exec", "--help"))
 _A10_PROBE_TIMEOUT = 5
 _A10_PROBE_MAX_BYTES = 32768
+_A10_PROBE_WARNING = re.compile(rb"\bWARN\b|^warning:", re.IGNORECASE)
 
 
 def _a10_readiness_receipt(issue_number, source_sha=None, *, observations=None):
@@ -4643,8 +4644,14 @@ def _a10_probe_text(probe, args):
     try:
         result = probe(args)
         if (type(result.returncode) is int and result.returncode == 0
-                and type(result.stderr) is bytes and not result.stderr
+                and type(result.stderr) is bytes and len(result.stderr) <= _A10_PROBE_MAX_BYTES
                 and type(result.stdout) is bytes and 0 < len(result.stdout) <= _A10_PROBE_MAX_BYTES):
+            # Codex can emit warnings even for successful metadata commands.
+            # Categorize only stdout and never include stderr in the observation.
+            if result.stderr and (not result.stderr.strip() or any(
+                not _A10_PROBE_WARNING.search(line) for line in result.stderr.splitlines() if line.strip()
+            )):
+                return ""
             text = result.stdout.decode("utf-8").replace("\r\n", "\n")
             if not re.search(r"[\x00-\x08\x0b-\x1f\x7f]", text):
                 return text
