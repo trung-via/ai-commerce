@@ -2536,7 +2536,7 @@ jobs:
       group: personal-hostops-workspace
       cancel-in-progress: false
     env:
-      GITHUB_WORKFLOW_SHA: ${{ github.sha }}
+      GITHUB_WORKFLOW_SHA: ${{ github.workflow_sha }}
       HOSTOPS_EXEC_V1_PROTECTED_DISPATCH: ENABLED
     steps:
       - uses: actions/checkout@v4
