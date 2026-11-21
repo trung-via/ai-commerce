@@ -4432,9 +4432,6 @@ _A10_CHECK_CODES = {
     "disabled_features": (),
     "read_only_policy": (),
 }
-# Adding a pin requires independent review of the exact release and its
-# version/help behavior. Workflow registration needs only the dispatch marker.
-_A10_REVIEWED_BINARY_PINS: frozenset[str] = frozenset()
 _A10_HELP_OPTION = re.compile(r"(?m)^ {2,8}(?:-[A-Za-z], )?(--[a-z][a-z0-9-]*)(?=[ \t=,]|$)")
 _A10_CONFIG_FLAGS = frozenset({"--config", "--ignore-user-config", "--strict-config"})
 _A10_PROBE_ARGS = (("--version",), ("--help",), ("exec", "--help"))
@@ -4533,8 +4530,8 @@ def _a10_install_candidates(env):
 
 
 @contextmanager
-def _a10_pin_local_path(path, *, directory=False, read=False):
-    """Hold the directory chain for a reviewed CLI probe or cache attribute check."""
+def _a10_pin_local_path(path):
+    """Hold the directory chain for a cache attribute check."""
     import ctypes
     from ctypes import wintypes
 
@@ -4564,12 +4561,12 @@ def _a10_pin_local_path(path, *, directory=False, read=False):
     handle_info.restype = wintypes.BOOL
     with ExitStack() as handles:
         for item in reversed((path, *path.parents)):
-            is_directory = directory or item != path
+            is_directory = item != path
             if is_directory:
                 # Attribute-only opens do not enforce a Windows share lock.
                 access = 0x81  # FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES
             else:
-                access = 0x80000000 if read else 0x80  # GENERIC_READ or FILE_READ_ATTRIBUTES
+                access = 0x80  # FILE_READ_ATTRIBUTES
             share = 1  # FILE_SHARE_READ only. Deny replacement and reparse mutation.
             # OPEN_EXISTING, OPEN_REPARSE_POINT | BACKUP_SEMANTICS.
             handle = create(str(item), access, share, None, 3, 0x02200000, None)
@@ -4602,7 +4599,7 @@ def _a10_find_executable(candidates):
             info = executable.stat()
             if (stat.S_ISREG(info.st_mode) and 0 < info.st_size <= 512 * AI_MAX_BYTES
                     and _a10_is_native_executable(executable)):
-                return "OBSERVED", candidate, _native_binary_digest(executable)
+                return "OBSERVED", executable, _native_binary_digest(executable)
         except FileNotFoundError:
             continue
         except (OSError, RuntimeError, ValueError):
@@ -4672,15 +4669,15 @@ def _a10_observe_cli(probe, observations):
     version = _a10_probe_text(probe, ("--version",)).strip()
     if not re.fullmatch("codex-cli " + _HEALTH_VERSION, version, flags=re.ASCII):
         return
-    if version != "codex-cli " + models._NATIVE_CODEX_VERSION:
-        observations["version"] = "DIFFERS_FROM_SOURCE_VERSION"
-        return
-    observations["version"] = "MATCHES_SOURCE_VERSION"
+    observations["version"] = (
+        "MATCHES_SOURCE_VERSION" if version == "codex-cli " + models._NATIVE_CODEX_VERSION
+        else "DIFFERS_FROM_SOURCE_VERSION"
+    )
     root_options = _a10_help_options(_a10_probe_text(probe, ("--help",)), exec_help=False)
-    exec_options = _a10_help_options(_a10_probe_text(probe, ("exec", "--help")), exec_help=True)
     if root_options is not None:
         observations["root_help"] = "USAGE_OBSERVED"
         observations["root_flags"] = "DECLARED" if {"--config", "--disable"} <= root_options else "NOT_DECLARED"
+    exec_options = _a10_help_options(_a10_probe_text(probe, ("exec", "--help")), exec_help=True)
     if exec_options is not None:
         selector = models.ai_provider_profile("codex-cli")
         # The source argv places every one of these flags after exec. A
@@ -4694,45 +4691,45 @@ def _a10_observe_cli(probe, observations):
 
 
 @contextmanager
-def _a10_isolated_cli(executable):
-    from ai_commerce.opportunity.core.models import _bounded_native_codex
+def _a10_isolated_cli(executable, observed_sha):
+    from ai_commerce.opportunity.core.models import _bounded_native_codex, _native_binary_digest
 
-    runner_temp = _a10_local_path(os.environ.get("RUNNER_TEMP"))
-    with _a10_pin_local_path(runner_temp, directory=True) as temp_root:
-        with tempfile.TemporaryDirectory(prefix="a10-readiness-", dir=temp_root) as directory:
-            def probe(args):
-                if args not in _A10_PROBE_ARGS:
-                    deny("A10_PROBE_DENIED")
-                return _bounded_native_codex(
-                    [str(executable), *args], input=b"", cwd=directory, codex_home=directory,
-                    shell=False, timeout=_A10_PROBE_TIMEOUT, max_bytes=_A10_PROBE_MAX_BYTES,
-                )
+    with tempfile.TemporaryDirectory(prefix="a10-readiness-") as directory:
+        def probe(args):
+            if args not in _A10_PROBE_ARGS:
+                deny("A10_PROBE_DENIED")
+            # Recheck the resolved native file before every metadata process.
+            try:
+                same_binary = (executable.resolve(strict=True) == executable
+                               and _a10_is_native_executable(executable)
+                               and _native_binary_digest(executable) == observed_sha)
+            except (OSError, RuntimeError, ValueError):
+                same_binary = False
+            if not same_binary:
+                deny("A10_PROBE_BINARY_CHANGED")
+            return _bounded_native_codex(
+                [str(executable), *args], input=b"", cwd=directory, codex_home=directory,
+                shell=False, timeout=_A10_PROBE_TIMEOUT, max_bytes=_A10_PROBE_MAX_BYTES,
+            )
 
-            yield probe
+        yield probe
 
 
 def _a10_collect_readiness():
     try:
-        kind, candidate, observed_sha = _a10_find_executable(_a10_install_candidates(os.environ))
+        kind, executable, observed_sha = _a10_find_executable(_a10_install_candidates(os.environ))
     except ImportError:
         return {}
     observations = {"binary": kind}
-    if candidate is None:
+    if executable is None:
         return observations
     observations["observed_binary_sha256"] = observed_sha
     observations["catalog"] = _a10_default_catalog_state()
-    if observed_sha in _A10_REVIEWED_BINARY_PINS:
-        from ai_commerce.opportunity.core.models import _native_binary_digest
-
-        try:
-            # The passive hash is not an execution lease. Pin the original
-            # candidate and verify its bytes again while holding the handles.
-            with _a10_pin_local_path(candidate, read=True) as executable:
-                if _native_binary_digest(executable) == observed_sha:
-                    with _a10_isolated_cli(executable) as probe:
-                        _a10_observe_cli(probe, observations)
-        except (OSError, ValueError):
-            pass  # Keep the passive observations when the strict probe cannot run.
+    try:
+        with _a10_isolated_cli(executable, observed_sha) as probe:
+            _a10_observe_cli(probe, observations)
+    except (Denied, OSError, ValueError):
+        pass  # Keep observations collected before a binary or temp failure.
     return observations
 
 
