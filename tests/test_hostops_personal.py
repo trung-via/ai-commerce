@@ -4241,6 +4241,9 @@ class HostOpsExecV1Tests(unittest.TestCase):
             (self._issue_event(valid_req, state="closed"), "EVENT_SHAPE_OR_STATE_DENIED"),
             (self._issue_event(valid_req, title="[HOSTOPS WRITE] spoof"), "EVENT_SHAPE_OR_STATE_DENIED"),
             (self._issue_event(valid_req, extra_issue={"pull_request": {}}), "EVENT_SHAPE_OR_STATE_DENIED"),
+            (self._issue_event({**valid_req, "command": "Get-Date"}), "REQUEST_INVALID"),
+            (self._issue_event({**valid_req, "path": "payload.ps1"}), "REQUEST_INVALID"),
+            (self._issue_event({**valid_req, "args": []}), "REQUEST_INVALID"),
             (self._issue_event('{"schema":"HOSTOPS_EXEC_V1","schema":"HOSTOPS_EXEC_V1"}'), "DUPLICATE_JSON_KEY"),
         ]
         for ev, expected_code in bad_events:
@@ -4622,7 +4625,7 @@ class HostOpsExecV1Tests(unittest.TestCase):
                 with self.assertRaisesRegex(hostops.Denied, "REQUEST_INVALID"):
                     hostops.validate_hostops_exec_v1_receipt({**exec_receipt, **bad_patch})
 
-    def test_old_read_write_backward_compatibility_and_protected_workflow_not_triggered(self):
+    def test_old_read_write_backward_compatibility_and_dispatch_isolation(self):
         # Legacy READ and WRITE parsing remains unchanged.
         self.assertEqual(hostops.parse_event(event("read", "inventory", {}), "read")["operation"], "inventory")
         self.assertEqual(
@@ -4647,10 +4650,11 @@ class HostOpsExecV1Tests(unittest.TestCase):
             with self.assertRaises(SystemExit) as exited:
                 hostops.main()
             self.assertNotEqual(exited.exception.code, 0)
-        # Protected workflow has NOT been modified to dispatch HOSTOPS_EXEC_V1 yet.
+        # Any separate Exec job must keep its dispatch out of the legacy job.
         workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
-        for marker in ("[HOSTOPS EXEC]", "HOSTOPS_EXEC_V1", "hostops_exec_v1_cli", "HOSTOPS_EXEC_V1_PROTECTED_DISPATCH"):
-            self.assertNotIn(marker, workflow)
+        legacy_job = re.search(r"(?ms)^  hostops-personal:\n(.*?)(?=^  [a-z0-9-]+:\n|\Z)", workflow).group(1)
+        for marker in ("[HOSTOPS EXEC]", "HOSTOPS_EXEC_V1", "--hostops-exec-v1", "hostops_exec_v1_cli"):
+            self.assertNotIn(marker, legacy_job)
 
     def test_source_ci_no_native_effect_and_future_cli_interface_contract(self):
         # Exercise each guard without modifying the executor's real environment.
@@ -4897,7 +4901,7 @@ class HostOpsExecV1Tests(unittest.TestCase):
                 with patch.object(hostops, "_exec_v1_event_path", return_value=event_file) as checked_path:
                     source.reset_mock()
                     rc, plan = self._exec_cli_receipt(["--action", "plan"], env=env)
-                    self.assertEqual((rc, plan["code"], plan["source_sha"]), (0, "READY_TO_EXECUTE", self.SHA))
+                    self.assertEqual((rc, plan["code"], plan["source_sha"]), (0, "READY_TO_EXECUTE", later_sha))
                     runner.assert_not_called()
                     checked_path.assert_called_once_with(str(event_file), runtime.return_value)
                     oidc.assert_called_once_with(env, request["request_digest"], action="plan")
@@ -4918,6 +4922,7 @@ class HostOpsExecV1Tests(unittest.TestCase):
                                 with patch.dict(revisions, {later_sha: committed}):
                                     rc, rejected = self._exec_cli_receipt(["--action", action], env=env)
                                 self.assertEqual((rc, rejected["code"]), (2, "SOURCE_REVISION_MISMATCH"))
+                                self.assertIsNone(rejected["source_sha"])
                                 self.assertIsNone(journal.record(request["job_id"]))
                     runner.assert_not_called()
                     module.write_bytes(approved)
@@ -4930,7 +4935,7 @@ class HostOpsExecV1Tests(unittest.TestCase):
                     payload.write_bytes(script)
                     runner.assert_not_called()
                     rc, done = self._exec_cli_receipt(["--action", "execute"], env=env)
-                    self.assertEqual((rc, done["code"], done["source_sha"]), (0, "EXECUTION_COMPLETED", self.SHA))
+                    self.assertEqual((rc, done["code"], done["source_sha"]), (0, "EXECUTION_COMPLETED", later_sha))
                     self.assertNotIn("private output", json.dumps(done))
                     self.assertNotIn(str(root), json.dumps(done))
                     runner.assert_called_once_with(script.decode("utf-8"), 30, hostops.HOSTOPS_EXEC_V1_MAX_OUTPUT_BYTES)
@@ -5373,8 +5378,9 @@ class HostOpsExecV1Tests(unittest.TestCase):
             "sha": later_sha, "runner_environment": "self-hosted", "run_attempt": "1", "run_id": "1234567",
             "iat": now, "nbf": now, "exp": now + 300,
         }
+        script = "Get-Date"
         request = hostops.build_hostops_exec_v1_request(
-            job_id="job-oidc-001", nonce="f" * 32, script_sha256="a" * 64,
+            job_id="job-oidc-001", nonce="f" * 32, script_sha256=hashlib.sha256(script.encode()).hexdigest(),
         )
         digest = request["request_digest"]
         ctx = self._runtime(env=env)
@@ -5389,7 +5395,7 @@ class HostOpsExecV1Tests(unittest.TestCase):
                 return b'{"keys":[{"kid":"test","kty":"RSA","alg":"RS256"}]}'
             self.assertEqual(bearer, env["ACTIONS_ID_TOKEN_REQUEST_TOKEN"])
             audience = parse_qs(urlsplit(url).query)["audience"][0]
-            self.assertTrue(audience.startswith(f"ai-commerce:hostops-exec-v1:execute:{digest}:"))
+            self.assertEqual(audience, f"ai-commerce:hostops-exec-v1:{args.action}:{digest}:" + "b" * 32)
             header = b64(b'{"kid":"test","alg":"RS256"}')
             claims = b64(json.dumps({"aud": audience, **expected}).encode())
             return json.dumps({"value": f"{header}.{claims}.{b64(b'fixture-signature')}"}).encode()
@@ -5405,8 +5411,9 @@ class HostOpsExecV1Tests(unittest.TestCase):
             verify.assert_called_once()
             for claim, denied in (("actor", "foreign"), ("repository_owner", "foreign"), ("event_name", "push"),
                                   ("ref", "refs/heads/topic"), ("sha", self.SHA), ("workflow_sha", self.SHA),
-                                  ("ref_protected", "false"), ("environment", "other"),
-                                  ("exp", now - 1), ("aud", "replay")):
+                                  ("workflow_ref", "other"), ("iss", "https://example.invalid"),
+                                  ("ref_protected", "false"), ("ref_protected", None), ("environment", "other"),
+                                  ("iat", now - 121), ("exp", now - 1), ("aud", "replay")):
                 with self.subTest(claim=claim), patch.dict(expected, {claim: denied}):
                     with self.assertRaisesRegex(hostops.Denied, "PROTECTED_HOSTOPS_ONLY"):
                         hostops._exec_v1_protected_dispatch(args, ctx)
@@ -5415,6 +5422,11 @@ class HostOpsExecV1Tests(unittest.TestCase):
                 hostops._exec_v1_protected_dispatch(args, ctx)
             state.assert_not_called()
             fetch.reset_mock()
+            for env_override in ({"ACTIONS_ID_TOKEN_REQUEST_TOKEN": ""}, {"GITHUB_WORKFLOW_SHA": self.SHA}):
+                with self.subTest(env_override=env_override):
+                    bad_ctx = ctx._replace(env={**env, **env_override})
+                    with self.assertRaisesRegex(hostops.Denied, "PROTECTED_HOSTOPS_ONLY"):
+                        hostops._exec_v1_protected_dispatch(args, bad_ctx)
             spoofed = {**env, "ACTIONS_ID_TOKEN_REQUEST_URL": "https://example.invalid/idtoken"}
             with self.assertRaisesRegex(hostops.Denied, "PROTECTED_HOSTOPS_ONLY"):
                 hostops._exec_v1_check_oidc(spoofed, digest, action="execute")
@@ -5426,6 +5438,39 @@ class HostOpsExecV1Tests(unittest.TestCase):
             self.assertEqual((rc, receipt["code"]), (2, "PROTECTED_HOSTOPS_ONLY"))
             self.assertFalse(receipt["executed"])
             state.assert_not_called()
+
+            # Run the real dispatch and broker with offline OIDC and native boundaries mocked.
+            verify.side_effect = None
+            fetch.side_effect = fake_read
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "state"
+                enrollment, journal = self._enroll_legacy_native(root, self._runtime())
+                self._store_payload(enrollment, script)
+                state.return_value = root
+
+                def run(script_utf8, timeout, output_limit):
+                    self.assertEqual((script_utf8, timeout, output_limit),
+                                     (script, 30, hostops.HOSTOPS_EXEC_V1_MAX_OUTPUT_BYTES))
+                    self.assertEqual(journal.record(request["job_id"])["state"], "INTENT")
+                    return hostops.HostOpsExecV1ProcessResult(0, b"private output", b"")
+
+                with (patch.object(hostops, "_exec_v1_load_native", return_value=(enrollment, self.NATIVE_KEY)),
+                      patch.object(hostops, "_exec_v1_private_path"),
+                      patch.object(hostops, "_exec_v1_verify_source") as source,
+                      patch.object(hostops, "_default_hostops_exec_v1_runner", side_effect=run) as runner):
+                    args.action = "plan"
+                    plan = hostops._exec_v1_protected_dispatch(args, ctx)
+                    self.assertEqual((plan["status"], plan["source_sha"]), ("PLANNED", later_sha))
+                    source.assert_called_once_with(later_sha, enrollment_sha=self.SHA, approved_digest=None)
+                    self.assertIsNone(journal.record(request["job_id"]))
+                    runner.assert_not_called()
+                    args.action = "execute"
+                    result = hostops._exec_v1_protected_dispatch(args, ctx)
+                    self.assertEqual((result["status"], result["source_sha"]), ("EXECUTED", later_sha))
+                    self.assertEqual(result["issue_number"], 1201)
+                    self.assertNotIn("private output", json.dumps(result))
+                    self.assertEqual(source.call_count, 2)
+                    runner.assert_called_once()
 
     def test_native_cli_ci_guard_precedes_all_private_and_process_effects(self):
         with (patch.object(hostops, "_default_hostops_exec_v1_runtime") as runtime,
