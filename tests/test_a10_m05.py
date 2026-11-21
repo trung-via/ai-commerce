@@ -694,6 +694,8 @@ def test_automation_cli_offline_creates_brief_without_selection(automation_job, 
     completed = json.loads(captured.out)
     assert completed["status"] == "COMPLETE" and intake_brief(completed["brief"]) == completed["brief"]
     assert completed["decision"]["actor"] == "SYSTEM" and completed["next_state"] == "READY_FOR_A03_DISPATCH"
+    assert completed["dispatch_status"] == "NOT_ATTEMPTED"
+    assert not (kwargs["state_dir"] / ".production").exists()
 
 
 @pytest.fixture
@@ -708,7 +710,7 @@ def cli_handoff(automation_job):
     state = ["--state-dir", str(kwargs["state_dir"]), "--source-sha", kwargs["source_sha"]]
     grant = ["--handoff-grant", str(base / "grant.json")]
     automate = ["opportunity", "automate", "--manifest", str(base / "job.json"),
-                "--result", str(base / "event.json"), *state, "--handoff-a03"]
+                "--result", str(base / "event.json"), *state]
     resume = ["opportunity", "resume-a03", *state, *grant]
     return manifest, base, automate, resume, grant
 
@@ -720,9 +722,14 @@ def handoff_cli(capsys, argv, *, code=0):
     return json.loads(captured.out)
 
 
-def test_cli_handoff_saves_exact_brief_once_and_resumes_without_a10(cli_handoff, capsys, monkeypatch):
+def test_cli_handoff_grant_alone_saves_exact_brief_once_and_resumes_without_a10(cli_handoff, capsys, monkeypatch):
     from ai_commerce.opportunity.bridge import cli as a10_cli
     manifest, base, automate, resume, grant = cli_handoff
+
+    def deny_model(*args, **kwargs):
+        pytest.fail("Offline handoff attempted model research")
+
+    monkeypatch.setattr(a10_cli, "run_ai_research", deny_model)
     argv = [*automate, *grant, "--mode", "offline", "--allow-effect", "IMPORT_SIGNALS",
             "--allow-effect", "CREATE_BRIEF"]
     actual = handoff_cli(capsys, argv)
@@ -734,6 +741,8 @@ def test_cli_handoff_saves_exact_brief_once_and_resumes_without_a10(cli_handoff,
     brief_bytes = Path(handoff["brief_ref"]).read_bytes()
     assert producer_bytes == (base / "event.json").read_bytes()
     assert sha256_bytes(producer_bytes) == handoff["producer_result_sha256"]
+    assert result["manifest_sha256"] == digest(manifest)
+    assert result["source_hashes"] == [sha256_bytes((base / "signals.json").read_bytes())]
     assert result["status"] == "COMPLETE" and result["next_state"] == "READY_FOR_A03_DISPATCH"
     assert result["dispatch_status"] == "NOT_ATTEMPTED" and result["assessment"] is None
     assert result["decision"]["actor"] == "SYSTEM" and result["selection_template"] is None
@@ -749,6 +758,7 @@ def test_cli_handoff_saves_exact_brief_once_and_resumes_without_a10(cli_handoff,
     assert CreativeStore(owner_dir / "creative").load_brief(result["brief_sha256"]) == result["brief"]
     assert Path(receipt["artifact_ref"]).read_bytes() == canonical_bytes(result["brief"])
     assert handoff_cli(capsys, argv) == actual
+    assert handoff_cli(capsys, [*argv, "--handoff-a03"]) == actual
 
     def deny(*args, **kwargs):
         pytest.fail("Dispatch-only resume ran A10")
@@ -768,6 +778,7 @@ def test_cli_handoff_saves_exact_brief_once_and_resumes_without_a10(cli_handoff,
 
 @pytest.mark.parametrize("field,value,reason", [
     (None, None, "LOCAL_AUTHORIZATION_REQUIRED"),
+    (None, b"{", "JSON_MALFORMED"),
     ("job_id", "wrong-job", "JOB_ID_MISMATCH"),
     ("source_sha", "c" * 40, "SOURCE_SHA_MISMATCH"),
     ("scope", "LIVE", "AUTHORIZATION_SCOPE"),
@@ -775,8 +786,13 @@ def test_cli_handoff_saves_exact_brief_once_and_resumes_without_a10(cli_handoff,
 ])
 def test_cli_handoff_rejects_missing_or_mismatched_grant(cli_handoff, capsys, field, value, reason):
     _, base, automate, _, grant = cli_handoff
-    if field is not None:
-        path = base / "grant.json"
+    path = base / "grant.json"
+    if value is None:
+        automate += ["--handoff-a03"]
+    elif field is None:
+        path.write_bytes(value)
+        automate += grant
+    else:
         write(path, {**read(path), field: value})
         automate += grant
     blocked = handoff_cli(capsys, [*automate, "--mode", "offline"], code=2)
@@ -834,6 +850,7 @@ def test_cli_resume_holds_missing_completion_and_reports_unknown_without_replay(
     assert unknown["status"] == "UNKNOWN" and unknown["reason"] == "RECEIVER_UNRESOLVED"
     assert unknown["event"] is None and unknown["accepted_consumer"] is None
     assert read(base / "event.json")["status"] == "COMPLETE"
+    assert handoff_cli(capsys, argv, code=4) == unknown
 
     def deny(*args, **kwargs):
         pytest.fail("Dispatch-only resume ran A10")
