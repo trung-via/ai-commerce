@@ -3140,6 +3140,7 @@ def test_clean_9444_reconcile_read_is_strictly_readonly_and_sanitized(clean_9444
     replies = iter((
         SimpleNamespace(returncode=0, stdout=b'{"task":"DEMAND_READY","journal":"COMPLETE","d5":"ENABLED_ATTESTED"}\r\n'),
         SimpleNamespace(returncode=0, stdout=b'{"task":"DEMAND_READY","journal":"MISMATCH","d5":"ENABLED_ATTESTED"}\n'),
+        SimpleNamespace(returncode=0, stdout=b'{"task":"CONFLICT_LEGACY_ARGS","journal":"FRESH","d5":"UNVERIFIED_EXE"}\n'),
         SimpleNamespace(returncode=0, stdout=b"WINDOWS_OWNER_CONTEXT_UNVERIFIED\r\n"),
         SimpleNamespace(returncode=0, stdout=b'{"error":"WINDOWS_OWNER_CONTEXT_UNVERIFIED"}\n'),
         SimpleNamespace(returncode=0, stdout=b'{"task":"PRIVATE_LEAK","journal":"FRESH","d5":"ABSENT"}'),
@@ -3159,6 +3160,9 @@ def test_clean_9444_reconcile_read_is_strictly_readonly_and_sanitized(clean_9444
     }
     assert ca._clean_reconcile_read(owner, target, candidates) == {
         "task": "DEMAND_READY", "journal": "MISMATCH", "d5": "ENABLED_ATTESTED",
+    }
+    assert ca._clean_reconcile_read(owner, target, candidates) == {
+        "task": "CONFLICT_LEGACY_ARGS", "journal": "FRESH", "d5": "UNVERIFIED_EXE",
     }
     assert ca._clean_reconcile_read(owner, target, candidates) == {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}
     assert ca._clean_reconcile_read(owner, target, candidates) == {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}
@@ -3212,15 +3216,38 @@ def test_clean_9444_reconcile_read_is_strictly_readonly_and_sanitized(clean_9444
     ("multiple_wakehub_candidates", "MULTIPLE_CANDIDATES", "COMPLETE", "ENABLED_ATTESTED"),
     ("rogue_aicommerce_9444_candidate", "MULTIPLE_CANDIDATES", "COMPLETE", "ENABLED_ATTESTED"),
     ("benign_ef02_task_with_9444_timestamp", "DEMAND_READY", "COMPLETE", "ENABLED_ATTESTED"),
-    ("malicious_trigger_two_triggers", "CONFLICT", "FRESH", "ENABLED_ATTESTED"),
-    ("malicious_trigger_pt5m", "CONFLICT", "FRESH", "ENABLED_ATTESTED"),
-    ("malicious_trigger_daily", "CONFLICT", "FRESH", "ENABLED_ATTESTED"),
-    ("wrong_owner_sddl", "CONFLICT", "FRESH", "ENABLED_ATTESTED"),
-    ("d5_pwsh_unverified_unsigned", "DEMAND_READY", "COMPLETE", "UNVERIFIED"),
-    ("d5_pwsh_script_9444_contamination", "DEMAND_READY", "COMPLETE", "UNVERIFIED"),
-    ("d5_disabled_contaminated_acl", "DEMAND_READY", "COMPLETE", "UNVERIFIED"),
-    ("d5_disabled_active_instance", "DEMAND_READY", "COMPLETE", "UNVERIFIED"),
-    ("d5_multiple_candidates", "DEMAND_READY", "COMPLETE", "UNVERIFIED"),
+    ("malicious_trigger_two_triggers", "CONFLICT_TRIGGER_COUNT", "FRESH", "ENABLED_ATTESTED"),
+    ("malicious_trigger_pt5m", "CONFLICT_LEGACY_TRIGGER_PT1M", "FRESH", "ENABLED_ATTESTED"),
+    ("malicious_trigger_daily", "CONFLICT_LEGACY_TRIGGER_TYPE", "FRESH", "ENABLED_ATTESTED"),
+    ("wrong_owner_sddl", "CONFLICT_BASE_OWNER", "FRESH", "ENABLED_ATTESTED"),
+    ("wrong_acl_sddl", "CONFLICT_BASE_ACL", "FRESH", "ENABLED_ATTESTED"),
+    ("wrong_principal_runlevel", "CONFLICT_BASE_PRINCIPAL", "FRESH", "ENABLED_ATTESTED"),
+    ("wrong_action_count", "CONFLICT_BASE_ACTION", "FRESH", "ENABLED_ATTESTED"),
+    ("wrong_settings_limit", "CONFLICT_BASE_SETTINGS", "FRESH", "ENABLED_ATTESTED"),
+    ("foreign_moved_wakehub_task", "FOREIGN_CANDIDATE", "FRESH", "ENABLED_ATTESTED"),
+    ("demand_pwsh77_direct_path", "CONFLICT_DEMAND_PWSH_PATH", "FRESH", "ENABLED_ATTESTED"),
+    ("demand_untrusted_path", "CONFLICT_DEMAND_PATH", "FRESH", "ENABLED_ATTESTED"),
+    ("demand_workdir_mismatch", "CONFLICT_DEMAND_WORKDIR", "FRESH", "ENABLED_ATTESTED"),
+    ("demand_args_mismatch", "CONFLICT_DEMAND_ARGS", "FRESH", "ENABLED_ATTESTED"),
+    ("demand_pwsh_untrusted", "CONFLICT_DEMAND_PWSH", "FRESH", "ENABLED_ATTESTED"),
+    ("legacy_wrong_trigger_owner", "CONFLICT_LEGACY_TRIGGER_OWNER", "FRESH", "ENABLED_ATTESTED"),
+    ("legacy_trigger_delay", "CONFLICT_LEGACY_TRIGGER_CFG", "FRESH", "ENABLED_ATTESTED"),
+    ("legacy_untrusted_exe", "CONFLICT_LEGACY_PATH", "FRESH", "ENABLED_ATTESTED"),
+    ("legacy_pwsh77_args_mismatch", "CONFLICT_LEGACY_ARGS", "FRESH", "ENABLED_ATTESTED"),
+    ("legacy_pwsh77_workdir_mismatch", "CONFLICT_LEGACY_WORKDIR", "FRESH", "ENABLED_ATTESTED"),
+    ("d5_pwsh_unverified_unsigned", "DEMAND_READY", "COMPLETE", "UNVERIFIED_EXE"),
+    ("d5_untrusted_exe_powershell51", "DEMAND_READY", "COMPLETE", "UNVERIFIED_EXE"),
+    ("d5_pwsh_script_9444_contamination", "DEMAND_READY", "COMPLETE", "UNVERIFIED_SCRIPT"),
+    ("d5_pwsh_script_malicious_ast", "DEMAND_READY", "COMPLETE", "UNVERIFIED_SCRIPT"),
+    ("d5_pwsh_script_bad_custody", "DEMAND_READY", "COMPLETE", "UNVERIFIED_CUSTODY"),
+    ("d5_pwsh_bad_flags", "DEMAND_READY", "COMPLETE", "UNVERIFIED_ACTION"),
+    ("d5_disabled_contaminated_acl", "DEMAND_READY", "COMPLETE", "UNVERIFIED_ACL"),
+    ("d5_wrong_principal", "DEMAND_READY", "COMPLETE", "UNVERIFIED_PRINCIPAL"),
+    ("d5_wrong_trigger_pt1m", "DEMAND_READY", "COMPLETE", "UNVERIFIED_TRIGGER"),
+    ("d5_disabled_active_instance", "DEMAND_READY", "COMPLETE", "UNVERIFIED_STATE"),
+    ("d5_multiple_candidates", "DEMAND_READY", "COMPLETE", "UNVERIFIED_MULTIPLE"),
+    ("d5_moved_subfolder", "DEMAND_READY", "COMPLETE", "UNVERIFIED_MOVED"),
+    ("d5_xml_contaminated", "DEMAND_READY", "COMPLETE", "UNVERIFIED_BASE"),
 ])
 def test_clean_9444_reconcile_script_offline(case, expected_task, expected_journal, expected_d5):
     import hashlib
@@ -3265,12 +3292,15 @@ def test_clean_9444_reconcile_script_offline(case, expected_task, expected_journ
         "'--remote-debugging-address=127.0.0.1',\"--user-data-dir=$profileDir\",'--profile-directory=Default')\n"
     )
     bad_script = "# mentions 9444\n" + good_script
+    malicious_script = "Invoke-WebRequest 'https://example.invalid'\n" + good_script
     try:
         d5_dir.mkdir(parents=True)
-        d5_script.write_text(
-            bad_script if case == "d5_pwsh_script_9444_contamination" else good_script,
-            encoding="utf-8",
+        script_body = (
+            bad_script if case == "d5_pwsh_script_9444_contamination"
+            else malicious_script if case == "d5_pwsh_script_malicious_ast"
+            else good_script
         )
+        d5_script.write_text(script_body, encoding="utf-8")
         functions = ca._CLEAN_9444_TASK_RECONCILE_SCRIPT.split("\nfunction Read-Registration", 1)[1]
         seam = "\n$registered = Read-Registration"
         fixture = r"""
@@ -3418,6 +3448,7 @@ $validRollback = (@{ Xml = $validLegacyXml; SecurityDescriptor = $sddl } | Conve
 $script:current = New-FakeWakeTask $true 'demand-args-0'
 $script:d5 = New-FakeD5Task -enabled $true -state 3 -exePath $trustedPowerShellPaths[0] -argsOverride $pwshFileArgs
 $script:extraTasks = @()
+$script:subFolderTasks = @()
 $script:values = @{ DemandMigrationRollback = $validRollback; DemandMigrationComplete = 1 }
 
 switch ($case) {
@@ -3610,18 +3641,117 @@ switch ($case) {
         $script:current.Sddl = $sddl.Replace('O:' + $sid, 'O:SY')
         $script:values = @{}
     }
+    'wrong_acl_sddl' {
+        $script:current = New-FakeWakeTask $true 'demand-args-0'
+        $script:current.Sddl = 'O:' + $sid + 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;' + $sid + ')(A;;GW;;;AU)'
+        $script:values = @{}
+    }
+    'wrong_principal_runlevel' {
+        $script:current = New-FakeWakeTask $true 'demand-args-0'
+        $script:current.Definition.Principal.RunLevel = 1
+        $script:values = @{}
+    }
+    'wrong_action_count' {
+        $script:current = New-FakeWakeTask $true 'demand-args-0'
+        $script:current.Definition.Actions.Count = 2
+        $script:values = @{}
+    }
+    'wrong_settings_limit' {
+        $script:current = New-FakeWakeTask $true 'demand-args-0'
+        $script:current.Definition.Settings.ExecutionTimeLimit = 'PT72H'
+        $script:values = @{}
+    }
+    'foreign_moved_wakehub_task' {
+        $script:current = $null
+        $script:subFolderTasks = @(New-FakeWakeTask $true 'demand-args-0')
+        $script:values = @{}
+    }
+    'demand_pwsh77_direct_path' {
+        $script:current = New-FakeWakeTask $true 'demand-args-0'
+        $script:current.Definition.Actions.Entry.Path = $trustedPowerShellPaths[1]
+        $script:values = @{}
+    }
+    'demand_untrusted_path' {
+        $script:current = New-FakeWakeTask $true 'demand-args-0'
+        $script:current.Definition.Actions.Entry.Path = 'C:\Untrusted\pythonw.exe'
+        $script:values = @{}
+    }
+    'demand_workdir_mismatch' {
+        $script:current = New-FakeWakeTask $true 'demand-args-0'
+        $script:current.Definition.Actions.Entry.WorkingDirectory = 'C:\Temp'
+        $script:values = @{}
+    }
+    'demand_args_mismatch' {
+        $script:current = New-FakeWakeTask $true 'modified-demand-args'
+        $script:values = @{}
+    }
+    'demand_pwsh_untrusted' {
+        $script:current = New-FakeWakeTask $true 'demand-args-1'
+        $script:values = @{}
+    }
+    'legacy_wrong_trigger_owner' {
+        $script:current = New-FakeWakeTask $false '' $true 3 0 $trustedPowerShellPaths[0] $trustedPowerShellDirs[0]
+        $script:current.Definition.Triggers.Entry.UserId = 'S-1-5-21-999-999-999-1001'
+        $script:values = @{}
+    }
+    'legacy_trigger_delay' {
+        $script:current = New-FakeWakeTask $false '' $true 3 0 $trustedPowerShellPaths[0] $trustedPowerShellDirs[0]
+        $script:current.Definition.Triggers.Entry | Add-Member NoteProperty Delay 'PT10S'
+        $script:values = @{}
+    }
+    'legacy_untrusted_exe' {
+        $script:current = New-FakeWakeTask $false '' $true 3 0 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' $historicalWorkDir
+        $script:values = @{}
+    }
+    'legacy_pwsh77_args_mismatch' {
+        $script:current = New-FakeWakeTask $false '' $true 3 0 $trustedPowerShellPaths[1] $trustedPowerShellDirs[1]
+        $script:current.Definition.Actions.Entry.Arguments = '-NoProfile -NonInteractive -Command "drifted"'
+        $script:values = @{}
+    }
+    'legacy_pwsh77_workdir_mismatch' {
+        $script:current = New-FakeWakeTask $false '' $true 3 0 $trustedPowerShellPaths[1] 'C:\Temp'
+        $script:values = @{}
+    }
     'd5_pwsh_unverified_unsigned' {
         $script:d5 = New-FakeD5Task -enabled $true -state 3 -exePath $trustedPowerShellPaths[1] -argsOverride $pwshFileArgs
+    }
+    'd5_untrusted_exe_powershell51' {
+        $script:d5 = New-FakeD5Task -enabled $true -state 3 -exePath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -argsOverride $pwshFileArgs
+    }
+    'd5_pwsh_script_bad_custody' {
+        $sec = [IO.FileSystemAclExtensions]::GetAccessControl([IO.FileInfo]::new($script:d5ScriptPath))
+        $sec.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+            [Security.Principal.SecurityIdentifier]::new('S-1-1-0'), 'Modify', 'Allow'))
+        [IO.FileSystemAclExtensions]::SetAccessControl([IO.FileInfo]::new($script:d5ScriptPath), $sec)
+    }
+    'd5_pwsh_bad_flags' {
+        $script:d5 = New-FakeD5Task -enabled $true -state 3 -exePath $trustedPowerShellPaths[0] -argsOverride ('-UnknownFlag -File "' + $script:d5ScriptPath + '"')
     }
     'd5_disabled_contaminated_acl' {
         $badAcl = 'O:' + $sid + 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;' + $sid + ')(A;;GW;;;AU)'
         $script:d5 = New-FakeD5Task -enabled $false -state 1 -d5Sddl $badAcl
+    }
+    'd5_wrong_principal' {
+        $script:d5 = New-FakeD5Task -enabled $true -state 3 -exePath $trustedPowerShellPaths[0] -argsOverride $pwshFileArgs
+        $script:d5.Definition.Principal.RunLevel = 1
+    }
+    'd5_wrong_trigger_pt1m' {
+        $script:d5 = New-FakeD5Task -enabled $true -state 3 -exePath $trustedPowerShellPaths[0] -argsOverride $pwshFileArgs
+        $script:d5.Definition.Triggers.Entry.Repetition.Interval = 'PT1M'
     }
     'd5_disabled_active_instance' {
         $script:d5 = New-FakeD5Task -enabled $false -state 1 -instances 1
     }
     'd5_multiple_candidates' {
         $script:extraTasks = @(New-FakeD5Task -enabled $true -state 3 -taskName 'AI-Commerce-D5-CDP-Backup')
+    }
+    'd5_moved_subfolder' {
+        $script:d5 = $null
+        $script:subFolderTasks = @(New-FakeD5Task -enabled $true -state 3)
+    }
+    'd5_xml_contaminated' {
+        $script:d5 = New-FakeD5Task -enabled $true -state 3 -exePath $trustedPowerShellPaths[0] -argsOverride $pwshFileArgs
+        $script:d5.Xml = '<Task><Description>WakeHub-9444-Clean</Description></Task>'
     }
 }
 
@@ -3647,7 +3777,13 @@ $folder | Add-Member ScriptMethod GetTasks {
     $list += $script:extraTasks
     return ,$list
 }
-$folder | Add-Member ScriptMethod GetFolders { param($flags) return ,@() }
+$subFolder = [pscustomobject]@{ Name = 'AI-Commerce' }
+$subFolder | Add-Member ScriptMethod GetTasks { param($flags) return ,$script:subFolderTasks }
+$folder | Add-Member ScriptMethod GetFolders {
+    param($flags)
+    if ($script:subFolderTasks.Count) { return ,@($subFolder) }
+    return ,@()
+}
 $folder | Add-Member ScriptMethod RegisterTaskDefinition { $script:writes++; throw 'Never mutate task' }
 """
         overrides = r"""
@@ -3660,14 +3796,14 @@ $realSigned = (Get-Item function:Test-SignedExecutable).ScriptBlock
 function Test-SignedExecutable($path, $publisher) {
     if ($path -ieq $chromePath -and $publisher -match 'Google') { return $true }
     if ($path -ieq $trustedPowerShellPaths[1] -and $publisher -match 'Microsoft') {
-        return $case -ne 'd5_pwsh_unverified_unsigned'
+        return $case -notin @('d5_pwsh_unverified_unsigned', 'demand_pwsh_untrusted')
     }
     return & $realSigned $path $publisher
 }
 $realTrusted = (Get-Item function:Test-TrustedPowerShell).ScriptBlock
 function Test-TrustedPowerShell($path) {
     if ($path -ieq $trustedPowerShellPaths[1]) {
-        return ($case -ne 'd5_pwsh_unverified_unsigned') -and ($path -in $trustedPowerShellPaths)
+        return ($case -notin @('d5_pwsh_unverified_unsigned', 'demand_pwsh_untrusted')) -and ($path -in $trustedPowerShellPaths)
     }
     return & $realTrusted $path
 }

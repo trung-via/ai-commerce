@@ -3183,160 +3183,230 @@ function Test-AttestedD5ScriptAst($ast, $aiRoot, $cleanProfile, $scriptDir, $d5F
     return $launchCount -eq 1
 }
 
-function Get-AttestedD5Script($scriptPath, $aiRoot, $cleanProfile, $d5FileOwners) {
+function Get-AttestedD5ScriptResult($scriptPath, $aiRoot, $cleanProfile, $d5FileOwners) {
     try {
         if (!$scriptPath -or $scriptPath -isnot [string] -or $scriptPath -notmatch '^[A-Za-z]:\\.*\.ps1$' -or
-            $scriptPath -match '[%"\r\n\t\x00]' -or $scriptPath -match '(^|[\\/])\.\.([\\/]|$)' -or
-            (Test-D5Contamination $scriptPath)) { return $null }
+            $scriptPath -match '[%"\r\n\t\x00]' -or $scriptPath -match '(^|[\\/])\.\.([\\/]|$)') {
+            return @{ ok = $false; reason = 'UNVERIFIED_ACTION' }
+        }
+        if (Test-D5Contamination $scriptPath) {
+            return @{ ok = $false; reason = 'UNVERIFIED_SCRIPT' }
+        }
         $scriptFull = [IO.Path]::GetFullPath($scriptPath)
         if ($scriptFull -ine $scriptPath -or $scriptFull -ieq $cleanProfile -or
-            $scriptFull.StartsWith($cleanProfile + '\', [StringComparison]::OrdinalIgnoreCase)) { return $null }
+            $scriptFull.StartsWith($cleanProfile + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            return @{ ok = $false; reason = 'UNVERIFIED_CUSTODY' }
+        }
         $scriptSddl = Get-AttestedPathCustodySddl $scriptFull $d5FileOwners $true
-        if (!$scriptSddl) { return $null }
+        if (!$scriptSddl) { return @{ ok = $false; reason = 'UNVERIFIED_CUSTODY' } }
         $sig = Get-AuthenticodeSignature -LiteralPath $scriptFull
-        if (!$sig -or $sig.Status -cnotin @('Valid', 'NotSigned')) { return $null }
+        if (!$sig -or $sig.Status -cnotin @('Valid', 'NotSigned')) {
+            return @{ ok = $false; reason = 'UNVERIFIED_SCRIPT' }
+        }
         $sigTag = if ($sig.Status -ceq 'Valid' -and $sig.SignerCertificate) { 'SIGNED:' + [string]$sig.SignerCertificate.Thumbprint } else { 'UNSIGNED_OWNED' }
         $info = [IO.FileInfo]::new($scriptFull)
-        if ($info.Length -lt 1 -or $info.Length -gt 65536) { return $null }
+        if ($info.Length -lt 1 -or $info.Length -gt 65536) { return @{ ok = $false; reason = 'UNVERIFIED_SCRIPT' } }
         $bytes = [IO.File]::ReadAllBytes($scriptFull)
-        if ($bytes.Length -lt 1 -or $bytes.Length -gt 65536 -or ([Array]::IndexOf($bytes, [byte]0) -ge 0)) { return $null }
+        if ($bytes.Length -lt 1 -or $bytes.Length -gt 65536 -or ([Array]::IndexOf($bytes, [byte]0) -ge 0)) {
+            return @{ ok = $false; reason = 'UNVERIFIED_SCRIPT' }
+        }
         $sha = [Security.Cryptography.SHA256]::Create()
         try { $scriptHash = [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '') }
         finally { $sha.Dispose() }
         $off = if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { 3 } else { 0 }
         $scriptText = ([Text.UTF8Encoding]::new($false, $true)).GetString($bytes, $off, $bytes.Length - $off)
-        if (!$scriptText -or (Test-D5Contamination $scriptText)) { return $null }
+        if (!$scriptText -or (Test-D5Contamination $scriptText)) { return @{ ok = $false; reason = 'UNVERIFIED_SCRIPT' } }
         $tokens = $null; $parseErrors = $null
         $ast = [Management.Automation.Language.Parser]::ParseInput($scriptText, [ref]$tokens, [ref]$parseErrors)
-        if ($parseErrors -and $parseErrors.Count -gt 0) { return $null }
-        if (!(Test-AttestedD5ScriptAst $ast $aiRoot $cleanProfile ([IO.Path]::GetDirectoryName($scriptFull)) $d5FileOwners)) { return $null }
-        return @('PWSH_SCRIPT', $scriptFull.ToLowerInvariant(), $scriptHash, $bytes.Length, $sigTag, $scriptSddl) -join '|'
-    } catch { return $null }
+        if ($parseErrors -and $parseErrors.Count -gt 0) { return @{ ok = $false; reason = 'UNVERIFIED_SCRIPT' } }
+        if (!(Test-AttestedD5ScriptAst $ast $aiRoot $cleanProfile ([IO.Path]::GetDirectoryName($scriptFull)) $d5FileOwners)) {
+            return @{ ok = $false; reason = 'UNVERIFIED_SCRIPT' }
+        }
+        $val = @('PWSH_SCRIPT', $scriptFull.ToLowerInvariant(), $scriptHash, $bytes.Length, $sigTag, $scriptSddl) -join '|'
+        return @{ ok = $true; value = $val }
+    } catch { return @{ ok = $false; reason = 'UNVERIFIED_SCRIPT' } }
 }
 
-function Get-AttestedD5PowerShellAction($pwshPath, $argsLine, $workDir, $aiRoot, $cleanProfile, $d5FileOwners) {
-    if (!(Test-TrustedPowerShell $pwshPath)) { return $null }
-    if ($workDir -and !(Test-PathCustody $workDir $d5FileOwners $false)) { return $null }
+function Get-AttestedD5Script($scriptPath, $aiRoot, $cleanProfile, $d5FileOwners) {
+    $res = Get-AttestedD5ScriptResult $scriptPath $aiRoot $cleanProfile $d5FileOwners
+    if ($res.ok) { return $res.value }
+    return $null
+}
+
+function Get-AttestedD5PowerShellActionResult($pwshPath, $argsLine, $workDir, $aiRoot, $cleanProfile, $d5FileOwners) {
+    if (!(Test-TrustedPowerShell $pwshPath)) { return @{ ok = $false; reason = 'UNVERIFIED_EXE' } }
+    if ($workDir -and !(Test-PathCustody $workDir $d5FileOwners $false)) {
+        return @{ ok = $false; reason = 'UNVERIFIED_CUSTODY' }
+    }
     $tokens = Split-TaskArguments $argsLine
-    if (!$tokens) { return $null }
+    if (!$tokens) { return @{ ok = $false; reason = 'UNVERIFIED_ACTION' } }
     $seen = @{}; $mode = $null; $payload = $null
     for ($i = 0; $i -lt $tokens.Count; $i++) {
         $tok = $tokens[$i]
-        if ($tok -iin @('-NoProfile', '-nop')) { if ($seen['NoProfile']) { return $null }; $seen['NoProfile'] = $true; continue }
-        if ($tok -iin @('-NonInteractive', '-noni')) { if ($seen['NonInteractive']) { return $null }; $seen['NonInteractive'] = $true; continue }
-        if ($tok -iin @('-NoLogo', '-nol')) { if ($seen['NoLogo']) { return $null }; $seen['NoLogo'] = $true; continue }
+        if ($tok -iin @('-NoProfile', '-nop')) { if ($seen['NoProfile']) { return @{ ok = $false; reason = 'UNVERIFIED_ACTION' } }; $seen['NoProfile'] = $true; continue }
+        if ($tok -iin @('-NonInteractive', '-noni')) { if ($seen['NonInteractive']) { return @{ ok = $false; reason = 'UNVERIFIED_ACTION' } }; $seen['NonInteractive'] = $true; continue }
+        if ($tok -iin @('-NoLogo', '-nol')) { if ($seen['NoLogo']) { return @{ ok = $false; reason = 'UNVERIFIED_ACTION' } }; $seen['NoLogo'] = $true; continue }
         if ($tok -iin @('-WindowStyle', '-w')) {
-            if ($seen['WindowStyle'] -or ($i + 1) -ge $tokens.Count) { return $null }
-            $i++; if ($tokens[$i] -notin @('Hidden', 'Minimized', 'Normal')) { return $null }
+            if ($seen['WindowStyle'] -or ($i + 1) -ge $tokens.Count) { return @{ ok = $false; reason = 'UNVERIFIED_ACTION' } }
+            $i++; if ($tokens[$i] -notin @('Hidden', 'Minimized', 'Normal')) { return @{ ok = $false; reason = 'UNVERIFIED_ACTION' } }
             $seen['WindowStyle'] = $true; continue
         }
         if ($tok -imatch '^-(?:WindowStyle|w):(.+)$') {
-            if ($seen['WindowStyle'] -or $Matches[1] -notin @('Hidden', 'Minimized', 'Normal')) { return $null }
+            if ($seen['WindowStyle'] -or $Matches[1] -notin @('Hidden', 'Minimized', 'Normal')) { return @{ ok = $false; reason = 'UNVERIFIED_ACTION' } }
             $seen['WindowStyle'] = $true; continue
         }
         if ($tok -iin @('-ExecutionPolicy', '-ep')) {
-            if ($seen['ExecutionPolicy'] -or ($i + 1) -ge $tokens.Count) { return $null }
-            $i++; if ($tokens[$i] -notin @('Bypass', 'RemoteSigned', 'AllSigned', 'Default', 'Restricted', 'Unrestricted')) { return $null }
+            if ($seen['ExecutionPolicy'] -or ($i + 1) -ge $tokens.Count) { return @{ ok = $false; reason = 'UNVERIFIED_ACTION' } }
+            $i++; if ($tokens[$i] -notin @('Bypass', 'RemoteSigned', 'AllSigned', 'Default', 'Restricted', 'Unrestricted')) { return @{ ok = $false; reason = 'UNVERIFIED_ACTION' } }
             $seen['ExecutionPolicy'] = $true; continue
         }
         if ($tok -imatch '^-(?:ExecutionPolicy|ep):(.+)$') {
-            if ($seen['ExecutionPolicy'] -or $Matches[1] -notin @('Bypass', 'RemoteSigned', 'AllSigned', 'Default', 'Restricted', 'Unrestricted')) { return $null }
+            if ($seen['ExecutionPolicy'] -or $Matches[1] -notin @('Bypass', 'RemoteSigned', 'AllSigned', 'Default', 'Restricted', 'Unrestricted')) { return @{ ok = $false; reason = 'UNVERIFIED_ACTION' } }
             $seen['ExecutionPolicy'] = $true; continue
         }
-        if ($tok -iin @('-File', '-f')) { if (($i + 2) -ne $tokens.Count) { return $null }; $mode = 'FILE'; $payload = $tokens[$i + 1]; break }
-        if ($tok -imatch '^-(?:File|f):(.+)$') { if (($i + 1) -ne $tokens.Count) { return $null }; $mode = 'FILE'; $payload = $Matches[1]; break }
-        if ($tok -iin @('-Command', '-c')) { if (($i + 2) -ne $tokens.Count) { return $null }; $mode = 'COMMAND'; $payload = $tokens[$i + 1]; break }
-        return $null
+        if ($tok -iin @('-File', '-f')) { if (($i + 2) -ne $tokens.Count) { return @{ ok = $false; reason = 'UNVERIFIED_ACTION' } }; $mode = 'FILE'; $payload = $tokens[$i + 1]; break }
+        if ($tok -imatch '^-(?:File|f):(.+)$') { if (($i + 1) -ne $tokens.Count) { return @{ ok = $false; reason = 'UNVERIFIED_ACTION' } }; $mode = 'FILE'; $payload = $Matches[1]; break }
+        if ($tok -iin @('-Command', '-c')) { if (($i + 2) -ne $tokens.Count) { return @{ ok = $false; reason = 'UNVERIFIED_ACTION' } }; $mode = 'COMMAND'; $payload = $tokens[$i + 1]; break }
+        return @{ ok = $false; reason = 'UNVERIFIED_ACTION' }
     }
-    if (!$mode -or !$payload) { return $null }
+    if (!$mode -or !$payload) { return @{ ok = $false; reason = 'UNVERIFIED_ACTION' } }
     if ($mode -ceq 'FILE') {
-        $sa = Get-AttestedD5Script $payload $aiRoot $cleanProfile $d5FileOwners
-        if (!$sa) { return $null }
-        return 'PWSH|' + $pwshPath.ToLowerInvariant() + '|' + $sa
+        $sa = Get-AttestedD5ScriptResult $payload $aiRoot $cleanProfile $d5FileOwners
+        if (!$sa.ok) { return $sa }
+        return @{ ok = $true; value = ('PWSH|' + $pwshPath.ToLowerInvariant() + '|' + $sa.value) }
     }
-    if (Test-D5Contamination $payload) { return $null }
-    $ct = $null; $ce = $null
-    $cmdAst = [Management.Automation.Language.Parser]::ParseInput($payload, [ref]$ct, [ref]$ce)
-    if (($ce -and $ce.Count -gt 0) -or !$cmdAst -or !$cmdAst.EndBlock -or !$cmdAst.EndBlock.Statements.Count) { return $null }
-    if ($cmdAst.EndBlock.Statements.Count -eq 1 -and (Get-AstKind $cmdAst.EndBlock.Statements[0]) -ceq 'PipelineAst' -and
-        $cmdAst.EndBlock.Statements[0].PipelineElements.Count -eq 1 -and
-        (Get-AstKind $cmdAst.EndBlock.Statements[0].PipelineElements[0]) -ceq 'CommandAst') {
-        $c0 = $cmdAst.EndBlock.Statements[0].PipelineElements[0]
-        if ([string]$c0.InvocationOperator -ceq 'Ampersand' -and $c0.Redirections.Count -eq 0 -and $c0.CommandElements.Count -eq 1) {
-            try {
+    try {
+        if (Test-D5Contamination $payload) { return @{ ok = $false; reason = 'UNVERIFIED_SCRIPT' } }
+        $ct = $null; $ce = $null
+        $cmdAst = [Management.Automation.Language.Parser]::ParseInput($payload, [ref]$ct, [ref]$ce)
+        if (($ce -and $ce.Count -gt 0) -or !$cmdAst -or !$cmdAst.EndBlock -or !$cmdAst.EndBlock.Statements.Count) {
+            return @{ ok = $false; reason = 'UNVERIFIED_SCRIPT' }
+        }
+        if ($cmdAst.EndBlock.Statements.Count -eq 1 -and (Get-AstKind $cmdAst.EndBlock.Statements[0]) -ceq 'PipelineAst' -and
+            $cmdAst.EndBlock.Statements[0].PipelineElements.Count -eq 1 -and
+            (Get-AstKind $cmdAst.EndBlock.Statements[0].PipelineElements[0]) -ceq 'CommandAst') {
+            $c0 = $cmdAst.EndBlock.Statements[0].PipelineElements[0]
+            if ([string]$c0.InvocationOperator -ceq 'Ampersand' -and $c0.Redirections.Count -eq 0 -and $c0.CommandElements.Count -eq 1) {
                 $target = Resolve-D5StaticValue $c0.CommandElements[0] @{} $null
                 if ($target -is [string] -and $target -imatch '\.ps1$') {
-                    $sa = Get-AttestedD5Script $target $aiRoot $cleanProfile $d5FileOwners
-                    if (!$sa) { return $null }
-                    return 'PWSH|' + $pwshPath.ToLowerInvariant() + '|' + $sa
+                    $sa = Get-AttestedD5ScriptResult $target $aiRoot $cleanProfile $d5FileOwners
+                    if (!$sa.ok) { return $sa }
+                    return @{ ok = $true; value = ('PWSH|' + $pwshPath.ToLowerInvariant() + '|' + $sa.value) }
                 }
-            } catch { return $null }
+            }
         }
-    }
-    if (!(Test-AttestedD5ScriptAst $cmdAst $aiRoot $cleanProfile $null $d5FileOwners)) { return $null }
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try { $ch = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($payload))).Replace('-', '') }
-    finally { $sha.Dispose() }
-    return 'PWSH_CMD|' + $pwshPath.ToLowerInvariant() + '|' + $ch
+        if (!(Test-AttestedD5ScriptAst $cmdAst $aiRoot $cleanProfile $null $d5FileOwners)) {
+            return @{ ok = $false; reason = 'UNVERIFIED_SCRIPT' }
+        }
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $ch = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($payload))).Replace('-', '') }
+        finally { $sha.Dispose() }
+        return @{ ok = $true; value = ('PWSH_CMD|' + $pwshPath.ToLowerInvariant() + '|' + $ch) }
+    } catch { return @{ ok = $false; reason = 'UNVERIFIED_SCRIPT' } }
 }
 
-function Get-D5Attestation($d5, [bool]$allowDisabled = $false) {
+function Get-AttestedD5PowerShellAction($pwshPath, $argsLine, $workDir, $aiRoot, $cleanProfile, $d5FileOwners) {
+    $res = Get-AttestedD5PowerShellActionResult $pwshPath $argsLine $workDir $aiRoot $cleanProfile $d5FileOwners
+    if ($res.ok) { return $res.value }
+    return $null
+}
+
+function Get-D5AttestationResult($d5, [bool]$allowDisabled = $false) {
     try {
-        if (!$d5 -or (!$allowDisabled -and !$d5.Enabled) -or $d5.Name -cne 'AI-Commerce-D5-CDP-AtLogon') { return $null }
+        if (!$d5 -or (!$allowDisabled -and !$d5.Enabled) -or $d5.Name -cne 'AI-Commerce-D5-CDP-AtLogon') {
+            return @{ ok = $false; reason = 'UNVERIFIED_BASE' }
+        }
         if (!$d5.Xml -or $d5.Xml.IndexOf($name, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
-            $d5.Xml -match '(?i)WakeHub-9444-Clean') { return $null }
-        $d5Acl = [Security.AccessControl.RawSecurityDescriptor]::new($d5.GetSecurityDescriptor(7))
+            $d5.Xml -match '(?i)WakeHub-9444-Clean') {
+            return @{ ok = $false; reason = 'UNVERIFIED_BASE' }
+        }
+        try {
+            $d5Acl = [Security.AccessControl.RawSecurityDescriptor]::new($d5.GetSecurityDescriptor(7))
+        } catch {
+            return @{ ok = $false; reason = 'UNVERIFIED_ACL' }
+        }
         $trustedSids = @($sid, 'S-1-5-18', 'S-1-5-32-544')
         $d5FileOwners = @($sid) + $installOwnerSids
-        if (!$d5Acl.Owner -or $d5Acl.Owner.Value -cnotin $trustedSids -or !$d5Acl.DiscretionaryAcl) { return $null }
+        if (!$d5Acl.Owner -or $d5Acl.Owner.Value -cnotin $trustedSids -or !$d5Acl.DiscretionaryAcl) {
+            return @{ ok = $false; reason = 'UNVERIFIED_ACL' }
+        }
         foreach ($ace in $d5Acl.DiscretionaryAcl) {
-            if ($ace -isnot [Security.AccessControl.CommonAce]) { return $null }
+            if ($ace -isnot [Security.AccessControl.CommonAce]) { return @{ ok = $false; reason = 'UNVERIFIED_ACL' } }
             if ($ace.AceFlags -band [Security.AccessControl.AceFlags]::InheritOnly) { continue }
             if ($ace.AceType -eq [Security.AccessControl.AceType]::AccessDenied) { continue }
-            if ($ace.AceType -ne [Security.AccessControl.AceType]::AccessAllowed) { return $null }
-            if (($ace.AccessMask -band 0x500D0156) -and $ace.SecurityIdentifier.Value -cnotin $trustedSids) { return $null }
+            if ($ace.AceType -ne [Security.AccessControl.AceType]::AccessAllowed) { return @{ ok = $false; reason = 'UNVERIFIED_ACL' } }
+            if (($ace.AccessMask -band 0x500D0156) -and $ace.SecurityIdentifier.Value -cnotin $trustedSids) {
+                return @{ ok = $false; reason = 'UNVERIFIED_ACL' }
+            }
         }
         $def = $d5.Definition; $p = $def.Principal
-        if (!(Test-Owner $p.UserId) -or $p.LogonType -ne 3 -or $p.RunLevel -ne 0 -or $p.GroupId) { return $null }
-        if ($def.Actions.Context -and $def.Actions.Context -cne $p.Id) { return $null }
-        if ($def.Triggers.Count -ne 1) { return $null }
+        if (!(Test-Owner $p.UserId) -or $p.LogonType -ne 3 -or $p.RunLevel -ne 0 -or $p.GroupId) {
+            return @{ ok = $false; reason = 'UNVERIFIED_PRINCIPAL' }
+        }
+        if ($def.Actions.Context -and $def.Actions.Context -cne $p.Id) {
+            return @{ ok = $false; reason = 'UNVERIFIED_PRINCIPAL' }
+        }
+        if ($def.Triggers.Count -ne 1) { return @{ ok = $false; reason = 'UNVERIFIED_TRIGGER' } }
         $t = $def.Triggers.Item(1)
         if ($t.Type -ne 9 -or (!$allowDisabled -and !$t.Enabled) -or !(Test-Owner $t.UserId) -or
-            ($t.Repetition -and ($t.Repetition.Interval -or $t.Repetition.Duration))) { return $null }
-        if ($def.Actions.Count -ne 1) { return $null }
+            ($t.Repetition -and ($t.Repetition.Interval -or $t.Repetition.Duration))) {
+            return @{ ok = $false; reason = 'UNVERIFIED_TRIGGER' }
+        }
+        if ($def.Actions.Count -ne 1) { return @{ ok = $false; reason = 'UNVERIFIED_ACTION' } }
         $a = $def.Actions.Item(1)
-        if ($a.Type -ne 0 -or !$a.Path -or !$a.Arguments) { return $null }
+        if ($a.Type -ne 0 -or !$a.Path -or !$a.Arguments) { return @{ ok = $false; reason = 'UNVERIFIED_ACTION' } }
         $rawPath = [string]$a.Path
         if ($rawPath.Length -ge 2 -and $rawPath.StartsWith('"') -and $rawPath.EndsWith('"')) {
             $rawPath = $rawPath.Substring(1, $rawPath.Length - 2)
         }
-        if ($rawPath.Contains('"') -or $rawPath -match '[%\r\n\x00]') { return $null }
+        if ($rawPath.Contains('"') -or $rawPath -match '[%\r\n\x00]') { return @{ ok = $false; reason = 'UNVERIFIED_ACTION' } }
         $localRoot = [Environment]::GetFolderPath('LocalApplicationData')
-        if (!$localRoot) { return $null }
+        if (!$localRoot) { return @{ ok = $false; reason = 'UNVERIFIED_BASE' } }
         $aiRoot = [IO.Path]::GetFullPath((Join-Path $localRoot 'AI-Commerce')).TrimEnd([char]92)
         $cleanProfile = [IO.Path]::GetFullPath((Join-Path $aiRoot 'WakeHub-9444-Clean')).TrimEnd([char]92)
         if ($env:AI_COMMERCE_TASK_PROFILE_DIR -and
-            [IO.Path]::GetFullPath($env:AI_COMMERCE_TASK_PROFILE_DIR).TrimEnd([char]92) -ine $cleanProfile) { return $null }
+            [IO.Path]::GetFullPath($env:AI_COMMERCE_TASK_PROFILE_DIR).TrimEnd([char]92) -ine $cleanProfile) {
+            return @{ ok = $false; reason = 'UNVERIFIED_BASE' }
+        }
         $d5Work = $null
         if ($a.WorkingDirectory) {
             if ($a.WorkingDirectory -notmatch '^[A-Za-z]:[\\/]' -or
                 $a.WorkingDirectory -match '(^|[\\/])\.\.([\\/]|$)' -or
                 (Test-D5Contamination $a.WorkingDirectory) -or
-                !(Test-PlainPathOrAncestors $a.WorkingDirectory)) { return $null }
+                !(Test-PlainPathOrAncestors $a.WorkingDirectory)) {
+                return @{ ok = $false; reason = 'UNVERIFIED_ACTION' }
+            }
             $d5Work = [IO.Path]::GetFullPath($a.WorkingDirectory).TrimEnd([char]92)
             if ($d5Work -ieq $cleanProfile -or
-                $d5Work.StartsWith($cleanProfile + '\', [StringComparison]::OrdinalIgnoreCase)) { return $null }
+                $d5Work.StartsWith($cleanProfile + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                return @{ ok = $false; reason = 'UNVERIFIED_ACTION' }
+            }
         }
         if ($rawPath -in $chromeExecutables) {
+            if (!(Test-SignedExecutable $rawPath '(^|, )CN=Google (LLC|Inc)(,|$)')) {
+                return @{ ok = $false; reason = 'UNVERIFIED_EXE' }
+            }
             $d5Args = Split-TaskArguments ([string]$a.Arguments)
-            if (!(Test-AttestedChromeLaunch $rawPath $d5Args $aiRoot $cleanProfile)) { return $null }
-            return 'CHROME|' + $rawPath.ToLowerInvariant() + '|' + ($d5Args -join [char]31)
+            try {
+                if (!(Test-AttestedChromeLaunch $rawPath $d5Args $aiRoot $cleanProfile)) {
+                    return @{ ok = $false; reason = 'UNVERIFIED_ACTION' }
+                }
+            } catch {
+                return @{ ok = $false; reason = 'UNVERIFIED_ACTION' }
+            }
+            return @{ ok = $true; value = ('CHROME|' + $rawPath.ToLowerInvariant() + '|' + ($d5Args -join [char]31)) }
         }
         if ($rawPath -in $trustedPowerShellPaths) {
-            return Get-AttestedD5PowerShellAction $rawPath ([string]$a.Arguments) $d5Work $aiRoot $cleanProfile $d5FileOwners
+            return Get-AttestedD5PowerShellActionResult $rawPath ([string]$a.Arguments) $d5Work $aiRoot $cleanProfile $d5FileOwners
         }
-        return $null
-    } catch { return $null }
+        return @{ ok = $false; reason = 'UNVERIFIED_EXE' }
+    } catch { return @{ ok = $false; reason = 'UNVERIFIED' } }
+}
+
+function Get-D5Attestation($d5, [bool]$allowDisabled = $false) {
+    $res = Get-D5AttestationResult $d5 $allowDisabled
+    if ($res.ok) { return $res.value }
+    return $null
 }
 
 function Test-AttestedD5Task($d5) {
@@ -3428,70 +3498,107 @@ try {
 
 
 _CLEAN_9444_TASK_RECONCILE_SCRIPT = _CLEAN_9444_TASK_INSPECTION + _CLEAN_9444_D5_ATTESTATION + r"""
-function Test-ReconcileRegistrationBase($reg) {
-    if (!$reg) { return $false }
-    $acl = [Security.AccessControl.RawSecurityDescriptor]::new($reg.GetSecurityDescriptor(7))
-    $want = [Security.AccessControl.RawSecurityDescriptor]::new($sddl)
-    if (!$acl.Owner -or $acl.Owner.Value -cne $sid -or
-        $acl.GetSddlForm('Access') -cne $want.GetSddlForm('Access')) { return $false }
+function Get-ReconcileRegistrationBaseStatus($reg) {
+    if (!$reg) { return 'CONFLICT' }
+    try {
+        $acl = [Security.AccessControl.RawSecurityDescriptor]::new($reg.GetSecurityDescriptor(7))
+        $want = [Security.AccessControl.RawSecurityDescriptor]::new($sddl)
+    } catch {
+        return 'CONFLICT_BASE_ACL'
+    }
+    if (!$acl.Owner -or $acl.Owner.Value -cne $sid) { return 'CONFLICT_BASE_OWNER' }
+    if ($acl.GetSddlForm('Access') -cne $want.GetSddlForm('Access')) { return 'CONFLICT_BASE_ACL' }
     $definition = $reg.Definition
+    if (!$definition -or !$definition.Principal -or !$definition.Actions -or !$definition.Settings) {
+        return 'CONFLICT'
+    }
     $principal = $definition.Principal
     if ($principal.Id -cne $expected.Principal.Id -or !(Test-Owner $principal.UserId) -or
-        $principal.LogonType -ne 3 -or
-        $principal.RunLevel -ne 0 -or $principal.GroupId -or $definition.Actions.Count -ne 1 -or
-        $definition.Actions.Item(1).Type -ne 0 -or
+        $principal.LogonType -ne 3 -or $principal.RunLevel -ne 0 -or $principal.GroupId) {
+        return 'CONFLICT_BASE_PRINCIPAL'
+    }
+    if ($definition.Actions.Count -ne 1 -or $definition.Actions.Item(1).Type -ne 0 -or
         $definition.Actions.Context -cne $expected.Actions.Context) {
-        return $false
+        return 'CONFLICT_BASE_ACTION'
     }
     foreach ($key in @('AllowDemandStart', 'AllowHardTerminate', 'DisallowStartIfOnBatteries',
         'ExecutionTimeLimit', 'Hidden', 'MultipleInstances', 'RestartCount', 'RestartInterval',
         'RunOnlyIfIdle', 'RunOnlyIfNetworkAvailable', 'StartWhenAvailable',
         'StopIfGoingOnBatteries', 'WakeToRun', 'DeleteExpiredTaskAfter')) {
-        if ($definition.Settings.$key -cne $expected.Settings.$key) { return $false }
+        if ($definition.Settings.$key -cne $expected.Settings.$key) { return 'CONFLICT_BASE_SETTINGS' }
     }
     if ($reg.Enabled) {
-        if ($definition.Settings.Enabled -cne $expected.Settings.Enabled) { return $false }
+        if ($definition.Settings.Enabled -cne $expected.Settings.Enabled) { return 'CONFLICT_BASE_SETTINGS' }
     } else {
-        if ($null -ne $definition.Settings.Enabled -and $definition.Settings.Enabled -ne $false) { return $false }
+        if ($null -ne $definition.Settings.Enabled -and $definition.Settings.Enabled -ne $false) {
+            return 'CONFLICT_BASE_SETTINGS'
+        }
     }
-    return $true
+    return 'OK'
 }
 
-function Test-ReconcileDemandAction($reg) {
-    if (!$trustedPowerShellSpecs.Count) { return $false }
+function Get-ReconcileDemandActionStatus($reg) {
     $a = $reg.Definition.Actions.Item(1)
-    if (!$a -or $a.Path -ine $action.Path -or $a.WorkingDirectory -ine $action.WorkingDirectory -or !$a.Arguments) {
-        return $false
+    if (!$a) { return 'CONFLICT_BASE_ACTION' }
+    if (!$a.Path -or $a.Path -ine $action.Path) {
+        if ($a.Path -and (Test-TrustedPowerShell $a.Path)) {
+            return 'CONFLICT_DEMAND_PWSH_PATH'
+        }
+        return 'CONFLICT_DEMAND_PATH'
+    }
+    if ($a.WorkingDirectory -ine $action.WorkingDirectory) {
+        return 'CONFLICT_DEMAND_WORKDIR'
+    }
+    if (!$a.Arguments) {
+        return 'CONFLICT_DEMAND_ARGS'
+    }
+    if (!$trustedPowerShellSpecs.Count) {
+        return 'CONFLICT_DEMAND_PWSH'
     }
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
         $argHash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes([string]$a.Arguments))).Replace('-', '')
     } finally { $sha.Dispose() }
     $matched = @($trustedPowerShellSpecs | Where-Object { [string]$_.demand_sha256 -ieq $argHash })
-    return $matched.Count -eq 1 -and (Test-TrustedPowerShell ([string]$matched[0].path))
+    if ($matched.Count -eq 0) {
+        return 'CONFLICT_DEMAND_ARGS'
+    }
+    if ($matched.Count -ne 1 -or !(Test-TrustedPowerShell ([string]$matched[0].path))) {
+        return 'CONFLICT_DEMAND_PWSH'
+    }
+    return 'OK'
 }
 
-function Test-ReconcileLegacyTriggerAndAction($reg) {
-    if ($reg.Definition.Triggers.Count -ne 1) { return $false }
+function Get-ReconcileLegacyStatus($reg) {
+    if ($reg.Definition.Triggers.Count -ne 1) { return 'CONFLICT_TRIGGER_COUNT' }
     $t = $reg.Definition.Triggers.Item(1)
-    if ($t.Type -ne 9 -or ($reg.Enabled -and !$t.Enabled) -or !(Test-Owner $t.UserId) -or $t.Delay -or
-        $t.StartBoundary -or $t.EndBoundary -or $t.Repetition.Duration -or
-        $t.Repetition.StopAtDurationEnd -or [string]$t.ExecutionTimeLimit -cnotin @('', 'PT72H')) {
-        return $false
-    }
+    if (!$t -or $t.Type -ne 9) { return 'CONFLICT_LEGACY_TRIGGER_TYPE' }
+    if (!(Test-Owner $t.UserId)) { return 'CONFLICT_LEGACY_TRIGGER_OWNER' }
+    if (!$t.Repetition -or !$t.Repetition.Interval) { return 'CONFLICT_LEGACY_TRIGGER_PT1M' }
     try {
         if ([Xml.XmlConvert]::ToTimeSpan($t.Repetition.Interval) -ne [TimeSpan]::FromMinutes(1)) {
-            return $false
+            return 'CONFLICT_LEGACY_TRIGGER_PT1M'
         }
-    } catch { return $false }
+    } catch { return 'CONFLICT_LEGACY_TRIGGER_PT1M' }
+    if (($reg.Enabled -and !$t.Enabled) -or $t.Delay -or
+        $t.StartBoundary -or $t.EndBoundary -or $t.Repetition.Duration -or
+        $t.Repetition.StopAtDurationEnd -or [string]$t.ExecutionTimeLimit -cnotin @('', 'PT72H')) {
+        return 'CONFLICT_LEGACY_TRIGGER_CFG'
+    }
     $a = $reg.Definition.Actions.Item(1)
+    if (!$a) { return 'CONFLICT_BASE_ACTION' }
+    if (!$a.Path -or !(Test-TrustedPowerShell $a.Path)) {
+        return 'CONFLICT_LEGACY_PATH'
+    }
     if (!$env:AI_COMMERCE_TASK_LEGACY_ARGUMENTS -or
-        $a.Arguments -cne $env:AI_COMMERCE_TASK_LEGACY_ARGUMENTS) { return $false }
-    if (!$a.Path -or !$a.WorkingDirectory) { return $false }
+        $a.Arguments -cne $env:AI_COMMERCE_TASK_LEGACY_ARGUMENTS) {
+        return 'CONFLICT_LEGACY_ARGS'
+    }
+    if (!$a.WorkingDirectory) { return 'CONFLICT_LEGACY_WORKDIR' }
     $validWorkDir = ($a.WorkingDirectory -in $trustedPowerShellDirs) -or
         (Test-HistoricalLegacyWorkDir $a.WorkingDirectory)
-    if (!$validWorkDir) { return $false }
-    return Test-TrustedPowerShell $a.Path
+    if (!$validWorkDir) { return 'CONFLICT_LEGACY_WORKDIR' }
+    return 'OK'
 }
 
 function Test-ReconcileRollbackSddl($aclText) {
@@ -3993,64 +4100,71 @@ try {
         }
     }
 
-    if ($wakeCandidates.Count -gt 1 -or
-        ($wakeCandidates.Count -eq 1 -and (!$wakeCandidates[0].Root -or $wakeCandidates[0].Task.Name -cne $name)) -or
-        ($registered -and $wakeCandidates.Count -ne 1)) {
+    if ($wakeCandidates.Count -gt 1 -or ($registered -and $wakeCandidates.Count -ne 1)) {
         $taskState = 'MULTIPLE_CANDIDATES'
+    } elseif ($wakeCandidates.Count -eq 1 -and (!$wakeCandidates[0].Root -or $wakeCandidates[0].Task.Name -cne $name)) {
+        $taskState = 'FOREIGN_CANDIDATE'
     } elseif (!$registered) {
         $taskState = 'ABSENT'
-    } elseif (!(Test-ReconcileRegistrationBase $registered)) {
-        $taskState = 'CONFLICT'
-    } elseif ($registered.Definition.Triggers.Count -eq 0) {
-        if (!(Test-ReconcileDemandAction $registered)) {
-            $taskState = 'CONFLICT'
-        } elseif (!$registered.Enabled) {
-            if ($registered.State -eq 1 -and $registered.GetInstances(0).Count -eq 0) {
-                $taskState = 'DEMAND_DISABLED'
-            } else {
-                $taskState = 'DEMAND_NOT_READY'
-            }
-        } elseif (!(Test-DemandRuntime)) {
-            $taskState = 'DEMAND_RUNTIME_BAD'
-        } elseif (!(Test-Ready $registered)) {
-            $taskState = 'DEMAND_NOT_READY'
-        } else {
-            $taskState = 'DEMAND_READY'
-        }
-    } elseif ($registered.Definition.Triggers.Count -eq 1) {
-        if (!(Test-ReconcileLegacyTriggerAndAction $registered)) {
-            $taskState = 'CONFLICT'
-        } elseif (!$registered.Enabled) {
-            if ($registered.State -eq 1 -and $registered.GetInstances(0).Count -eq 0) {
-                $taskState = 'LEGACY_PT1M_DISABLED'
-            } else {
-                $taskState = 'LEGACY_PT1M_NOT_READY'
-            }
-        } elseif (!(Test-Ready $registered)) {
-            $taskState = 'LEGACY_PT1M_NOT_READY'
-        } else {
-            $taskState = 'LEGACY_PT1M_READY'
-        }
     } else {
-        $taskState = 'CONFLICT'
+        $baseStatus = Get-ReconcileRegistrationBaseStatus $registered
+        if ($baseStatus -cne 'OK') {
+            $taskState = $baseStatus
+        } elseif ($registered.Definition.Triggers.Count -eq 0) {
+            $demandStatus = Get-ReconcileDemandActionStatus $registered
+            if ($demandStatus -cne 'OK') {
+                $taskState = $demandStatus
+            } elseif (!$registered.Enabled) {
+                if ($registered.State -eq 1 -and $registered.GetInstances(0).Count -eq 0) {
+                    $taskState = 'DEMAND_DISABLED'
+                } else {
+                    $taskState = 'DEMAND_NOT_READY'
+                }
+            } elseif (!(Test-DemandRuntime)) {
+                $taskState = 'DEMAND_RUNTIME_BAD'
+            } elseif (!(Test-Ready $registered)) {
+                $taskState = 'DEMAND_NOT_READY'
+            } else {
+                $taskState = 'DEMAND_READY'
+            }
+        } elseif ($registered.Definition.Triggers.Count -eq 1) {
+            $legacyStatus = Get-ReconcileLegacyStatus $registered
+            if ($legacyStatus -cne 'OK') {
+                $taskState = $legacyStatus
+            } elseif (!$registered.Enabled) {
+                if ($registered.State -eq 1 -and $registered.GetInstances(0).Count -eq 0) {
+                    $taskState = 'LEGACY_PT1M_DISABLED'
+                } else {
+                    $taskState = 'LEGACY_PT1M_NOT_READY'
+                }
+            } elseif (!(Test-Ready $registered)) {
+                $taskState = 'LEGACY_PT1M_NOT_READY'
+            } else {
+                $taskState = 'LEGACY_PT1M_READY'
+            }
+        } else {
+            $taskState = 'CONFLICT_TRIGGER_COUNT'
+        }
     }
 
     $d5Task = Read-Registration 'AI-Commerce-D5-CDP-AtLogon'
-    if ($d5Candidates.Count -gt 1 -or
-        ($d5Candidates.Count -eq 1 -and (!$d5Candidates[0].Root -or $d5Candidates[0].Task.Name -cne 'AI-Commerce-D5-CDP-AtLogon')) -or
-        ($d5Task -and $d5Candidates.Count -ne 1)) {
-        $d5State = 'UNVERIFIED'
+    if ($d5Candidates.Count -gt 1 -or ($d5Task -and $d5Candidates.Count -ne 1)) {
+        $d5State = 'UNVERIFIED_MULTIPLE'
+    } elseif ($d5Candidates.Count -eq 1 -and (!$d5Candidates[0].Root -or $d5Candidates[0].Task.Name -cne 'AI-Commerce-D5-CDP-AtLogon')) {
+        $d5State = 'UNVERIFIED_MOVED'
     } elseif (!$d5Task) {
         $d5State = 'ABSENT'
     } elseif ($d5Task.Enabled) {
-        if ($null -ne (Get-D5Attestation $d5Task)) { $d5State = 'ENABLED_ATTESTED' }
-        else { $d5State = 'UNVERIFIED' }
+        $d5Res = Get-D5AttestationResult $d5Task $false
+        if ($d5Res.ok) { $d5State = 'ENABLED_ATTESTED' }
+        else { $d5State = $d5Res.reason }
     } else {
-        if ($d5Task.State -eq 1 -and $d5Task.GetInstances(0).Count -eq 0 -and
-            $null -ne (Get-D5Attestation $d5Task $true)) {
-            $d5State = 'DISABLED_ATTESTED'
+        if ($d5Task.State -ne 1 -or $d5Task.GetInstances(0).Count -ne 0) {
+            $d5State = 'UNVERIFIED_STATE'
         } else {
-            $d5State = 'UNVERIFIED'
+            $d5Res = Get-D5AttestationResult $d5Task $true
+            if ($d5Res.ok) { $d5State = 'DISABLED_ATTESTED' }
+            else { $d5State = $d5Res.reason }
         }
     }
 } catch {
@@ -4124,13 +4238,25 @@ def _clean_task_powershell(bootstrap: Path) -> Path:
 _CLEAN_RECONCILE_TASK_VALUES = frozenset({
     "DEMAND_READY", "DEMAND_DISABLED", "DEMAND_NOT_READY", "DEMAND_RUNTIME_BAD",
     "LEGACY_PT1M_READY", "LEGACY_PT1M_DISABLED", "LEGACY_PT1M_NOT_READY",
-    "ABSENT", "MULTIPLE_CANDIDATES", "CONFLICT", "UNAVAILABLE",
+    "ABSENT", "MULTIPLE_CANDIDATES", "FOREIGN_CANDIDATE", "CONFLICT",
+    "CONFLICT_BASE_OWNER", "CONFLICT_BASE_ACL", "CONFLICT_BASE_PRINCIPAL",
+    "CONFLICT_BASE_ACTION", "CONFLICT_BASE_SETTINGS", "CONFLICT_TRIGGER_COUNT",
+    "CONFLICT_DEMAND_PATH", "CONFLICT_DEMAND_PWSH_PATH", "CONFLICT_DEMAND_WORKDIR",
+    "CONFLICT_DEMAND_ARGS", "CONFLICT_DEMAND_PWSH",
+    "CONFLICT_LEGACY_TRIGGER_TYPE", "CONFLICT_LEGACY_TRIGGER_OWNER",
+    "CONFLICT_LEGACY_TRIGGER_PT1M", "CONFLICT_LEGACY_TRIGGER_CFG",
+    "CONFLICT_LEGACY_PATH", "CONFLICT_LEGACY_ARGS", "CONFLICT_LEGACY_WORKDIR",
+    "UNAVAILABLE",
 })
 _CLEAN_RECONCILE_JOURNAL_VALUES = frozenset({
     "FRESH", "COMPLETE", "MISMATCH", "ROLLBACK_ONLY", "COMPLETE_ONLY", "UNVERIFIED",
 })
 _CLEAN_RECONCILE_D5_VALUES = frozenset({
     "ENABLED_ATTESTED", "DISABLED_ATTESTED", "ABSENT", "UNVERIFIED",
+    "UNVERIFIED_MULTIPLE", "UNVERIFIED_MOVED", "UNVERIFIED_STATE",
+    "UNVERIFIED_BASE", "UNVERIFIED_ACL", "UNVERIFIED_PRINCIPAL",
+    "UNVERIFIED_TRIGGER", "UNVERIFIED_ACTION", "UNVERIFIED_EXE",
+    "UNVERIFIED_CUSTODY", "UNVERIFIED_SCRIPT",
 })
 
 
