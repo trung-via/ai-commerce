@@ -25,6 +25,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 from threading import Lock
 import time
 from typing import Callable, Literal, Mapping, TypedDict
@@ -46,6 +47,8 @@ MAX_READ = 8192
 MAX_WRITE = 2048
 _CLEAN_AUTOSTART = "install_clean_9444_autostart"
 _CLEAN_RUNTIME_PROBE = "clean_9444_runtime_probe"
+_A10_READINESS = "a10_codex_native_readiness"
+_A10_READINESS_SCHEMA = "A10CodexHostReadiness.v1"
 _ACQUISITION_SOURCE = Path("src/ai_commerce/remote/chrome_acquisition.py")
 
 # Source-owned PUBLIC vocabulary. Private config is locally validated by the
@@ -77,7 +80,7 @@ _STANDING_CATEGORY_CODES = {
 STANDING_READ_CATEGORIES = tuple(_STANDING_CATEGORY_CODES)
 STANDING_READ_CODES = frozenset(code for codes in _STANDING_CATEGORY_CODES.values() for code in codes)
 
-# Mirror the reviewed protected Issue ingress allowlist, including its separate
+# Mirror the current protected Issue ingress allowlist, including its separate
 # runner and standing-READ sanitizers. The workflow independently checks all
 # sixteen closed-code categories and the entire sanitized receipt before posting.
 PERSONAL_PUBLIC_FIELDS = frozenset((
@@ -90,6 +93,11 @@ PERSONAL_PUBLIC_FIELDS = frozenset((
     "same_session_chrome_count devtools_protocol_ok infrastructure_ready exact_chat_verified "
     "wake_sent runners diagnostics"
 ).split())
+
+# The separate A10 workflow sanitizer must accept exactly this envelope and its
+# closed nested record. Keep the standing-READ and legacy allowlist independent.
+_A10_PUBLIC_FIELDS = frozenset({"status", "code", "operation", "a10_readiness",
+                               "issue_number", "source_sha", "approval_channel", "remote_shell_enabled"})
 
 
 class Denied(Exception):
@@ -181,7 +189,8 @@ def parse_event(event, mode):
     operation = request["operation"]
     if mode == "read":
         if operation in ("inventory", "runner_runtime_inventory", "cdp_9333_status", "cdp_9444_topology",
-                         "cdp_9444_config_registry", "standing_read_diagnostics", _CLEAN_RUNTIME_PROBE):
+                         "cdp_9444_config_registry", "standing_read_diagnostics", _CLEAN_RUNTIME_PROBE,
+                         _A10_READINESS):
             # Runtime inventory has fixed, compiled-in three-runner targets.
             # The public Issue cannot choose a task, executable or command.
             if params:
@@ -3486,9 +3495,273 @@ def hostops_exec_v1_cli(
     return 0 if receipt["status"] in ("PLANNED", "ENROLLED", "EXECUTED") else 2
 
 
+_A10_CODEX_EXE = Path("C:/Program Files/AI-Commerce/A10/codex.exe")
+_A10_CODEX_HOME = Path("C:/TOOL/AI-Commerce-A10-Codex-Home")
+_A10_PROBE_TIMEOUT = 5
+_A10_PROBE_MAX_BYTES = 32 * 1024
+_A10_HELP_OPTION = re.compile(r"(?m)^[ \t]+(?:-[A-Za-z],\s+)?(--[a-z][a-z0-9-]*)(?=[ \t=,]|$)")
+_A10ReadinessState = Literal["SOURCE_PRESENT", "HOST_UNVERIFIED", "HOST_UNSUPPORTED", "HOST_READINESS_VERIFIED"]
+_A10_CHECK_CODES = {
+    "binary": ("ABSENT", "UNSAFE", "REVIEWED_MATCH", "REVIEWED_MISMATCH"),
+    "version": ("REVIEWED_MATCH", "REVIEWED_MISMATCH"),
+    "exec_flags": ("DECLARED", "MISSING"),
+    "config_overrides": (),
+    "disabled_features": (),
+    "login": ("AUTH_FILE_PRESENT", "AUTH_FILE_ABSENT", "AUTH_FILE_UNSAFE"),
+    "codex_home": ("ISOLATED_LAYOUT", "UNSAFE"),
+    "model_effort": ("EXACT_PAIR_PRESENT", "EXACT_PAIR_UNSUPPORTED"),
+    "job_object": ("OBSERVED", "UNAVAILABLE"),
+    "system_config": (),
+    "account_config": (),
+    "read_only_policy": (),
+}
+
+
+def _a10_readiness_record(state: _A10ReadinessState, *, observations=None, issue_number=None, source_sha=None):
+    observations = observations or {}
+    checks = dict.fromkeys(_A10_CHECK_CODES, "UNKNOWN")
+    for field, allowed in _A10_CHECK_CODES.items():
+        value = observations.get(field)
+        if type(value) is str and value in allowed:
+            checks[field] = value
+    reviewed_sha = observations.get("reviewed_binary_sha256")
+    if (checks["binary"] != "REVIEWED_MATCH" or type(reviewed_sha) is not str
+            or not re.fullmatch(r"[a-f0-9]{64}", reviewed_sha)):
+        reviewed_sha = None
+    readiness = {
+        "schema_version": _A10_READINESS_SCHEMA, "state": state,
+        **checks, "reviewed_binary_sha256": reviewed_sha,
+    }
+    evidence = None
+    if any(value != "UNKNOWN" for value in checks.values()):
+        public_evidence = {"issue_number": issue_number, "source_sha": source_sha,
+                           "a10_readiness": readiness}
+        evidence = hashlib.sha256(json.dumps(public_evidence, sort_keys=True,
+                                             separators=(",", ":")).encode("ascii")).hexdigest()
+    readiness["evidence_sha256"] = evidence
+    return {
+        "status": "BLOCKED" if state == "SOURCE_PRESENT" else "OBSERVED",
+        "code": "A10_PROTECTED_WORKFLOW_REQUIRED" if state == "SOURCE_PRESENT" else state,
+        "operation": _A10_READINESS, "a10_readiness": readiness,
+    }
+
+
+def _a10_catalog_support(raw, version, selector):
+    from ai_commerce.opportunity.core.models import AI_MAX_BYTES
+
+    if not 0 < len(raw) <= AI_MAX_BYTES:
+        return "UNKNOWN"
+    catalog = json.loads(raw.decode("utf-8"), object_pairs_hook=_object_unique)
+    if type(catalog) is not dict or catalog.get("client_version") != version or type(catalog.get("models")) is not list:
+        return "UNKNOWN"
+    entries = catalog["models"]
+    if any(type(item) is not dict or type(item.get("slug")) is not str for item in entries):
+        return "UNKNOWN"
+    matches = [item for item in entries if item["slug"] == selector["model"]]
+    if not matches:
+        return "EXACT_PAIR_UNSUPPORTED"
+    levels = matches[0].get("supported_reasoning_levels")
+    if len(matches) != 1 or type(levels) is not list or any(
+        type(level) is not dict or type(level.get("effort")) is not str for level in levels
+    ):
+        return "UNKNOWN"
+    count = sum(level["effort"] == selector["effort"] for level in levels)
+    return {0: "EXACT_PAIR_UNSUPPORTED", 1: "EXACT_PAIR_PRESENT"}.get(count, "UNKNOWN")
+
+
+def _a10_observe_cli(probe, observations):
+    from ai_commerce.opportunity.core import models
+
+    selector = models.ai_provider_profile("codex-cli")
+    required_flags = {arg for arg in models.codex_research_argv(
+        "codex.exe", model=selector["model"], effort=selector["effort"]
+    ) if arg.startswith("--")}
+
+    def read_stdout(args):
+        result = probe(args)
+        if (type(result.returncode) is not int or result.returncode != 0 or type(result.stdout) is not bytes
+                or type(result.stderr) is not bytes or result.stderr
+                or not 0 < len(result.stdout) <= _A10_PROBE_MAX_BYTES):
+            return ""
+        text = result.stdout.decode("utf-8")
+        if re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", text):
+            return ""
+        observations["job_object"] = "OBSERVED"
+        return text
+
+    try:
+        version = read_stdout(("--version",)).strip()
+        if not re.fullmatch("codex-cli " + _HEALTH_VERSION, version):
+            return
+        if version != "codex-cli " + models._NATIVE_CODEX_VERSION:
+            observations["version"] = "REVIEWED_MISMATCH"
+            return
+        observations["version"] = "REVIEWED_MATCH"
+        help_text = read_stdout(("exec", "--help"))
+        if re.search(r"(?m)^Usage: codex exec(?:\s|$)", help_text):
+            declarations = set(_A10_HELP_OPTION.findall(help_text))
+            if "--help" in declarations:
+                observations["exec_flags"] = "DECLARED" if required_flags <= declarations else "MISSING"
+        # Help can attest to flag names only. Effective overrides, disable keys,
+        # policy and config layering require a different independent observation.
+    except models.OpportunityError as exc:
+        if exc.code == "HOLD_DEPENDENCY_NATIVE_CODEX_WINDOWS_JOB":
+            observations["job_object"] = "UNAVAILABLE"
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+        pass  # Discard each undecodable, failed or timed-out probe.
+
+
+@contextmanager
+def _a10_pin_executable(path):
+    """Keep the reviewed install stable across hashing and process creation."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    create = kernel.CreateFileW
+    create.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                       wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+    create.restype = wintypes.HANDLE
+    close = kernel.CloseHandle
+    close.argtypes, close.restype = (wintypes.HANDLE,), wintypes.BOOL
+    handles = []
+    try:
+        drive_type = kernel.GetDriveTypeW
+        drive_type.argtypes, drive_type.restype = (wintypes.LPCWSTR,), wintypes.UINT
+        if drive_type(path.anchor) != 3:  # DRIVE_FIXED
+            raise OSError("A10_INSTALL_CUSTODY_UNAVAILABLE")
+        for item in reversed((path, *path.parents)):
+            directory = item != path
+            # Pin every ancestor against rename. Pin the executable against writes too.
+            handle = create(str(item), 0x80 if directory else 0x80000000, 3 if directory else 1,
+                            None, 3, 0x02200000, None)
+            if handle in (None, ctypes.c_void_p(-1).value):
+                raise OSError("A10_INSTALL_CUSTODY_UNAVAILABLE")
+            handles.append(handle)
+            if (_fixed_private_metadata_kind(item, directory=directory) != "PRESENT"
+                    or (not directory and item.lstat().st_nlink != 1)):
+                raise OSError("A10_INSTALL_CUSTODY_UNAVAILABLE")
+        yield
+    finally:
+        for handle in reversed(handles):
+            close(handle)
+
+
+def _a10_collect_readiness(reviewed_sha, *, metadata, pin, binary_digest, inspect_home, probe):
+    """Project only bounded categorical evidence from the fixed installation."""
+    observations = {}
+    kind = metadata(_A10_CODEX_EXE)
+    if kind != "PRESENT":
+        return {"binary": "ABSENT" if kind == "ABSENT" else "UNSAFE"}
+    try:
+        with pin(_A10_CODEX_EXE):
+            observed_sha = binary_digest(_A10_CODEX_EXE)
+            if observed_sha != reviewed_sha:
+                return {"binary": "REVIEWED_MISMATCH"}
+            observations.update(binary="REVIEWED_MATCH", reviewed_binary_sha256=reviewed_sha)
+            observations.update(inspect_home())
+            if observations.get("codex_home") == "ISOLATED_LAYOUT":
+                with probe() as run:
+                    _a10_observe_cli(run, observations)
+    except (Denied, OSError, ValueError, RecursionError):
+        pass  # Custody, file or process failure leaves remaining evidence unknown.
+    return observations
+
+
+def _a10_inspect_home():
+    from ai_commerce.opportunity.core import models
+    from ai_commerce.remote.local_completion_handoff import HandoffBlocked, _private_identity
+
+    home = _A10_CODEX_HOME
+    auth = home / "auth.json"
+    login = "UNKNOWN"
+    try:
+        if _fixed_private_metadata_kind(home, directory=True) != "PRESENT":
+            return {"codex_home": "UNSAFE"}
+        identity = _private_identity(home)
+        auth_kind = _fixed_private_metadata_kind(auth)
+        if auth_kind == "ABSENT":
+            return {"login": "AUTH_FILE_ABSENT"}
+        if auth_kind != "PRESENT" or _private_identity(auth) != identity or auth.lstat().st_nlink != 1:
+            return {"codex_home": "UNSAFE", "login": "AUTH_FILE_UNSAFE"}
+        login = "AUTH_FILE_PRESENT"
+        models._check_native_codex_home(_A10_CODEX_EXE, home)
+    except (HandoffBlocked, OSError, ValueError):
+        return {"codex_home": "UNSAFE", "login": login}
+
+    observations = {"codex_home": "ISOLATED_LAYOUT", "login": login}
+    cache = home / "models_cache.json"
+    try:
+        if (_fixed_private_metadata_kind(cache) == "PRESENT" and cache.lstat().st_nlink == 1
+                and _private_identity(cache) == identity):
+            raw = models._native_file(cache, models.AI_MAX_BYTES)
+            observations["model_effort"] = _a10_catalog_support(
+                raw, models._NATIVE_CODEX_VERSION, models.ai_provider_profile("codex-cli"))
+    except (Denied, HandoffBlocked, OSError, ValueError, RecursionError):
+        pass  # Catalog bytes and private identity are never published or hashed.
+    return observations
+
+
+@contextmanager
+def _a10_isolated_cli():
+    from ai_commerce.opportunity.core.models import _bounded_native_codex
+
+    # Version/help run without credentials in the existing A10 single-process
+    # Windows Job. Login is metadata-only until credentialed status can be
+    # independently shown to leave auth and config intact.
+    with tempfile.TemporaryDirectory(prefix="readiness-", dir=_A10_CODEX_HOME) as directory:
+        def probe(args):
+            if args not in (("--version",), ("exec", "--help")):
+                deny("A10_PROBE_DENIED")
+            return _bounded_native_codex(
+                [str(_A10_CODEX_EXE), *args], input=b"", cwd=directory, codex_home=directory,
+                shell=False, timeout=_A10_PROBE_TIMEOUT, max_bytes=_A10_PROBE_MAX_BYTES,
+            )
+
+        yield probe
+
+
+def _protected_a10_readiness(issue_number):
+    try:
+        _require_protected_clean_runner("issues")
+        sha = _protected_clean_workflow_sha()
+        # The future protected workflow supplies only a reviewed public release
+        # digest as a literal. The Issue cannot supply any host probe inputs.
+        reviewed_sha = os.environ.get("HOSTOPS_A10_REVIEWED_CODEX_SHA256", "")
+        if ("PYTEST_CURRENT_TEST" in os.environ
+                or os.environ.get("HOSTOPS_A10_READINESS_DISPATCH") != _A10_READINESS_SCHEMA
+                or not re.fullmatch(r"[a-f0-9]{64}", reviewed_sha)):
+            deny("A10_PROTECTED_WORKFLOW_REQUIRED")
+    except Denied:
+        return _a10_readiness_record("SOURCE_PRESENT"), None
+
+    try:
+        from ai_commerce.opportunity.core.models import _native_binary_digest
+
+        observations = _a10_collect_readiness(
+            reviewed_sha, metadata=_fixed_private_metadata_kind, pin=_a10_pin_executable,
+            binary_digest=_native_binary_digest, inspect_home=_a10_inspect_home, probe=_a10_isolated_cli,
+        )
+    except ImportError:
+        observations = {}  # The reviewed A10 runtime dependencies are unavailable.
+    unsupported = (observations.get("binary") in ("ABSENT", "REVIEWED_MISMATCH")
+                   or observations.get("version") == "REVIEWED_MISMATCH"
+                   or observations.get("exec_flags") == "MISSING"
+                   or observations.get("model_effort") == "EXACT_PAIR_UNSUPPORTED")
+    # HOST_READINESS_VERIFIED is reserved until system/account config, feature
+    # disables and the effective read-only policy can be independently observed.
+    # This evidence digest is separate from any native inference grant or receipt.
+    state = "HOST_UNSUPPORTED" if unsupported else "HOST_UNVERIFIED"
+    return _a10_readiness_record(state, observations=observations, issue_number=issue_number, source_sha=sha), sha
+
+
 def perform(request):
     op = request["operation"]
     params = request["parameters"]
+    if op == _A10_READINESS:
+        if type(params) is not dict or params:
+            deny("INVALID_PARAMETERS")
+        return _a10_readiness_record("SOURCE_PRESENT")
     if op == _CLEAN_AUTOSTART:
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
@@ -3623,7 +3896,15 @@ def main():
             event = json.load(stream)
         request = parse_event(event, args.mode)
         # The runtime probe emits its own closed receipt with a validated SHA.
-        if request["operation"] == _CLEAN_RUNTIME_PROBE:
+        if request["operation"] == _A10_READINESS:
+            outcome, sha = _protected_a10_readiness(request["issue_number"])
+            result = {
+                **outcome, "issue_number": request["issue_number"], "source_sha": sha,
+                "approval_channel": "CHATGPT_TO_AI_COMMERCE_ISSUE", "remote_shell_enabled": False,
+            }
+            if result.keys() != _A10_PUBLIC_FIELDS:
+                result = {"status": "BLOCKED", "code": "PUBLIC_TRANSPORT_GAP", "remote_shell_enabled": False}
+        elif request["operation"] == _CLEAN_RUNTIME_PROBE:
             result = _probe_protected_clean_runtime()
         else:
             outcome = (_install_protected_clean_autostart(event) if request["operation"] == _CLEAN_AUTOSTART

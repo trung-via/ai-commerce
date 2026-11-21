@@ -3,7 +3,7 @@ import asyncio
 import builtins
 import importlib.util
 import copy
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -51,6 +51,246 @@ def event(mode, operation, parameters, *, comment=None):
             "user": {"login": hostops.OWNER},
         }
     return result
+
+
+class A10HostReadinessTests(unittest.TestCase):
+    OP = "a10_codex_native_readiness"
+    SHA = "a" * 40
+    BINARY_SHA = "b" * 64
+    CHECKS = {
+        "binary", "version", "exec_flags", "config_overrides", "disabled_features", "login",
+        "codex_home", "model_effort", "job_object", "system_config", "account_config", "read_only_policy",
+    }
+
+    @staticmethod
+    def _protected_env():
+        return {
+            "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "issues", "GITHUB_REPOSITORY": hostops.REPO,
+            "GITHUB_REPOSITORY_OWNER": hostops.OWNER, "GITHUB_ACTOR": hostops.OWNER,
+            "GITHUB_TRIGGERING_ACTOR": hostops.OWNER, "GITHUB_REF": "refs/heads/main", "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_WORKFLOW_REF": hostops.REPO + "/.github/workflows/issue-ingress.yml@refs/heads/main",
+            "RUNNER_ENVIRONMENT": "self-hosted", "RUNNER_NAME": "AI-COMMERCE-HOSTOPS-01",
+            "GITHUB_SHA": A10HostReadinessTests.SHA, "GITHUB_WORKFLOW_SHA": A10HostReadinessTests.SHA,
+            "HOSTOPS_A10_READINESS_DISPATCH": "A10CodexHostReadiness.v1",
+            "HOSTOPS_A10_REVIEWED_CODEX_SHA256": A10HostReadinessTests.BINARY_SHA,
+        }
+
+    def _collect(self, *, binary_sha=BINARY_SHA, kind="PRESENT", home=None, responses=()):
+        inspect_home = Mock(return_value=home if home is not None else {
+            "codex_home": "ISOLATED_LAYOUT", "login": "AUTH_FILE_PRESENT", "model_effort": "EXACT_PAIR_PRESENT",
+        })
+        run = Mock(side_effect=responses)
+        probe = Mock(return_value=nullcontext(run))
+        fingerprint = Mock(return_value=binary_sha)
+        result = hostops._a10_collect_readiness(
+            self.BINARY_SHA, metadata=Mock(return_value=kind), pin=Mock(return_value=nullcontext()),
+            binary_digest=fingerprint, inspect_home=inspect_home, probe=probe,
+        )
+        return result, fingerprint, inspect_home, probe, run
+
+    @staticmethod
+    def _stdout(value):
+        return SimpleNamespace(returncode=0, stdout=value, stderr=b"")
+
+    @staticmethod
+    def _help(*, missing=None):
+        flags = ("--ignore-user-config", "--strict-config", "--sandbox", "--json", "--model",
+                 "--config", "--disable", "--output-schema", "--skip-git-repo-check")
+        options = [f"      {flag}\tOption" for flag in flags if flag != missing]
+        return ("\n".join(["Usage: codex exec [OPTIONS] [PROMPT]", "Options:",
+                           f"  -h, --help  Private help text mentions {missing} secret@example.test",
+                           *options]) + "\n").encode()
+
+    def _main(self, value, env):
+        env = {**env, "GITHUB_EVENT_PATH": "fake-event.json"}
+        with (patch.object(hostops, "os", SimpleNamespace(name="nt", environ=env)),
+              patch.object(hostops.sys, "argv", ["personal", "--mode", "read", "--output", "fake-result.json"]),
+              patch.object(hostops, "open", mock_open(read_data=json.dumps(value)), create=True),
+              patch.object(hostops.Path, "mkdir"), patch.object(hostops.Path, "write_text") as write,
+              patch.object(hostops.subprocess, "Popen", side_effect=AssertionError("offline")) as spawn):
+            code = hostops.main()
+        spawn.assert_not_called()
+        return code, json.loads(write.call_args.args[0])
+
+    def test_parameterless_owner_read_and_legacy_allowlist(self):
+        request = hostops.parse_event(event("read", self.OP, {}), "read")
+        with patch.object(hostops, "_a10_collect_readiness", side_effect=AssertionError("offline")):
+            result = hostops.perform(request)
+        self.assertEqual(result["status"], "BLOCKED")
+        self.assertEqual(result["a10_readiness"], {
+            "schema_version": "A10CodexHostReadiness.v1", "state": "SOURCE_PRESENT",
+            **dict.fromkeys(self.CHECKS, "UNKNOWN"), "reviewed_binary_sha256": None, "evidence_sha256": None,
+        })
+        self.assertNotIn("a10_readiness", hostops.PERSONAL_PUBLIC_FIELDS)
+        self.assertEqual(len(hostops.STANDING_READ_CATEGORIES), 16)
+        self.assertEqual(hostops.perform(hostops.parse_event(event("read", "inventory", {}), "read"))["operation"],
+                         "inventory")
+
+    def test_malformed_events_and_caller_selectors_never_reach_dispatch(self):
+        wrong_schema = event("read", self.OP, {})
+        wrong_schema["issue"]["body"] = wrong_schema["issue"]["body"].replace(hostops.SCHEMA, "other")
+        duplicate = event("read", self.OP, {})
+        duplicate["issue"]["body"] = duplicate["issue"]["body"].replace('"parameters": {}', '"parameters": {}, "parameters": {}')
+        extra_key = event("read", self.OP, {})
+        extra_key["issue"]["body"] = extra_key["issue"]["body"][:-1] + ', "url": "private"}'
+        wrong_owner = event("read", self.OP, {})
+        wrong_owner["issue"]["user"]["login"] = "someone-else"
+        wrong_sender = event("read", self.OP, {})
+        wrong_sender["sender"]["login"] = "someone-else"
+        cases = [wrong_schema, duplicate, extra_key, wrong_owner, wrong_sender, event("read", self.OP, []),
+                 event("write", self.OP, {})]
+        cases.extend(event("read", self.OP, {key: "private"}) for key in (
+            "command", "executable", "path", "argv", "model", "effort", "home", "url", "host_verification_sha256",
+        ))
+        with patch.object(hostops, "_protected_a10_readiness", side_effect=AssertionError("no dispatch")):
+            for value in cases:
+                with self.subTest(body=value["issue"]["body"]):
+                    code, record = self._main(value, self._protected_env())
+                    self.assertEqual(code, 2)
+                    self.assertEqual(record["status"], "BLOCKED")
+                    self.assertNotIn("a10_readiness", record)
+        with self.assertRaisesRegex(hostops.Denied, "INVALID_PARAMETERS"):
+            hostops.perform({"operation": self.OP, "parameters": {"argv": []}})
+
+    def test_unprotected_workflow_ci_and_bad_review_pin_never_inspect_host(self):
+        value = event("read", self.OP, {})
+        for env in ({}, {**self._protected_env(), "HOSTOPS_A10_READINESS_DISPATCH": ""},
+                    {**self._protected_env(), "HOSTOPS_A10_REVIEWED_CODEX_SHA256": "private"},
+                    {**self._protected_env(), "GITHUB_WORKFLOW_SHA": "0" * 40},
+                    {**self._protected_env(), "RUNNER_NAME": "AI-COMMERCE-EF02-02"},
+                    {**self._protected_env(), "PYTEST_CURRENT_TEST": "offline"},
+                    {**self._protected_env(), "AI_COMMERCE_GIT_GUARD_ACTIVE": "1"}):
+            with (self.subTest(env=env), patch.object(hostops, "_a10_collect_readiness") as collect):
+                code, result = self._main(value, env)
+                collect.assert_not_called()
+                self.assertEqual(code, 2)
+                self.assertEqual(result["a10_readiness"]["state"], "SOURCE_PRESENT")
+                self.assertIsNone(result["source_sha"])
+
+    def test_fixed_probes_and_sanitized_evidence_stay_unverified(self):
+        observed, fingerprint, inspect_home, _, run = self._collect(responses=[
+            self._stdout(b"codex-cli 0.164.0\r\n"), self._stdout(self._help()),
+        ])
+        fingerprint.assert_called_once_with(hostops._A10_CODEX_EXE)
+        inspect_home.assert_called_once_with()
+        self.assertEqual(run.call_args_list, [call(("--version",)), call(("exec", "--help"))])
+        with patch.object(hostops, "_a10_collect_readiness", return_value={**observed,
+                "account_config": "secret@example.test", "env": "PRIVATE_TOKEN"}):
+            code, result = self._main(event("read", self.OP, {}), self._protected_env())
+        self.assertEqual(code, 0)
+        self.assertEqual(set(result), {"status", "code", "operation", "a10_readiness", "issue_number", "source_sha",
+                                      "approval_channel", "remote_shell_enabled"})
+        self.assertEqual(result["source_sha"], self.SHA)
+        self.assertEqual(result["issue_number"], 17)
+        self.assertEqual(result["approval_channel"], "CHATGPT_TO_AI_COMMERCE_ISSUE")
+        self.assertIs(result["remote_shell_enabled"], False)
+        readiness = dict(result["a10_readiness"])
+        digest = readiness.pop("evidence_sha256")
+        self.assertEqual(set(readiness), self.CHECKS | {"schema_version", "state", "reviewed_binary_sha256"})
+        self.assertEqual(readiness["state"], "HOST_UNVERIFIED")
+        self.assertEqual(readiness["reviewed_binary_sha256"], self.BINARY_SHA)
+        for key, expected in {"version": "REVIEWED_MATCH", "exec_flags": "DECLARED", "job_object": "OBSERVED",
+                              "login": "AUTH_FILE_PRESENT", "model_effort": "EXACT_PAIR_PRESENT"}.items():
+            self.assertEqual(readiness[key], expected)
+        for key in ("system_config", "account_config", "read_only_policy", "config_overrides", "disabled_features"):
+            self.assertEqual(readiness[key], "UNKNOWN")
+        canonical = json.dumps({"issue_number": 17, "source_sha": self.SHA, "a10_readiness": readiness},
+                               sort_keys=True, separators=(",", ":")).encode("ascii")
+        self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
+        for private in ("secret@example.test", "PRIVATE_TOKEN", "host_verification_sha256", "codex.exe"):
+            self.assertNotIn(private, json.dumps(result))
+
+    def test_binary_and_home_failures_prevent_process_probes(self):
+        for kwargs, expected in (({"kind": "UNAVAILABLE"}, {"binary": "UNSAFE"}),
+                                 ({"kind": "ABSENT"}, {"binary": "ABSENT"}),
+                                 ({"binary_sha": "c" * 64}, {"binary": "REVIEWED_MISMATCH"}),
+                                 ({"home": {"codex_home": "UNSAFE"}}, {"codex_home": "UNSAFE"}),
+                                 ({"home": {"login": "AUTH_FILE_ABSENT"}}, {"login": "AUTH_FILE_ABSENT"})):
+            with self.subTest(kwargs=kwargs):
+                result, _, _, probe, run = self._collect(**kwargs)
+                self.assertLessEqual(expected.items(), result.items())
+                probe.assert_not_called()
+                run.assert_not_called()
+
+    def test_version_help_uncertainty_and_unsupported_results(self):
+        from ai_commerce.opportunity.core.models import OpportunityError
+
+        version = self._stdout(b"codex-cli 0.164.0\n")
+        cases = [
+            ([self._stdout(b"codex-cli 0.164.1\n")], "version", "REVIEWED_MISMATCH", "HOST_UNSUPPORTED"),
+            ([version, self._stdout(self._help(missing="--disable"))], "exec_flags", "MISSING", "HOST_UNSUPPORTED"),
+            ([subprocess.TimeoutExpired("private", 5)], "version", "UNKNOWN", "HOST_UNVERIFIED"),
+            ([self._stdout(b"\xffprivate")], "version", "UNKNOWN", "HOST_UNVERIFIED"),
+            ([version, self._stdout(b"x" * (hostops._A10_PROBE_MAX_BYTES + 1))], "exec_flags", "UNKNOWN", "HOST_UNVERIFIED"),
+            ([OpportunityError("HOLD_DEPENDENCY_NATIVE_CODEX_WINDOWS_JOB")],
+             "job_object", "UNAVAILABLE", "HOST_UNVERIFIED"),
+        ]
+        for responses, field, expected, state in cases:
+            with self.subTest(field=field, expected=expected):
+                observed, _, _, _, run = self._collect(responses=responses)
+                self.assertEqual(run.call_count, len(responses))
+                with patch.object(hostops, "_a10_collect_readiness", return_value=observed):
+                    _, result = self._main(event("read", self.OP, {}), self._protected_env())
+                self.assertEqual(result["a10_readiness"][field], expected)
+                self.assertEqual(result["a10_readiness"]["state"], state)
+
+    def test_isolated_cli_has_a_closed_argv_and_bounded_job_runner(self):
+        from ai_commerce.opportunity.core import models
+
+        scratch = "isolated-scratch"
+        with (patch.object(hostops.tempfile, "TemporaryDirectory", return_value=nullcontext(scratch)) as temporary,
+              patch.object(models, "_bounded_native_codex") as runner, hostops._a10_isolated_cli() as probe):
+            for args in (("--version",), ("exec", "--help")):
+                probe(args)
+            for args in (("exec",), ("exec", "--help", "private"), ("login", "status"), ("--config", "x=y")):
+                with self.assertRaisesRegex(hostops.Denied, "A10_PROBE_DENIED"):
+                    probe(args)
+        temporary.assert_called_once_with(prefix="readiness-", dir=hostops._A10_CODEX_HOME)
+        options = {"input": b"", "cwd": scratch, "codex_home": scratch, "shell": False,
+                   "timeout": 5, "max_bytes": 32768}
+        exe = str(hostops._A10_CODEX_EXE)
+        self.assertEqual(runner.call_args_list, [call([exe, "--version"], **options),
+                                                 call([exe, "exec", "--help"], **options)])
+
+    def test_home_auth_metadata_and_cache_use_fixed_names_without_reading_auth(self):
+        from ai_commerce.opportunity.core import models
+        from ai_commerce.remote import local_completion_handoff
+
+        home = hostops._A10_CODEX_HOME
+        auth = home / "auth.json"
+        cache = home / "models_cache.json"
+        selector = models.ai_provider_profile("codex-cli")
+        raw = json.dumps({"client_version": "0.164.0", "models": [{"slug": selector["model"],
+                          "supported_reasoning_levels": [{"effort": selector["effort"]}]}]}).encode()
+        with (patch.object(hostops, "_fixed_private_metadata_kind", return_value="PRESENT") as metadata,
+              patch.object(local_completion_handoff, "_private_identity", return_value="private-sid"),
+              patch.object(hostops.Path, "lstat", return_value=SimpleNamespace(st_nlink=1)),
+              patch.object(models, "_check_native_codex_home") as layout,
+              patch.object(models, "_native_file", return_value=raw) as read):
+            self.assertEqual(hostops._a10_inspect_home(), {"codex_home": "ISOLATED_LAYOUT",
+                             "login": "AUTH_FILE_PRESENT", "model_effort": "EXACT_PAIR_PRESENT"})
+            self.assertEqual(metadata.call_args_list, [call(home, directory=True), call(auth), call(cache)])
+            layout.assert_called_once_with(hostops._A10_CODEX_EXE, home)
+            read.assert_called_once_with(cache, models.AI_MAX_BYTES)
+        with (patch.object(hostops, "_fixed_private_metadata_kind", side_effect=("PRESENT", "UNAVAILABLE")),
+              patch.object(local_completion_handoff, "_private_identity", return_value="private-sid"),
+              patch.object(models, "_native_file", side_effect=AssertionError("unsafe auth"))):
+            self.assertEqual(hostops._a10_inspect_home(), {"codex_home": "UNSAFE", "login": "AUTH_FILE_UNSAFE"})
+
+    def test_catalog_requires_exact_unique_model_and_effort(self):
+        from ai_commerce.opportunity.core.models import ai_provider_profile
+
+        selector = ai_provider_profile("codex-cli")
+        version = "0.164.0"
+        exact = {"slug": selector["model"], "supported_reasoning_levels": [{"effort": selector["effort"]}]}
+        for entries, expected in (([exact], "EXACT_PAIR_PRESENT"), ([exact, exact], "UNKNOWN"),
+                                  ([{**exact, "slug": selector["model"] + "-private"}], "EXACT_PAIR_UNSUPPORTED"),
+                                  ([{**exact, "supported_reasoning_levels": [{"effort": "private"}]}],
+                                   "EXACT_PAIR_UNSUPPORTED")):
+            with self.subTest(expected=expected):
+                raw = json.dumps({"client_version": version, "models": entries}).encode()
+                self.assertEqual(hostops._a10_catalog_support(raw, version, selector), expected)
+                self.assertEqual(hostops._a10_catalog_support(raw, "0.164.1", selector), "UNKNOWN")
 
 
 class PersonalHostOpsContractTests(unittest.TestCase):
