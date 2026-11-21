@@ -2212,7 +2212,7 @@ def test_clean_9444_install_holds_before_registration(clean_9444, monkeypatch, c
     assert ca.install_clean_9444_autostart(opt_in=True) == {"status": "HOLD", "code": code}
 
 
-def test_clean_9444_task_uses_the_same_inline_launcher_without_cpython(clean_9444, monkeypatch):
+def test_clean_9444_task_is_triggerless_and_uses_a_no_console_launcher(clean_9444, monkeypatch):
     owner = clean_9444
     local = owner[0]
     target, candidates = ca._clean_target(owner)
@@ -2228,7 +2228,6 @@ def test_clean_9444_task_uses_the_same_inline_launcher_without_cpython(clean_944
         return SimpleNamespace(returncode=0, stdout=next(replies).encode("ascii"))
 
     monkeypatch.setattr(subprocess, "run", run)
-    assert not (local / "Programs" / "Python").exists()
     assert ca.install_clean_9444_autostart(opt_in=True) == {"status": "ENROLLED", "code": "ENROLLED"}
     assert ca._clean_task(owner, target, candidates, install=False) == "ALREADY_ENROLLED"
     assert ca.ensure_clean_9444(opt_in=True) == {"status": "STARTED", "code": "CDP_VERIFIED"}
@@ -2240,10 +2239,15 @@ def test_clean_9444_task_uses_the_same_inline_launcher_without_cpython(clean_944
     for env in (install_env, read_env):
         assert env["AI_COMMERCE_TASK_POWERSHELL"] == str(powershell)
         assert env["AI_COMMERCE_TASK_SESSION"] == "7"
-        assert env["AI_COMMERCE_TASK_ARGUMENTS"] == subprocess.list2cmdline(launcher_args[1:])
-        assert not re.search(r"pythonw|cpython|runpy|site-packages", env["AI_COMMERCE_TASK_ARGUMENTS"], re.I)
+        arguments = env["AI_COMMERCE_TASK_ARGUMENTS"]
+        assert arguments.startswith("-I -B -S -c ")
+        assert "creationflags=subprocess.CREATE_NO_WINDOW" in arguments
+        if os.name == "nt":
+            assert repr(launcher_args) in ca._commandline_argv("pythonw.exe " + arguments)[5]
+        assert Path(env["AI_COMMERCE_TASK_GUI"]).name == "pythonw.exe"
     install_script = install_args[-1]
-    assert "$trigger.Repetition.Interval = 'PT1M'" in install_script
+    assert "Triggers.Create" not in install_script and "PT1M" not in install_script
+    assert "$registered.Definition.Triggers.Count -ne 0" in install_script
     assert "$expected.Settings.MultipleInstances = 2" in install_script
     assert "$expected.Principal.LogonType = 3" in install_script
     assert "$expected, 34, $sid, $null, 3, $sddl" in install_script
@@ -2251,6 +2255,136 @@ def test_clean_9444_task_uses_the_same_inline_launcher_without_cpython(clean_944
     assert ".RegisterTaskDefinition(" not in read_args[-1] and ".RunEx(" not in read_args[-1]
     assert "Get-Acl" not in launcher_args[-1]
     assert "Stop-Process" not in launcher_args[-1] and "/json/list" not in launcher_args[-1]
+
+
+_CLEAN_TASK_MIGRATION_FIXTURE = r"""
+$ErrorActionPreference = 'Stop'
+$sid = 'S-1-5-21-1-2-3-1001'
+$sddl = 'O:' + $sid + 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;' + $sid + ')'
+$action = [pscustomobject]@{
+    Type = 0; Path = 'C:\Owner\pythonw.exe'; Arguments = 'demand'; WorkingDirectory = 'C:\Owner'
+}
+$expected = [pscustomobject]@{
+    Principal = [pscustomobject]@{ Id = 'WakeHubOwner'; UserId = $sid; LogonType = 3; RunLevel = 0 }
+    Settings = [pscustomobject]@{ AllowDemandStart = $true; RestartCount = 0 }
+    Actions = [pscustomobject]@{ Context = 'WakeHubOwner'; Entry = $action }
+    Triggers = [pscustomobject]@{ Count = 0 }
+}
+$env:AI_COMMERCE_TASK_POWERSHELL = 'C:\Windows\powershell.exe'
+$env:AI_COMMERCE_TASK_LEGACY_ARGUMENTS = 'legacy'
+function New-FakeTask($demand) {
+    $t = [pscustomobject]@{ Type = 9; Enabled = $true; UserId = $sid
+        Repetition = [pscustomobject]@{ Interval = 'PT1M' } }
+    $a = if ($demand) { $action.PSObject.Copy() } else {
+        [pscustomobject]@{ Type = 0; Path = $env:AI_COMMERCE_TASK_POWERSHELL; Arguments = 'legacy'
+            WorkingDirectory = 'C:\Windows' }
+    }
+    $actions = [pscustomobject]@{ Count = 1; Context = 'WakeHubOwner'; Entry = $a }
+    $actions | Add-Member ScriptMethod Item { $this.Entry }
+    $triggers = [pscustomobject]@{ Count = [int](!$demand); Entry = $t }
+    $triggers | Add-Member ScriptMethod Item { $this.Entry }
+    $task = [pscustomobject]@{ Enabled = $true; State = 3; Instances = 0; Xml = 'prior xml'
+        Sddl = $sddl; Definition = [pscustomobject]@{ Principal = $expected.Principal.PSObject.Copy()
+            Settings = $expected.Settings.PSObject.Copy(); Actions = $actions; Triggers = $triggers } }
+    $task | Add-Member ScriptMethod GetSecurityDescriptor { $this.Sddl }
+    $task | Add-Member ScriptMethod GetInstances { [pscustomobject]@{ Count = $this.Instances } }
+    return $task
+}
+$name = 'AI-Commerce-WakeHub-9444-Clean-' + $sid
+$script:current = New-FakeTask ($case -eq 'already')
+$script:d5 = $null
+$script:writes = 0
+$script:values = @{}
+switch ($case) {
+    'd5_ambiguous' { $script:d5 = New-FakeTask $false }
+    'd5_disabled' {
+        $script:d5 = New-FakeTask $false
+        $script:d5.Enabled = $false
+        $script:d5.State = 1
+    }
+    'wrong_action' { $script:current.Definition.Actions.Entry.Arguments = 'private wrong action' }
+    'wrong_owner' { $script:current.Sddl = $sddl.Replace('O:' + $sid, 'O:SY') }
+    'wrong_principal' { $script:current.Definition.Principal.UserId = '' }
+    'running' { $script:current.State = 4 }
+    'queued' { $script:current.Instances = 1 }
+    'unresolved' { $script:values.DemandMigrationRollback = 'saved' }
+    'replay' {
+        $script:values.DemandMigrationRollback = 'saved'
+        $script:values.DemandMigrationComplete = 1
+    }
+}
+if ($case -in @('pwsh77', 'pwsh_unverified')) {
+    $script:current.Definition.Actions.Entry.Path =
+        Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'PowerShell\7\pwsh.exe'
+}
+$registry = [pscustomobject]@{}
+$registry | Add-Member ScriptMethod GetValueNames { $script:values.Keys }
+$registry | Add-Member ScriptMethod GetValue { param($name) $script:values[$name] }
+$registry | Add-Member ScriptMethod SetValue { param($name, $value) $script:values[$name] = $value }
+$registry | Add-Member ScriptMethod Flush {}
+$registry | Add-Member ScriptMethod Dispose {}
+$folder = [pscustomobject]@{}
+$folder | Add-Member ScriptMethod GetTask {
+    param($taskName)
+    if ($taskName -ceq 'AI-Commerce-D5-CDP-AtLogon') { return $script:d5 }
+    if ($taskName -cne $name) { throw 'Unexpected target' }
+    return $script:current
+}
+$folder | Add-Member ScriptMethod RegisterTaskDefinition {
+    param($taskName, $definition, $flags, $user, $password, $logon, $security)
+    if ($taskName -cne $name -or $flags -ne 52 -or $user -cne $sid -or $logon -ne 3 -or
+        $security -cne $sddl -or !$script:values.DemandMigrationRollback -or
+        $definition.Triggers.Count -ne 0 -or $definition.Actions.Entry.Arguments -cne 'demand') {
+        throw 'Unsafe migration'
+    }
+    $script:writes++
+    $script:current = New-FakeTask $true
+    if ($case -eq 'readback_fault') { $script:current.State = 4 }
+}
+"""
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell task definition")
+@pytest.mark.parametrize("case, code, writes, complete", [
+    ("legacy", "DEMAND_MIGRATED", 1, True),
+    ("pwsh77", "DEMAND_MIGRATED", 1, True),
+    ("pwsh_unverified", "AUTOSTART_CONFLICT", 0, False),
+    ("d5_disabled", "DEMAND_MIGRATED", 1, True),
+    ("already", "DEMAND_ALREADY_READY", 0, False),
+    ("d5_ambiguous", "TASK_MIGRATION_AMBIGUOUS", 0, False),
+    ("wrong_action", "AUTOSTART_CONFLICT", 0, False),
+    ("wrong_owner", "AUTOSTART_CONFLICT", 0, False),
+    ("wrong_principal", "AUTOSTART_CONFLICT", 0, False),
+    ("running", "TASK_MIGRATION_NOT_READY", 0, False),
+    ("queued", "TASK_MIGRATION_NOT_READY", 0, False),
+    ("unresolved", "UNKNOWN_EFFECT", 0, False),
+    ("replay", "TASK_MIGRATION_REPLAY", 0, True),
+    ("readback_fault", "UNKNOWN_EFFECT", 1, False),
+])
+def test_clean_9444_migration_offline(case, code, writes, complete):
+    functions = ca._CLEAN_9444_TASK_MIGRATION.split("\nfunction Read-Registration", 1)[1]
+    seam = "\n$registered = Read-Registration"
+    runtime_boundary = "\nfunction Test-LegacyRegistration"
+    functions = functions.replace(runtime_boundary, """
+function Test-PowerShell77($path) { return $case -eq 'pwsh77' }
+""" + runtime_boundary, 1)
+    functions = functions.replace(seam, """
+function Test-DemandRuntime { return $true }
+function Open-MigrationState($write) { return $registry }
+""" + seam, 1)
+    result = subprocess.run(
+        [str(ca._powershell()), *ca._CLEAN_POWERSHELL_FLAGS,
+         f"$case = '{case}'\n" + _CLEAN_TASK_MIGRATION_FIXTURE
+         + "\n$result = & {\nfunction Read-Registration" + functions.replace("; exit", "; return")
+         + "\n}\n"
+         + "@{ code = $result; writes = $script:writes; complete = [bool]$script:values.DemandMigrationComplete;"
+           " rollback = [bool]$script:values.DemandMigrationRollback } | ConvertTo-Json -Compress"],
+        capture_output=True, text=True, encoding="utf-8", timeout=15)
+    assert result.returncode == 0 and not result.stderr
+    assert json.loads(result.stdout) == {
+        "code": code, "writes": writes, "complete": complete,
+        "rollback": bool(writes) or case in {"unresolved", "replay"},
+    }
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell launcher")

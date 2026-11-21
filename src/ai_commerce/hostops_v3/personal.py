@@ -51,6 +51,7 @@ PUBLIC_EXTENSIONS = {".md", ".py", ".json", ".yml", ".yaml", ".toml", ".cjs", ".
 MAX_READ = 8192
 MAX_WRITE = 2048
 _CLEAN_AUTOSTART = "install_clean_9444_autostart"
+_CLEAN_DEMAND_MIGRATION = "migrate_clean_9444_demand_task"
 _CLEAN_RUNTIME_PROBE = "clean_9444_runtime_probe"
 _A10_READINESS = "a10_codex_native_readiness"
 _A10_READINESS_SCHEMA = "A10CodexHostReadiness.v1"
@@ -224,7 +225,7 @@ def parse_event(event, mode):
         else:
             deny("READ_OPERATION_DENIED")
     else:
-        if operation == _CLEAN_AUTOSTART:
+        if operation in (_CLEAN_AUTOSTART, _CLEAN_DEMAND_MIGRATION):
             if params:
                 deny("INVALID_PARAMETERS")
         elif operation == "git_sync_main":
@@ -384,6 +385,11 @@ _CLEAN_PUBLIC_CODES = frozenset({
     "UNKNOWN_EFFECT", "CDP_VERIFIED", "INSTALLED_BUT_NOT_RUNNING",
 })
 
+_CLEAN_MIGRATION_CODES = _CLEAN_PUBLIC_CODES | {
+    "AUTOSTART_NOT_ENROLLED", "DEMAND_MIGRATED", "DEMAND_ALREADY_READY",
+    "TASK_MIGRATION_AMBIGUOUS", "TASK_MIGRATION_NOT_READY", "TASK_MIGRATION_REPLAY",
+}
+
 _CHECKOUT_EGG_INFO_FILES = frozenset({
     "PKG-INFO", "SOURCES.txt", "dependency_links.txt", "entry_points.txt",
     "requires.txt", "top_level.txt", "not-zip-safe", "zip-safe",
@@ -421,15 +427,21 @@ def _clean_source_bytes_match(path: Path, worktree_bytes: bytes, pinned_bytes: b
     return worktree_bytes in (worktree_norm, worktree_norm.replace(b"\n", b"\r\n"))
 
 
-def _clean_autostart_receipt(code):
-    if type(code) is not str or code not in _CLEAN_PUBLIC_CODES:
+def _clean_autostart_receipt(code, *, operation=_CLEAN_AUTOSTART):
+    migration = operation == _CLEAN_DEMAND_MIGRATION
+    codes = _CLEAN_MIGRATION_CODES if migration else _CLEAN_PUBLIC_CODES
+    observed = ({"DEMAND_MIGRATED", "DEMAND_ALREADY_READY"} if migration else
+                {"CDP_VERIFIED", "INSTALLED_BUT_NOT_RUNNING"})
+    if type(code) is not str or code not in codes:
         code = "AUTOSTART_RUNTIME_UNAVAILABLE"
     result = {
-        "status": "OBSERVED" if code in {"CDP_VERIFIED", "INSTALLED_BUT_NOT_RUNNING"} else "HOLD",
-        "code": code, "operation": _CLEAN_AUTOSTART, "cdp_port": 9444,
-        "devtools_protocol_ok": code == "CDP_VERIFIED", "exact_chat_verified": False,
+        "status": "OBSERVED" if code in observed else "HOLD",
+        "code": code, "operation": operation, "cdp_port": 9444,
+        "exact_chat_verified": False,
         "wake_sent": False, "arbitrary_shell_enabled": False,
     }
+    if not migration:
+        result["devtools_protocol_ok"] = code == "CDP_VERIFIED"
     if not result.keys() <= PERSONAL_PUBLIC_FIELDS:
         deny("PUBLIC_TRANSPORT_GAP")
     return result
@@ -451,9 +463,14 @@ def _require_protected_clean_runner(event_name: str):
         deny("PROTECTED_HOSTOPS_ONLY")
 
 
-def _protected_clean_workflow_sha() -> str:
+def _protected_clean_workflow_sha(*, write=False) -> str:
     sha = os.environ.get("GITHUB_SHA", "")
-    if not re.fullmatch(r"[a-f0-9]{40}", sha) or os.environ.get("GITHUB_WORKFLOW_SHA") != sha:
+    workflow_sha = os.environ.get("GITHUB_WORKFLOW_SHA", "")
+    # Issue ingress pins checkout to github.sha and blanks its custom workflow
+    # SHA outside the A10 READ. WRITE additionally checks local main and source
+    # bytes against that checkout before any task access.
+    if (not re.fullmatch(r"[a-f0-9]{40}", sha) or
+            (workflow_sha != sha and not (write and workflow_sha == ""))):
         deny("PROTECTED_HOSTOPS_ONLY")
     return sha
 
@@ -566,7 +583,7 @@ _CLEAN_RUNTIME_PROBE_CODES = frozenset({
     "READY", "AUTOSTART_NOT_ENROLLED", "TASK_REGISTRATION_CONFLICT",
     "TASK_READ_UNVERIFIED", "WINDOWS_OWNER_CONTEXT_UNVERIFIED",
     "SOURCE_CUSTODY_UNVERIFIED", "PROFILE_UNAVAILABLE", "TARGET_READ_UNVERIFIED",
-    "PENDING_STATE_CHANGED", "UNKNOWN",
+    "PENDING_STATE_CHANGED", "UNKNOWN_EFFECT", "UNKNOWN",
     *(f"{prefix}_{outcome}"
       for prefix in _CLEAN_RUNTIME_MARKER_PREFIXES
       for outcome in _CLEAN_RUNTIME_MARKER_OUTCOMES),
@@ -658,6 +675,8 @@ def _observe_clean_runtime(sha: str) -> str:
     )
     if after_state != marker_state:
         return "PENDING_STATE_CHANGED"
+    if task == "UNKNOWN_EFFECT":
+        return "UNKNOWN_EFFECT"
     if marker_state is None:
         if task_error:
             return "TASK_READ_UNVERIFIED"
@@ -716,7 +735,7 @@ def _install_protected_clean_autostart(event):
     reserved = False
     try:
         _require_protected_clean_runner("issue_comment")
-        sha = _protected_clean_workflow_sha()
+        sha = _protected_clean_workflow_sha(write=True)
         if parse_event(event, "write")["operation"] != _CLEAN_AUTOSTART:
             deny("PROTECTED_HOSTOPS_ONLY")
         from ai_commerce.remote import chrome_acquisition as acquisition
@@ -749,7 +768,6 @@ def _install_protected_clean_autostart(event):
         task = acquisition._clean_task(owner, target, candidates, install=False)
         if task not in {"ALREADY_ENROLLED", "AUTOSTART_NOT_ENROLLED"}:
             return _clean_autostart_receipt(task)
-        created = None
         if task == "AUTOSTART_NOT_ENROLLED":
             with acquisition._clean_supervisor_slot():
                 if acquisition._clean_pending(pending):
@@ -759,45 +777,62 @@ def _install_protected_clean_autostart(event):
                 acquisition._clean_record_pending(pending, True)
                 created = acquisition._clean_task(owner, target, candidates, install=True)
                 if created not in {"ENROLLED", "ALREADY_ENROLLED"}:
-                    if created in {"AUTOSTART_CONFLICT", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}:
+                    if created in {"AUTOSTART_CONFLICT", "WINDOWS_OWNER_CONTEXT_UNVERIFIED",
+                                   "AUTOSTART_RUNTIME_UNAVAILABLE"}:
                         acquisition._clean_record_pending(pending, False)
                         return _clean_autostart_receipt(created)
                     return _clean_autostart_receipt("UNKNOWN_EFFECT")
                 if acquisition._clean_task(owner, target, candidates, install=False) != "ALREADY_ENROLLED":
                     return _clean_autostart_receipt("UNKNOWN_EFFECT")
-                inspect_target()
-        # Release the shared slot before the scheduled action acquires it.
-        started = False
-        if reserved:
-            if created == "ENROLLED":
                 if acquisition._native_operator() != owner:
                     return _clean_autostart_receipt("UNKNOWN_EFFECT")
-                start = acquisition._clean_task(owner, target, candidates, install=False, start=True)
-                if start not in {"START_REQUESTED", "START_NOT_ATTEMPTED"}:
-                    return _clean_autostart_receipt("UNKNOWN_EFFECT")
-                started = start == "START_REQUESTED"
-            acquisition._clean_record_pending(pending, False)
-            reserved = False
-        deadline = time.monotonic() + (20 if started else 0)
-        while True:
-            state, identity = acquisition._clean_inventory(target, candidates, session, sid)
-            launch_pending = acquisition._clean_launch_pending()
-            if state == "OWNED" and not launch_pending:
-                observed = replace(target, executable=identity[1])
-                acquisition._verify_google_chrome(observed)
-                acquisition._probe_cdp(observed)
-                if (acquisition._clean_inventory(target, candidates, session, sid) != (state, identity)
-                        or acquisition._native_operator() != owner):
-                    return _clean_autostart_receipt("UNKNOWN_EFFECT")
-                return _clean_autostart_receipt("CDP_VERIFIED")
-            if time.monotonic() >= deadline:
-                return _clean_autostart_receipt("UNKNOWN_EFFECT" if state != "ABSENT" or launch_pending
-                                               else "INSTALLED_BUT_NOT_RUNNING")
-            time.sleep(0.5)
+                acquisition._clean_record_pending(pending, False)
+                return _clean_autostart_receipt("INSTALLED_BUT_NOT_RUNNING")
+        state, identity = acquisition._clean_inventory(target, candidates, session, sid)
+        if acquisition._clean_launch_pending():
+            return _clean_autostart_receipt("UNKNOWN_EFFECT")
+        if state == "OWNED":
+            observed = replace(target, executable=identity[1])
+            acquisition._verify_google_chrome(observed)
+            acquisition._probe_cdp(observed)
+            if (acquisition._clean_inventory(target, candidates, session, sid) != (state, identity)
+                    or acquisition._native_operator() != owner):
+                return _clean_autostart_receipt("UNKNOWN_EFFECT")
+            return _clean_autostart_receipt("CDP_VERIFIED")
+        return _clean_autostart_receipt("INSTALLED_BUT_NOT_RUNNING" if state == "ABSENT" else "UNKNOWN_EFFECT")
     except (ValueError, Denied) as exc:
         return _clean_autostart_receipt("UNKNOWN_EFFECT" if reserved else str(exc))
     except Exception:
         return _clean_autostart_receipt("UNKNOWN_EFFECT" if reserved else "AUTOSTART_RUNTIME_UNAVAILABLE")
+
+
+def _migrate_protected_clean_demand_task(event):
+    def receipt(code):
+        return _clean_autostart_receipt(code, operation=_CLEAN_DEMAND_MIGRATION)
+
+    receipt("PROTECTED_HOSTOPS_ONLY")
+    dispatched = False
+    try:
+        _require_protected_clean_runner("issue_comment")
+        sha = _protected_clean_workflow_sha(write=True)
+        if parse_event(event, "write")["operation"] != _CLEAN_DEMAND_MIGRATION:
+            deny("PROTECTED_HOSTOPS_ONLY")
+        from ai_commerce.remote import chrome_acquisition as acquisition
+        owner = acquisition._native_operator()
+        _persistent_clean_source(acquisition, sha)
+        with acquisition._clean_supervisor_slot():
+            target, candidates = acquisition._clean_target(owner)
+            if acquisition._native_operator() != owner:
+                deny("WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+            dispatched = True
+            code = acquisition._clean_task(owner, target, candidates, install=False, migrate=True)
+            if acquisition._native_operator() != owner or code not in _CLEAN_MIGRATION_CODES:
+                return receipt("UNKNOWN_EFFECT")
+            return receipt(code)
+    except (ValueError, Denied) as exc:
+        return receipt("UNKNOWN_EFFECT" if dispatched else str(exc))
+    except Exception:
+        return receipt("UNKNOWN_EFFECT" if dispatched else "AUTOSTART_RUNTIME_UNAVAILABLE")
 
 
 def _runner_runtime_inventory():
@@ -4759,10 +4794,10 @@ def perform(request):
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
         return _a10_readiness_receipt(request.get("issue_number"))
-    if op == _CLEAN_AUTOSTART:
+    if op in (_CLEAN_AUTOSTART, _CLEAN_DEMAND_MIGRATION):
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
-        return _clean_autostart_receipt("PROTECTED_HOSTOPS_ONLY")
+        return _clean_autostart_receipt("PROTECTED_HOSTOPS_ONLY", operation=op)
     if op == "cdp_9444_config_registry":
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
@@ -4900,8 +4935,12 @@ def main():
         elif request["operation"] == _CLEAN_RUNTIME_PROBE:
             result = _probe_protected_clean_runtime()
         else:
-            outcome = (_install_protected_clean_autostart(event) if request["operation"] == _CLEAN_AUTOSTART
-                       else perform(request))
+            if request["operation"] == _CLEAN_AUTOSTART:
+                outcome = _install_protected_clean_autostart(event)
+            elif request["operation"] == _CLEAN_DEMAND_MIGRATION:
+                outcome = _migrate_protected_clean_demand_task(event)
+            else:
+                outcome = perform(request)
             result = {
                 **outcome,
                 "issue_number": request["issue_number"],
@@ -4910,7 +4949,8 @@ def main():
                 "remote_shell_enabled": False,
                 "source_sha": os.environ.get("GITHUB_SHA", ""),
             }
-            if request["operation"] == _CLEAN_AUTOSTART and not re.fullmatch(r"[a-f0-9]{40}", result["source_sha"]):
+            if (request["operation"] in (_CLEAN_AUTOSTART, _CLEAN_DEMAND_MIGRATION)
+                    and not re.fullmatch(r"[a-f0-9]{40}", result["source_sha"])):
                 del result["source_sha"]
     except Denied as exc:
         result["code"] = str(exc)

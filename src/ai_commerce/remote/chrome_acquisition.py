@@ -2140,7 +2140,7 @@ _CLEAN_POWERSHELL_FLAGS = ("-NoProfile", "-NonInteractive", "-WindowStyle", "Hid
 
 
 def ensure_clean_9444(*, opt_in: bool = False) -> dict:
-    """Run the same fixed launcher once from the attended owner session."""
+    """Acquire Chrome once for an explicitly opted-in interactive owner."""
     if opt_in is not True:
         return _clean_hold("OPT_IN_REQUIRED")
     try:
@@ -2160,6 +2160,21 @@ def ensure_clean_9444(*, opt_in: bool = False) -> dict:
         return _clean_hold("UNKNOWN_EFFECT")
 
 
+def _clean_demand_action(powershell: Path, launcher: str) -> tuple[Path, str]:
+    # A GUI-subsystem entry point prevents a console before PowerShell starts.
+    gui = Path(sys._base_executable).with_name("pythonw.exe")
+    if not gui.is_absolute() or "%" in str(gui):
+        raise _Clean9444Hold("AUTOSTART_RUNTIME_UNAVAILABLE")
+    command = [str(powershell), *_CLEAN_POWERSHELL_FLAGS, launcher]
+    script = (
+        "import os, subprocess\n"
+        f"env = {{k: v for k, v in os.environ.items() if k.upper() in {sorted(_CHILD_ENV_KEYS)!r}}}\n"
+        f"subprocess.run({command!r}, env=env, timeout=40, creationflags=subprocess.CREATE_NO_WINDOW,"
+        " stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+    )
+    return gui, subprocess.list2cmdline(["-I", "-B", "-S", "-c", script])
+
+
 _CLEAN_9444_TASK_INSPECTION = r"""
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new()
@@ -2167,7 +2182,7 @@ $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $session = [Diagnostics.Process]::GetCurrentProcess().SessionId
 if ($sid -cne $env:AI_COMMERCE_TASK_SID -or $session -le 0 -or
     $session -ne [int]$env:AI_COMMERCE_TASK_SESSION) { 'WINDOWS_OWNER_CONTEXT_UNVERIFIED'; exit }
-$sddl = 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;' + $sid + ')'
+$sddl = 'O:' + $sid + 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;' + $sid + ')'
 $name = 'AI-Commerce-WakeHub-9444-Clean-' + $sid
 $service = New-Object -ComObject 'Schedule.Service'
 $service.Connect()
@@ -2182,17 +2197,14 @@ $expected.Settings.AllowDemandStart = $true
 $expected.Settings.DisallowStartIfOnBatteries = $false
 $expected.Settings.StopIfGoingOnBatteries = $false
 $expected.Settings.ExecutionTimeLimit = 'PT45S'
-$trigger = $expected.Triggers.Create(9) # TASK_TRIGGER_LOGON
-$trigger.UserId = $sid
-$trigger.Repetition.Interval = 'PT1M'
 $expected.Actions.Context = $expected.Principal.Id
 $action = $expected.Actions.Create(0) # TASK_ACTION_EXEC
-$action.Path = $env:AI_COMMERCE_TASK_POWERSHELL
+$action.Path = $env:AI_COMMERCE_TASK_GUI
 $action.Arguments = $env:AI_COMMERCE_TASK_ARGUMENTS
-$action.WorkingDirectory = $env:AI_COMMERCE_TASK_DIRECTORY
+$action.WorkingDirectory = [IO.Path]::GetDirectoryName($action.Path)
 
-function Read-Registration {
-    try { $folder.GetTask($name) }
+function Read-Registration($taskName = $name) {
+    try { $folder.GetTask($taskName) }
     catch {
         if ($_.Exception.GetBaseException().HResult -ne -2147024894) { throw }
     }
@@ -2207,27 +2219,18 @@ function Test-Owner($value) {
     } catch { return $false }
 }
 
-function Test-Registration($registered) {
+function Test-RegistrationBase($registered) {
     if (!$registered -or !$registered.Enabled) { return $false }
-    $acl = [Security.AccessControl.RawSecurityDescriptor]::new($registered.GetSecurityDescriptor(4))
+    $acl = [Security.AccessControl.RawSecurityDescriptor]::new($registered.GetSecurityDescriptor(7))
     $want = [Security.AccessControl.RawSecurityDescriptor]::new($sddl)
-    if ($acl.GetSddlForm('Access') -cne $want.GetSddlForm('Access')) { return $false }
+    if (!$acl.Owner -or $acl.Owner.Value -cne $sid -or
+        $acl.GetSddlForm('Access') -cne $want.GetSddlForm('Access')) { return $false }
     $definition = $registered.Definition
     $principal = $definition.Principal
     if ($principal.Id -cne $expected.Principal.Id -or !(Test-Owner $principal.UserId) -or
         $principal.LogonType -ne 3 -or
-        $principal.RunLevel -ne 0 -or $principal.GroupId -or
-        $definition.Triggers.Count -ne 1 -or $definition.Actions.Count -ne 1) { return $false }
-    $t = $definition.Triggers.Item(1)
-    $a = $definition.Actions.Item(1)
-    if ($t.Type -ne 9 -or !$t.Enabled -or !(Test-Owner $t.UserId) -or $t.Delay -cne $trigger.Delay -or
-        $t.StartBoundary -cne $trigger.StartBoundary -or $t.EndBoundary -cne $trigger.EndBoundary -or
-        $t.Repetition.Interval -cne $trigger.Repetition.Interval -or
-        $t.Repetition.Duration -cne $trigger.Repetition.Duration -or
-        $t.Repetition.StopAtDurationEnd -ne $trigger.Repetition.StopAtDurationEnd -or
-        $t.ExecutionTimeLimit -cne $trigger.ExecutionTimeLimit -or
-        $a.Type -ne 0 -or $a.Path -cne $action.Path -or
-        $a.Arguments -cne $action.Arguments -or $a.WorkingDirectory -cne $action.WorkingDirectory -or
+        $principal.RunLevel -ne 0 -or $principal.GroupId -or $definition.Actions.Count -ne 1 -or
+        $definition.Actions.Item(1).Type -ne 0 -or
         $definition.Actions.Context -cne $expected.Actions.Context) {
         return $false
     }
@@ -2240,23 +2243,83 @@ function Test-Registration($registered) {
     return $true
 }
 
+function Test-SignedExecutable($path, $publisher) {
+    try {
+        for ($part = $path; $part; $part = [IO.Path]::GetDirectoryName($part)) {
+            $entry = Get-Item -LiteralPath $part -Force
+            if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { return $false }
+        }
+        $signature = Get-AuthenticodeSignature -LiteralPath $path
+        return $signature.Status -eq 'Valid' -and $signature.SignerCertificate.Subject -match $publisher
+    } catch { return $false }
+}
+
+function Test-DemandRuntime {
+    Test-SignedExecutable $action.Path '(^|, )CN=Python Software Foundation(,|$)'
+}
+
+function Test-Registration($registered) {
+    if (!(Test-RegistrationBase $registered) -or $registered.Definition.Triggers.Count -ne 0) {
+        return $false
+    }
+    $a = $registered.Definition.Actions.Item(1)
+    return $a.Path -ceq $action.Path -and $a.Arguments -ceq $action.Arguments -and
+        $a.WorkingDirectory -ceq $action.WorkingDirectory
+}
+
+function Test-Ready($registered) {
+    # TASK_STATE_READY, with no queued/running instance.
+    return $registered.State -eq 3 -and $registered.GetInstances(0).Count -eq 0
+}
+
+function Get-MigrationState($key) {
+    if (!$key) { return 'FRESH' }
+    $names = $key.GetValueNames()
+    if ('DemandMigrationRollback' -in $names) {
+        if ('DemandMigrationComplete' -in $names -and
+            $key.GetValue('DemandMigrationComplete') -eq 1 -and
+            $key.GetValue('DemandMigrationRollback')) { return 'COMPLETE' }
+        return 'UNRESOLVED'
+    }
+    if ('DemandMigrationComplete' -in $names) { return 'UNRESOLVED' }
+    return 'FRESH'
+}
+
+function Open-MigrationState($write) {
+    [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($env:AI_COMMERCE_TASK_REGISTRY, $write)
+}
+
 $registered = Read-Registration
 """
 
 
 _CLEAN_9444_TASK_READ_SCRIPT = _CLEAN_9444_TASK_INSPECTION + r"""
+$key = Open-MigrationState $false
+try {
+    if ((Get-MigrationState $key) -eq 'UNRESOLVED') { 'UNKNOWN_EFFECT'; exit }
+} finally {
+    if ($key) { $key.Dispose() }
+}
 if (!$registered) { 'AUTOSTART_NOT_ENROLLED' }
-elseif (Test-Registration $registered) { 'ALREADY_ENROLLED' }
-else { 'AUTOSTART_CONFLICT' }
+elseif (!(Test-Registration $registered)) { 'AUTOSTART_CONFLICT' }
+elseif (!(Test-DemandRuntime)) { 'AUTOSTART_RUNTIME_UNAVAILABLE' }
+else { 'ALREADY_ENROLLED' }
 """
 
 
 _CLEAN_9444_TASK_SCRIPT = _CLEAN_9444_TASK_INSPECTION + r"""
+if (!(Test-DemandRuntime)) { 'AUTOSTART_RUNTIME_UNAVAILABLE'; exit }
 if ($env:AI_COMMERCE_TASK_START_SESSION) {
     $session = [int]$env:AI_COMMERCE_TASK_START_SESSION
     if ($session -le 0 -or $session -ne [Diagnostics.Process]::GetCurrentProcess().SessionId -or
         !(Test-Registration $registered)) { 'AUTOSTART_CONFLICT'; exit }
-    if ($registered.State -ne 3) { 'START_NOT_ATTEMPTED'; exit } # TASK_STATE_READY
+    if (!(Test-Ready $registered)) { 'START_NOT_ATTEMPTED'; exit }
+    $key = Open-MigrationState $false
+    try {
+        if ((Get-MigrationState $key) -eq 'UNRESOLVED') { 'START_NOT_ATTEMPTED'; exit }
+    } finally {
+        if ($key) { $key.Dispose() }
+    }
     # TASK_RUN_USE_SESSION_ID | TASK_RUN_USER_SID, no substituted arguments.
     $instance = $registered.RunEx($null, 12, $session, $sid)
     if (!$instance -or !$instance.InstanceGuid) { 'UNKNOWN_EFFECT'; exit }
@@ -2279,30 +2342,144 @@ if (Test-Registration (Read-Registration)) { 'ENROLLED' } else { 'UNKNOWN_EFFECT
 """
 
 
+_CLEAN_9444_TASK_MIGRATION = _CLEAN_9444_TASK_INSPECTION + r"""
+function Test-PowerShell77($path) {
+    if (!(Test-SignedExecutable $path '(^|, )CN=Microsoft Corporation(,|$)')) { return $false }
+    $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($path)
+    return $version.FileMajorPart -eq 7 -and $version.FileMinorPart -eq 7
+}
+
+function Test-LegacyRegistration($registered) {
+    if (!(Test-RegistrationBase $registered) -or $registered.Definition.Triggers.Count -ne 1) {
+        return $false
+    }
+    $t = $registered.Definition.Triggers.Item(1)
+    if ($t.Type -ne 9 -or !$t.Enabled -or !(Test-Owner $t.UserId) -or $t.Delay -or
+        $t.StartBoundary -or $t.EndBoundary -or $t.Repetition.Duration -or
+        $t.Repetition.StopAtDurationEnd -or [string]$t.ExecutionTimeLimit -cnotin @('', 'PT72H')) {
+        return $false
+    }
+    # Classify the installed legacy definition without constructing a trigger.
+    try {
+        if ([Xml.XmlConvert]::ToTimeSpan($t.Repetition.Interval) -ne [TimeSpan]::FromMinutes(1)) {
+            return $false
+        }
+    } catch { return $false }
+    $a = $registered.Definition.Actions.Item(1)
+    $legacy = $env:AI_COMMERCE_TASK_POWERSHELL
+    $legacyDir = [IO.Path]::GetDirectoryName($legacy)
+    if ($a.Arguments -cne $env:AI_COMMERCE_TASK_LEGACY_ARGUMENTS) { return $false }
+    if ($a.Path -ieq $legacy) { return $a.WorkingDirectory -ieq $legacyDir }
+
+    # The known action-only migration may leave the original working directory.
+    $programFiles = [Environment]::GetFolderPath('ProgramFiles')
+    return $programFiles -and
+        $a.Path -iin @((Join-Path $programFiles 'PowerShell\7\pwsh.exe'),
+                        (Join-Path $programFiles 'PowerShell\7-preview\pwsh.exe')) -and
+        $a.WorkingDirectory -iin @($legacyDir, [IO.Path]::GetDirectoryName($a.Path)) -and
+        (Test-PowerShell77 $a.Path)
+}
+
+function Test-D5Quiescent {
+    $d5 = Read-Registration 'AI-Commerce-D5-CDP-AtLogon'
+    # No reviewed action pin exists for this separate launcher. Only an
+    # absent or independently disabled and inactive D5 is unambiguous.
+    return !$d5 -or (!$d5.Enabled -and $d5.State -eq 1 -and $d5.GetInstances(0).Count -eq 0)
+}
+
+$key = $null
+$rollback = 'DemandMigrationRollback'
+$completed = 'DemandMigrationComplete'
+$effectPossible = $false
+try {
+    $registryPath = $env:AI_COMMERCE_TASK_REGISTRY
+    $key = Open-MigrationState $true
+    $state = Get-MigrationState $key
+    $names = if ($key) { $key.GetValueNames() }
+    if ($state -eq 'UNRESOLVED' -or 'AutostartPending' -in $names -or 'LaunchPending' -in $names) {
+        'UNKNOWN_EFFECT'; exit
+    }
+    if (!(Test-D5Quiescent)) { 'TASK_MIGRATION_AMBIGUOUS'; exit }
+    if (!$registered) { 'AUTOSTART_NOT_ENROLLED'; exit }
+    if (!(Test-Ready $registered)) { 'TASK_MIGRATION_NOT_READY'; exit }
+    if (!(Test-DemandRuntime)) { 'AUTOSTART_RUNTIME_UNAVAILABLE'; exit }
+    if (Test-Registration $registered) { 'DEMAND_ALREADY_READY'; exit }
+    if ($state -eq 'COMPLETE') { 'TASK_MIGRATION_REPLAY'; exit }
+    if (!(Test-LegacyRegistration $registered)) { 'AUTOSTART_CONFLICT'; exit }
+
+    $priorXml = $registered.Xml
+    $priorAcl = $registered.GetSecurityDescriptor(7)
+    if (!$priorXml -or !$priorAcl) { 'AUTOSTART_CONFLICT'; exit }
+
+    $current = Read-Registration
+    if (!(Test-D5Quiescent) -or !$current -or !(Test-Ready $current) -or
+        !(Test-LegacyRegistration $current) -or
+        $current.Xml -cne $priorXml -or $current.GetSecurityDescriptor(7) -cne $priorAcl) {
+        'TASK_MIGRATION_AMBIGUOUS'; exit
+    }
+    $effectPossible = $true
+    if (!$key) { $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($registryPath) }
+    $metadata = @{ Xml = $priorXml; SecurityDescriptor = $priorAcl } | ConvertTo-Json -Compress
+    $key.SetValue($rollback, $metadata, [Microsoft.Win32.RegistryValueKind]::String)
+    $key.Flush()
+    $current = Read-Registration
+    if (!(Test-D5Quiescent) -or !$current -or !(Test-Ready $current) -or
+        $current.Xml -cne $priorXml -or $current.GetSecurityDescriptor(7) -cne $priorAcl) {
+        'UNKNOWN_EFFECT'; exit
+    }
+    # TASK_UPDATE | TASK_DONT_ADD_PRINCIPAL_ACE | TASK_IGNORE_REGISTRATION_TRIGGERS.
+    $null = $folder.RegisterTaskDefinition($name, $expected, 52, $sid, $null, 3, $priorAcl)
+    $after = Read-Registration
+    if (!(Test-Registration $after) -or !(Test-Ready $after) -or !(Test-D5Quiescent) -or
+        $after.GetSecurityDescriptor(7) -cne $priorAcl) { 'UNKNOWN_EFFECT'; exit }
+    $key.SetValue($completed, 1, [Microsoft.Win32.RegistryValueKind]::DWord)
+    $key.Flush()
+    'DEMAND_MIGRATED'
+} catch {
+    if ($effectPossible) { 'UNKNOWN_EFFECT' } else { 'AUTOSTART_RUNTIME_UNAVAILABLE' }
+} finally {
+    if ($key) { $key.Dispose() }
+}
+"""
+
+
 def _clean_task(owner: tuple[Path, int, str], target: _ChromeTarget,
-                candidates: tuple[Path, ...], *, install: bool, start: bool = False) -> str:
-    """Register or inspect the same fixed, interactive PowerShell task."""
+                candidates: tuple[Path, ...], *, install: bool, start: bool = False,
+                migrate: bool = False) -> str:
+    """Operate on the fixed owner task using an exact native definition."""
     _, session, sid = owner
-    if start and install:
+    if sum((install, start, migrate)) > 1:
         raise _Clean9444Hold("AUTOSTART_RUNTIME_UNAVAILABLE")
     powershell = _powershell()
     launcher = _clean_launcher(owner, target, candidates)
+    gui, arguments = _clean_demand_action(powershell, launcher)
     child_env = _child_environment()
     child_env.update(AI_COMMERCE_TASK_SID=sid, AI_COMMERCE_TASK_SESSION=str(session),
                      AI_COMMERCE_TASK_POWERSHELL=str(powershell),
-                     AI_COMMERCE_TASK_DIRECTORY=str(powershell.parent),
-                     AI_COMMERCE_TASK_ARGUMENTS=subprocess.list2cmdline([*_CLEAN_POWERSHELL_FLAGS, launcher]),
+                     AI_COMMERCE_TASK_GUI=str(gui),
+                     AI_COMMERCE_TASK_ARGUMENTS=arguments,
+                     AI_COMMERCE_TASK_LEGACY_ARGUMENTS=subprocess.list2cmdline(
+                         [*_CLEAN_POWERSHELL_FLAGS, launcher]) if migrate else "",
+                     AI_COMMERCE_TASK_REGISTRY=_CLEAN_9444_REGISTRY,
                      AI_COMMERCE_TASK_START_SESSION=str(session) if start else "",
                      AI_COMMERCE_TASK_INSTALL="1" if install else "0")
-    script = _CLEAN_9444_TASK_SCRIPT if install or start else _CLEAN_9444_TASK_READ_SCRIPT
+    if migrate:
+        script = _CLEAN_9444_TASK_MIGRATION
+    else:
+        script = _CLEAN_9444_TASK_SCRIPT if install or start else _CLEAN_9444_TASK_READ_SCRIPT
     try:
         result = subprocess.run([str(powershell), "-NoProfile", "-NonInteractive", "-Command",
                                  script], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                timeout=15, check=False, env=child_env,
+                                timeout=25 if migrate else 15, check=False, env=child_env,
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         code = result.stdout.strip().decode("ascii")
-        expected = {"AUTOSTART_CONFLICT", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}
-        if start:
+        expected = {"AUTOSTART_CONFLICT", "UNKNOWN_EFFECT", "WINDOWS_OWNER_CONTEXT_UNVERIFIED",
+                    "AUTOSTART_RUNTIME_UNAVAILABLE"}
+        if migrate:
+            expected.update(("DEMAND_MIGRATED", "DEMAND_ALREADY_READY", "AUTOSTART_NOT_ENROLLED",
+                             "TASK_MIGRATION_NOT_READY", "TASK_MIGRATION_AMBIGUOUS",
+                             "TASK_MIGRATION_REPLAY"))
+        elif start:
             expected.update(("START_REQUESTED", "START_NOT_ATTEMPTED"))
         else:
             expected.update(("ALREADY_ENROLLED", "AUTOSTART_NOT_ENROLLED"))
@@ -2312,7 +2489,7 @@ def _clean_task(owner: tuple[Path, int, str], target: _ChromeTarget,
             return code
     except (OSError, subprocess.TimeoutExpired, UnicodeError):
         pass
-    return "UNKNOWN_EFFECT" if install or start else "AUTOSTART_RUNTIME_UNAVAILABLE"
+    return "UNKNOWN_EFFECT" if install or start or migrate else "AUTOSTART_RUNTIME_UNAVAILABLE"
 
 
 def install_clean_9444_autostart(*, opt_in: bool = False) -> dict:
