@@ -800,6 +800,21 @@ def _install_protected_clean_autostart(event):
         return _clean_autostart_receipt("UNKNOWN_EFFECT" if reserved else "AUTOSTART_RUNTIME_UNAVAILABLE")
 
 
+def _run_hostops_powershell_read(script: str, timeout: int, unavailable: str):
+    from ai_commerce.remote import chrome_acquisition as acquisition
+
+    try:
+        return subprocess.run(
+            [str(acquisition._powershell()), "-NoProfile", "-NonInteractive", "-Command",
+             "[Console]::OutputEncoding = [Text.UTF8Encoding]::new();\n" + script],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=timeout, check=False, env=acquisition._child_environment(),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (acquisition.AcquisitionBlocked, OSError, subprocess.TimeoutExpired):
+        raise Denied(unavailable) from None
+
+
 def _runner_runtime_inventory():
     """Read-only Windows Task Scheduler/CIM snapshot; never publish process commands.
 
@@ -849,15 +864,7 @@ $records = @(
   runners = $records
 } | ConvertTo-Json -Compress -Depth 5
 """
-    try:
-        # No user-provided tokens, paths, script, arguments or shell=True.
-        result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=25, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        deny("RUNNER_RUNTIME_READ_UNAVAILABLE")
+    result = _run_hostops_powershell_read(script, 25, "RUNNER_RUNTIME_READ_UNAVAILABLE")
     if result.returncode != 0 or len(result.stdout) > 16384:
         deny("RUNNER_RUNTIME_READ_FAILED")
     try:
@@ -953,14 +960,7 @@ foreach ($item in $items) {
   same_session_chrome_count = [int]$sameSession
 } | ConvertTo-Json -Compress
 """
-    try:
-        native = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=18, check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        deny("CDP_NATIVE_READ_UNAVAILABLE")
+    native = _run_hostops_powershell_read(script, 18, "CDP_NATIVE_READ_UNAVAILABLE")
     if native.returncode != 0 or len(native.stdout) > 4096:
         deny("CDP_NATIVE_READ_FAILED")
     try:
@@ -3244,7 +3244,7 @@ async def _capture_hostops_exec_v1(
 def _default_hostops_exec_v1_runner(
     script_utf8: str, timeout_seconds: int, max_output_bytes: int
 ) -> HostOpsExecV1ProcessResult:
-    """Default local Windows PowerShell runner; hard-blocked in CI/pytest/EF02."""
+    """Default local PowerShell 7 runner; hard-blocked in CI/pytest/EF02."""
     if (os.name != "nt" or _exec_v1_source_ci(os.environ)
             or os.environ.get("RUNNER_NAME") != HOSTOPS_EXEC_V1_RUNNER_NAME):
         deny("SOURCE_CI_EXECUTION_FORBIDDEN")
@@ -3252,19 +3252,15 @@ def _default_hostops_exec_v1_runner(
             and os.environ.get("HOSTOPS_EXEC_V1_PROTECTED_DISPATCH") != "ENABLED"):
         deny("PROTECTED_WORKFLOW_DISPATCH_DISABLED")
     _verify_hostops_exec_v1_runtime(_default_hostops_exec_v1_runtime(), require_protected_workflow=True)
-    import ctypes
-    from ctypes import wintypes as w
-    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-    system_dir = _exec_v1_winfn(kernel, "GetSystemDirectoryW", (w.LPWSTR, w.UINT), w.UINT)
-    buf = ctypes.create_unicode_buffer(32768)
-    if not 0 < system_dir(buf, len(buf)) < len(buf):
-        deny("PROTECTED_HOSTOPS_ONLY")
-    executable = Path(buf.value) / "WindowsPowerShell/v1.0/powershell.exe"
-    if not _exec_v1_no_reparse(executable) or not executable.is_file():
-        deny("PROTECTED_HOSTOPS_ONLY")
-    # PowerShell 5.1 otherwise uses the console code page for redirected stdin.
+    from ai_commerce.remote import chrome_acquisition as acquisition
+
+    try:
+        executable = acquisition._powershell()
+    except acquisition.AcquisitionBlocked:
+        raise Denied("PROTECTED_HOSTOPS_ONLY") from None
     # The child receives the exact UTF-8 bytes and no Actions credentials in its environment.
     command = ("[Console]::InputEncoding = [Text.UTF8Encoding]::new($false, $true); "
+               "[Console]::OutputEncoding = [Text.UTF8Encoding]::new(); "
                "& ([ScriptBlock]::Create([Console]::In.ReadToEnd())); if (-not $?) { exit 1 }")
     argv = (str(executable), "-NoProfile", "-NonInteractive", "-Command", command)
     child_env = {key: os.environ[key] for key in (

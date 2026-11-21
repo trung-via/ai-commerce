@@ -7,6 +7,7 @@ Native effects use only the enrolled interactive desktop and a signed release.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 import argparse
 import ctypes
 from ctypes import wintypes as w
@@ -450,6 +451,86 @@ PUBLIC_CODES = frozenset({
 })
 
 
+_D5_TASK_ACTION_PROBE = ca._POWERSHELL_TASK_READ_PREAMBLE + r"""
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+if ($sid -cne $env:AI_COMMERCE_D5_TASK_SID) { exit 2 }
+function Test-Owner($identity) {
+    if ($identity -ceq $sid) { return $true }
+    if (!$identity) { return $false }
+    return [Security.Principal.NTAccount]::new($identity).Translate(
+        [Security.Principal.SecurityIdentifier]).Value -ceq $sid
+}
+# Import the native CIM module directly so PowerShell 7 cannot start a 5.1 compatibility session.
+$module = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell\v1.0\Modules\ScheduledTasks\ScheduledTasks.psd1'
+Import-Module -Name $module -SkipEditionCheck
+$raw = [string](ScheduledTasks\Export-ScheduledTask -TaskName 'AI-Commerce-D5-Operator' -TaskPath '\')
+$sha = [Security.Cryptography.SHA256]::Create()
+try { $hash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($raw))).Replace('-', '') }
+finally { $sha.Dispose() }
+if ($hash -ine $env:AI_COMMERCE_D5_TASK_PIN) { exit 2 }
+$task = ([xml]$raw).Task
+$principal = $task.Principals.Principal
+$trigger = $task.Triggers.LogonTrigger
+$action = $task.Actions.Exec
+if ($task.Principals.SelectNodes('./*').Count -ne 1 -or !(Test-Owner $principal.UserId) -or
+    $principal.LogonType -cne 'InteractiveToken' -or $principal.RunLevel -cne 'LeastPrivilege' -or
+    $task.Triggers.SelectNodes('./*').Count -ne 1 -or !(Test-Owner $trigger.UserId) -or
+    $task.Actions.SelectNodes('./*').Count -ne 1 -or !$action) { exit 2 }
+$reply = @{task_image=[string]$action.Command; task_arguments=[string]$action.Arguments}
+if ($env:AI_COMMERCE_D5_PEER_PID) {
+    $p = CimCmdlets\Get-CimInstance Win32_Process -Filter ('ProcessId='+[int]$env:AI_COMMERCE_D5_PEER_PID)
+    if ($null -eq $p) { exit 2 }
+    $reply.image = $p.ExecutablePath
+    $reply.argv = $p.CommandLine
+}
+$reply | ConvertTo-Json -Compress
+"""
+
+
+def _d5_task_action(policy: Enrollment, bootstrap: Path, *, pid: int | None = None) -> Path:
+    pin_path = private_path(policy.state_root / "task.sha256")
+    with pin_path.open("rb") as stream:
+        pin = stream.read(65).decode("ascii")
+    launcher = private_path(policy.state_root / "launcher.ps1")
+    if not _HEX.fullmatch(pin) or digest(launcher.read_bytes()) != policy.files[RELEASE_FILES[2]]:
+        raise D5Blocked("UNTRUSTED_PEER_ATTESTATION")
+    child = ca._child_environment()
+    child.update(AI_COMMERCE_D5_TASK_SID=policy.sid, AI_COMMERCE_D5_TASK_PIN=pin)
+    if pid is not None:
+        child["AI_COMMERCE_D5_PEER_PID"] = str(pid)
+    result = subprocess.run(
+        [str(bootstrap), "-NoProfile", "-NonInteractive", "-Command", _D5_TASK_ACTION_PROBE],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=child, timeout=8, check=False,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if result.returncode or len(result.stdout) > 8192:
+        raise D5Blocked("UNTRUSTED_PEER_ATTESTATION")
+    task = decode(result.stdout)
+    keys = {"task_image", "task_arguments"} if pid is None else {"task_image", "task_arguments", "image", "argv"}
+    if task.keys() != keys or any(type(value) is not str for value in task.values()):
+        raise D5Blocked("UNTRUSTED_PEER_ATTESTATION")
+    image = Path(task["task_image"])
+    if not image.is_absolute() or '"' in task["task_image"]:
+        raise D5Blocked("UNTRUSTED_PEER_ATTESTATION")
+    expected = ["-noprofile", "-noninteractive", "-file", str(launcher).casefold(), "-logon"]
+    task_argv = ca._commandline_argv(f'"{image}" {task["task_arguments"]}')
+    if not task_argv or Path(task_argv[0]) != image or [arg.casefold() for arg in task_argv[1:]] != expected:
+        raise D5Blocked("UNTRUSTED_PEER_ATTESTATION")
+    if pid is not None:
+        peer_argv = ca._commandline_argv(task["argv"])
+        if (not peer_argv or Path(task["image"]) != image or Path(peer_argv[0]) != image
+                or [arg.casefold() for arg in peer_argv[1:]] != expected):
+            raise D5Blocked("UNTRUSTED_PEER_ATTESTATION")
+    return image
+
+
+def _d5_owner_action(policy: Enrollment, bootstrap: Path) -> Path:
+    try:
+        (policy.state_root / "task.sha256").lstat()
+    except FileNotFoundError:
+        return ca._clean_task_powershell(bootstrap)
+    return _d5_task_action(policy, bootstrap)
+
+
 class WindowsNative:
     """Installed private adapter. Never instantiated by the current HostOps CLI.
 
@@ -472,7 +553,7 @@ class WindowsNative:
                 or private_path(fixed_root / "control.key").read_bytes() != policy.key):
             raise D5Blocked("PRIVATE_STORAGE_UNPROVEN")
         ca._require_operator_control(policy.environment)
-        ca._verify_google_chrome(policy.environment)
+        ca._verify_google_chrome(policy.environment, owner_action=partial(_d5_owner_action, policy))
         try:
             session = ca._interactive_session()
         except ca.AcquisitionBlocked:
@@ -483,7 +564,7 @@ class WindowsNative:
 
     def observe(self, policy):
         env = policy.environment
-        inventory = ca._query_windows(9333)
+        inventory = ca._query_windows(9333, owner_action=partial(_d5_owner_action, policy))
         try:
             state, pid = ca.evaluate(env, inventory, session_id=ca._interactive_session(),
                                      expected_sid=policy.sid)
@@ -539,10 +620,12 @@ class WindowsNative:
                     "mac": hmac.new(policy.key, body, "sha256").hexdigest()}
         try:
             response = subprocess.run(
-                [str(ca._powershell()), "-NoProfile", "-NonInteractive", "-File",
+                [str(ca._powershell(owner_action=partial(_d5_owner_action, policy))),
+                 "-NoProfile", "-NonInteractive", "-File",
                  str(policy.release_root / RELEASE_FILES[2])], input=canonical(envelope),
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=45,
-                env=ca._child_environment(), check=False)
+                env=ca._child_environment(), check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             value = decode(response.stdout)
             if set(value) not in ({"code"}, {"code", "pid", "created"}) or value["code"] not in {"OK", *PUBLIC_CODES}:
                 raise ValueError()
@@ -1338,26 +1421,9 @@ class Win32:
         try:
             authority = SignedPolicy()
             policy = load_enrollment(authority.path, authority=authority, now=int(time.time()))
-            launcher = private_path(policy.state_root / "launcher.ps1")
-            if digest(launcher.read_bytes()) != policy.files[RELEASE_FILES[2]]:
-                raise ValueError()
-            executable = protected_path(ca._powershell())
-            child = ca._child_environment()
-            child["AI_COMMERCE_D5_PEER_PID"] = str(pid)
-            script = ("$p=Get-CimInstance Win32_Process -Filter ('ProcessId='+[int]$env:AI_COMMERCE_D5_PEER_PID);"
-                      "if($null -eq $p){exit 2};"
-                      "[Console]::OutputEncoding=[Text.UTF8Encoding]::new();"
-                      "@{image=$p.ExecutablePath;argv=$p.CommandLine}|ConvertTo-Json -Compress")
-            result = subprocess.run([str(executable), "-NoProfile", "-NonInteractive", "-Command", script],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=child, timeout=5, check=False)
-            if result.returncode or len(result.stdout) > 8192:
-                raise ValueError()
-            proc = decode(result.stdout)
-            if set(proc) != {"image", "argv"} or Path(proc["image"]).resolve() != executable:
-                raise ValueError()
-            argv = ca._commandline_argv(proc["argv"])
-            expected = ["-noprofile", "-noninteractive", "-file", str(launcher).casefold(), "-logon"]
-            if len(argv) != 6 or Path(argv[0]).resolve() != executable or [a.casefold() for a in argv[1:]] != expected:
+            shells = ca._trusted_powershells()
+            image = _d5_task_action(policy, shells[0], pid=pid)
+            if image not in shells:
                 raise ValueError()
         except Exception:
             raise D5Blocked("UNTRUSTED_PEER_ATTESTATION") from None
