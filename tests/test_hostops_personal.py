@@ -16,7 +16,7 @@ import re
 import stat
 import subprocess
 from types import SimpleNamespace
-from unittest.mock import Mock, call, mock_open, patch
+from unittest.mock import MagicMock, Mock, call, mock_open, patch
 import tempfile
 import unittest
 from urllib.parse import parse_qs, urlsplit
@@ -161,38 +161,90 @@ Options:
         self.assertEqual(len(hostops.STANDING_READ_CATEGORIES), 16)
 
     def test_discovery_addresses_only_bounded_local_native_candidates(self):
+        app_data = r"C:\Users\operator\AppData\Roaming"
         candidates = hostops._a10_install_candidates({
             "PATH": r'.;\\server\share;\\?\C:\private;C:\x\..\private;C:\private:stream;'
                     r'C:\Tools;"c:\TOOLS";C:\Users\operator\AppData\Local\Microsoft\WindowsApps',
-            "APPDATA": r"C:\Users\operator\AppData\Roaming",
-            "LOCALAPPDATA": r"C:\Users\operator\AppData\Local",
+            "APPDATA": app_data,
         })
-        self.assertEqual(len(candidates), 13)
-        self.assertEqual(candidates[0], PureWindowsPath("C:/Tools/codex.exe"))
+        self.assertEqual(len(candidates), 14)
+        self.assertEqual(candidates[:2], (PureWindowsPath("C:/Tools/codex.exe"), PureWindowsPath(
+            "C:/Users/operator/AppData/Local/Microsoft/WindowsApps/codex.exe"
+        )))
         self.assertIn(PureWindowsPath(
             "C:/Users/operator/AppData/Roaming/npm/node_modules/@openai/codex-win32-x64/"
             "vendor/x86_64-pc-windows-msvc/codex/codex.exe"
         ), candidates)
-        with self.assertRaises(ValueError):
-            hostops._a10_install_candidates({"PATH": "C:/Tools;" * 65})
+        for path in ("C:/Tools;" * 64 + "C:/Omitted", "C:/Tools;C:/" + "x" * 16384):
+            with self.subTest(length=len(path)):
+                bounded = hostops._a10_install_candidates({"PATH": path, "APPDATA": app_data})
+                self.assertEqual(bounded, (candidates[0], *candidates[2:]))
 
-    def test_missing_ambiguous_and_unsafe_install_never_hash_or_launch(self):
+    @staticmethod
+    def _binary(path, raw=b"fake executable bytes", *, size=None):
+        executable = MagicMock(spec=Path)
+        executable.__str__.return_value = str(path)
+        executable.name = path.name
+        executable.stat.return_value = SimpleNamespace(
+            st_mode=stat.S_IFREG, st_size=len(raw) if size is None else size,
+        )
+        executable.is_file.return_value = True
+        executable.open.return_value = BytesIO(raw)
+        return executable
+
+    def test_rejected_and_unreadable_candidates_do_not_block_later_native_binary(self):
+        candidates = tuple(map(PureWindowsPath, (
+            "C:/early/codex.exe", "C:/valid/codex.exe", "C:/later/codex.exe",
+        )))
+        for early_is_native in (False, True):
+            early, valid = [self._binary(path) for path in candidates[:2]]
+            early.open.side_effect = PermissionError("private path")
+            with (self.subTest(early_is_native=early_is_native),
+                  patch.object(hostops, "os", SimpleNamespace(environ={})),
+                  patch.object(hostops, "Path", side_effect=[
+                      Mock(resolve=Mock(return_value=executable)) for executable in (early, valid)
+                  ]) as paths,
+                  patch.object(hostops, "_a10_install_candidates", return_value=candidates),
+                  patch.object(hostops, "_a10_is_native_executable", side_effect=[early_is_native, True]),
+                  patch.object(hostops, "_a10_pin_local_path") as pin,
+                  patch.object(hostops, "_a10_isolated_cli") as launch):
+                self.assertEqual(hostops._a10_collect_readiness(), {
+                    "binary": "OBSERVED", "observed_binary_sha256": hashlib.sha256(b"fake executable bytes").hexdigest(),
+                    "catalog": "UNKNOWN",
+                })
+            self.assertEqual(paths.call_args_list, [call(candidate) for candidate in candidates[:2]])
+            self.assertEqual(early.open.call_count, int(early_is_native))
+            valid.open.assert_called_once_with("rb")
+            pin.assert_not_called()
+            launch.assert_not_called()
+
+    def test_absent_inaccessible_oversized_and_growing_candidates_stay_categorical(self):
         from ai_commerce.opportunity.core import models
 
         candidates = tuple(map(PureWindowsPath, ("C:/one/codex.exe", "C:/two/codex.exe")))
-        for outcomes, expected in (
-            ([FileNotFoundError, FileNotFoundError], "NOT_FOUND_IN_SCOPE"),
-            ([nullcontext(candidates[0]), nullcontext(candidates[1])], "AMBIGUOUS"),
-            ([nullcontext(candidates[0]), OSError("private unsafe path")], "UNSAFE"),
+        oversized = self._binary(candidates[0], size=513)
+        growing = self._binary(candidates[1], raw=b"x" * 513, size=512)
+        outside_scope = self._binary(PureWindowsPath("C:/profile/.codex/auth.json"))
+        for outcome, expected, classification in (
+            (FileNotFoundError, "NOT_FOUND_IN_SCOPE", []),
+            (PermissionError, "UNSAFE", []),
+            (outside_scope, "UNSAFE", []),
+            (oversized, "UNSAFE", []),
+            (growing, "UNSAFE", [call(growing)]),
         ):
-            with (self.subTest(expected=expected),
+            resolved = Mock(side_effect=[FileNotFoundError, outcome])
+            with (self.subTest(outcome=outcome),
                   patch.object(hostops, "_a10_install_candidates", return_value=candidates),
-                  patch.object(hostops, "_a10_pin_local_path", side_effect=outcomes),
-                  patch.object(models, "_native_binary_digest") as digest,
+                  patch.object(hostops, "Path", return_value=Mock(resolve=resolved)),
+                  patch.object(hostops, "_a10_is_native_executable", return_value=True) as native,
+                  patch.object(models, "AI_MAX_BYTES", 1),
                   patch.object(hostops, "_a10_isolated_cli") as launch):
                 self.assertEqual(hostops._a10_collect_readiness(), {"binary": expected})
-                digest.assert_not_called()
-                launch.assert_not_called()
+            self.assertEqual(native.call_args_list, classification)
+            launch.assert_not_called()
+        outside_scope.open.assert_not_called()
+        oversized.open.assert_not_called()
+        growing.open.assert_called_once_with("rb")
 
     def test_native_pin_checks_fixed_drive_reparse_and_link_count(self):
         candidate = PureWindowsPath("C:/Tools/codex.exe")
@@ -214,30 +266,35 @@ Options:
             with (self.subTest(drive=drive, expected_opens=expected_opens),
                   patch.object(ctypes, "WinDLL", return_value=kernel, create=True),
                   self.assertRaises(OSError), hostops._a10_pin_local_path(candidate, read=True)):
-                self.fail("unsafe path was opened for observation")
+                self.fail("unsafe path was pinned for execution")
             self.assertEqual(kernel.CreateFileW.call_count, expected_opens)
             self.assertEqual(kernel.CloseHandle.call_count, expected_opens)
             for opened in kernel.CreateFileW.call_args_list:
                 self.assertEqual(opened.args[2], 1)  # FILE_SHARE_READ
 
-    def test_unpinned_binary_bytes_are_hashed_without_process_or_auth_access(self):
+    def test_filesystem_alias_is_hashed_without_strict_drive_or_ancestor_checks(self):
         raw = b"fake executable bytes"
-        executable = Mock()
-        executable.is_file.return_value = True
-        executable.open.return_value = BytesIO(raw)
+        alias = PureWindowsPath("C:/Tools/alias/codex.exe")
+        destination = PureWindowsPath("D:/Codex/codex.exe")
+        executable = self._binary(destination, raw)
         profile = PureWindowsPath("C:/Users/operator")
+        resolve = Mock(return_value=executable)
         with (patch.object(hostops, "os", SimpleNamespace(environ={"USERPROFILE": str(profile)})),
-              patch.object(hostops, "_a10_find_executable", return_value=nullcontext(("UNKNOWN", executable))),
-              patch.object(hostops, "_a10_is_native_executable", return_value=True),
-              patch.object(hostops, "_a10_pin_local_path", return_value=nullcontext()) as metadata,
+              patch.object(hostops, "_a10_install_candidates", return_value=(alias, destination)),
+              patch.object(hostops, "Path", return_value=Mock(resolve=resolve)) as paths,
+              patch.object(hostops, "_a10_is_native_executable", return_value=True) as native,
+              patch.object(hostops, "_a10_pin_local_path", side_effect=OSError) as pin,
               patch.object(hostops, "_a10_isolated_cli") as launch):
             observed = hostops._a10_collect_readiness()
         self.assertEqual(observed, {
             "binary": "OBSERVED", "observed_binary_sha256": hashlib.sha256(raw).hexdigest(),
-            "catalog": "DEFAULT_CACHE_PRESENT",
+            "catalog": "UNKNOWN",
         })
+        paths.assert_called_once_with(alias)
+        resolve.assert_called_once_with(strict=True)
+        native.assert_called_once_with(executable)
         executable.open.assert_called_once_with("rb")
-        metadata.assert_called_once_with(profile / ".codex/models_cache.json")
+        pin.assert_called_once_with(profile / ".codex/models_cache.json")
         launch.assert_not_called()
 
     @staticmethod
@@ -302,17 +359,19 @@ Options:
         temp_home = r"C:\RunnerTemp\empty"
         with (patch.object(hostops, "os", SimpleNamespace(environ={"RUNNER_TEMP": str(temp_root)})),
               patch.object(hostops, "_A10_REVIEWED_BINARY_PINS", frozenset({digest})),
-              patch.object(hostops, "_a10_find_executable", return_value=nullcontext(("UNKNOWN", executable))),
-              patch.object(hostops, "_a10_is_native_executable", return_value=True),
-              patch.object(hostops, "_a10_pin_local_path", return_value=nullcontext(temp_root)) as pin,
+              patch.object(hostops, "_a10_find_executable", return_value=("OBSERVED", executable, digest)),
+              patch.object(hostops, "_a10_pin_local_path", side_effect=[
+                  nullcontext(executable), nullcontext(temp_root), nullcontext(temp_root),
+              ]) as pin,
               patch.object(hostops.tempfile, "TemporaryDirectory", return_value=nullcontext(temp_home)),
-              patch.object(models, "_native_binary_digest", return_value=digest),
+              patch.object(models, "_native_binary_digest", return_value=digest) as rehash,
               patch.object(models, "_bounded_native_codex", side_effect=[
                   self._output(f"codex-cli {models._NATIVE_CODEX_VERSION}".encode()),
                   self._output(self.ROOT_HELP), self._output(self.EXEC_HELP),
               ]) as runner):
             observed = hostops._a10_collect_readiness()
-            pin.assert_called_once_with(temp_root, directory=True)
+            self.assertEqual(pin.call_args_list, [call(executable, read=True), call(temp_root, directory=True)])
+            rehash.assert_called_once_with(executable)
             with hostops._a10_isolated_cli(executable) as probe:
                 for args in (("exec",), ("exec", "--help", "prompt"), ("login", "status"), ("features", "list")):
                     with self.assertRaisesRegex(hostops.Denied, "A10_PROBE_DENIED"):
@@ -323,6 +382,24 @@ Options:
         self.assertEqual(runner.call_args_list, [call([str(executable), *args], **options) for args in (
             ("--version",), ("--help",), ("exec", "--help"),
         )])
+
+    def test_failed_execution_pin_or_changed_bytes_preserve_passive_hash(self):
+        from ai_commerce.opportunity.core import models
+
+        digest = "a" * 64
+        candidate = PureWindowsPath("C:/Tools/codex.exe")
+        for outcome in (OSError, nullcontext(candidate)):
+            with (self.subTest(outcome=outcome),
+                  patch.object(hostops, "os", SimpleNamespace(environ={})),
+                  patch.object(hostops, "_A10_REVIEWED_BINARY_PINS", frozenset({digest})),
+                  patch.object(hostops, "_a10_find_executable", return_value=("OBSERVED", candidate, digest)),
+                  patch.object(hostops, "_a10_pin_local_path", side_effect=[outcome]),
+                  patch.object(models, "_native_binary_digest", return_value="b" * 64),
+                  patch.object(hostops, "_a10_isolated_cli") as launch):
+                self.assertEqual(hostops._a10_collect_readiness(), {
+                    "binary": "OBSERVED", "observed_binary_sha256": digest, "catalog": "UNKNOWN",
+                })
+            launch.assert_not_called()
 
     def test_public_receipt_is_closed_and_digest_binds_observed_binary_issue_and_source(self):
         binary_sha = hashlib.sha256(b"observed executable").hexdigest()
