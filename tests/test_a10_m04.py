@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import sqlite3
 import subprocess
+import time
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -267,53 +269,53 @@ def test_native_codex_grant_cannot_attach_to_another_task(native_codex, fault, r
 
 
 @pytest.mark.parametrize("fault,probe_count", [
-    (None, 3), ("mock", 3), ("quota", 3), ("flag", 0), ("binary", 0),
-    ("catalog-hash", 0), ("catalog-version", 0), ("catalog-effort", 0),
-    ("version", 1), ("version-malformed", 0), ("version-prerelease", 0), ("version-overlong", 0),
-    ("help", 2), ("help-flags", 2), ("host-verification", 0), ("private-config", 0), ("login", 3),
-    ("jsonl", 3), ("duplicate-key", 3),
-    ("duplicate-message", 3), ("tool", 3), ("session-tool", 3), ("no-session", 3),
-    ("session-prompt", 3), ("session-output", 3), ("session-model", 3), ("session-effort", 3),
-    ("session-sandbox", 3), ("task-sha", 3), ("repin", 3),
-    ("reported-model", 3), ("rights", 3), ("nonzero", 3), ("timeout", 3), ("stderr-limit", 3),
+    (None, 2), ("quota", 2), ("model-unavailable", 2), ("effort-unsupported", 2),
+    ("provider-unavailable", 2), ("expired-auth", 2),
+    ("flag", 0), ("binary", 0), ("no-cache", 2), ("catalog-version", 2),
+    ("different-version", 2), ("prerelease", 2), ("unknown-version", 2), ("no-version", 2),
+    ("help", 2), ("help-flags", 1), ("help-unavailable", 1), ("no-host-verification", 2),
+    ("private-config", 0), ("login", 2), ("login-nonzero", 2), ("no-auth-file", 0),
+    ("jsonl", 2), ("duplicate-key", 2), ("duplicate-message", 2), ("tool", 2),
+    ("session-tool", 2), ("no-session", 2), ("session-prompt", 2), ("session-output", 2),
+    ("session-clock-skew", 2),
+    ("session-model", 2), ("session-effort", 2), ("session-sandbox", 2),
+    ("managed-read-only", 2), ("managed-write", 2), ("task-sha", 2),
+    ("repin", 2), ("reported-model", 2), ("rights", 2), ("nonzero", 2), ("timeout", 2),
+    ("stderr-limit", 2), ("self-reported-quota", 2), ("untyped-quota", 2),
 ])
-def test_native_codex_probes_and_session_are_bound_before_output_is_accepted(native_codex, fault, probe_count, monkeypatch):
+def test_native_codex_probes_and_session_are_bound_before_output_is_accepted(native_codex, fault, probe_count):
     from ai_commerce.opportunity import run_ai_research, validate_ai_research_receipt
-    from ai_commerce.opportunity.core import models
 
     task, cap, help_bytes, catalog_path = native_codex
-    installed_version = cap["version"]
+    installed_version = {
+        "different-version": "9.1.3", "prerelease": "9.1.3-rc.1", "unknown-version": "custom build",
+        "no-version": None,
+    }.get(fault, cap["version"])
     if fault == "flag":
         cap["argv"].insert(-1, "--dangerously-bypass-approvals-and-sandbox")
     if fault == "binary":
-        Path(cap["argv"][0]).write_bytes(b"changed before probes")
-    if fault == "catalog-hash":
-        cap["model_catalog_sha256"] = "f" * 64
-    if fault in ("catalog-effort", "catalog-version", "quota"):
-        catalog = json.loads(catalog_path.read_bytes())
-        if fault == "catalog-effort":
-            catalog["models"][0]["supported_reasoning_levels"][0]["effort"] = "low"
-        else:
-            catalog["client_version"] = "1.2.3"
-            if fault == "quota":
-                installed_version = cap["version"] = catalog["client_version"]
-        raw = canonical_bytes(catalog)
-        catalog_path.write_bytes(raw)
-        cap["model_catalog_sha256"] = sha256_bytes(raw)
-    if fault == "version-malformed":
-        cap["version"] = "0.170"
-    if fault == "version-prerelease":
-        cap["version"] += "-rc.1"
-    if fault == "version-overlong":
-        cap["version"] = "1" * 61 + ".2.3"
+        Path(cap["argv"][0]).unlink()
+    if fault == "no-cache":
+        catalog_path.unlink()
+    if fault == "catalog-version":
+        catalog_path.write_bytes(b'{"client_version":"other","models":[]}')
     if fault == "help-flags":
         help_bytes = help_bytes.replace(b" --strict-config", b"")
-        cap["help_sha256"] = sha256_bytes(help_bytes)
-    if fault == "host-verification":
+    if fault == "no-host-verification":
         del cap["host_verification_sha256"]
     if fault == "private-config":
         (catalog_path.parent / "config.toml").write_text("# unexpected configuration", encoding="utf-8")
+    if fault == "no-auth-file":
+        (catalog_path.parent / "auth.json").unlink()
 
+    terminal_codes = {"quota": "usage_limit_exceeded", "model-unavailable": "model_not_found",
+                      "effort-unsupported": "bad_request", "provider-unavailable": "server_overloaded",
+                      "expired-auth": "unauthorized", "untyped-quota": "other"}
+    terminal_code = terminal_codes.get(fault)
+    terminal_message = "synthetic provider error"
+    if fault == "effort-unsupported":
+        terminal_message = (f"Unsupported value: '{cap['effort']}' is not supported with the '{cap['model']}' model. "
+                            "Supported values are: 'low', 'high'.")
     probes, invocations, reserved = [], [], []
     proof = {}
     thread = "1a2b3c4d-0000-0000-0000-0123456789ab"
@@ -328,22 +330,19 @@ def test_native_codex_probes_and_session_are_bound_before_output_is_accepted(nat
         assert codex_home == cap["codex_home"] and cwd != codex_home
         assert max_bytes == 1024 * 1024 and Path(cwd).is_dir()
         args = argv[1:]
-        if args in (["--version"], ["exec", "--help"], ["login", "status"]):
+        if args in (["exec", "--help"], ["login", "status"]):
             assert input == b"" and timeout == 15 and not reserved
             probes.append(args)
-            if args == ["--version"]:
-                value = b"codex-cli 0.0.0" if fault == "version" else ("codex-cli " + installed_version).encode()
-            elif args == ["exec", "--help"]:
+            if args == ["exec", "--help"]:
                 value = help_bytes + b"\nchanged help" if fault == "help" else help_bytes
-            else:
-                auth = b"Logged in using API key" if fault == "login" else b"Logged in using ChatGPT"
-                return subprocess.CompletedProcess(argv, 0, b"", auth)
-            return subprocess.CompletedProcess(argv, 0, value, b"")
+                return subprocess.CompletedProcess(argv, int(fault == "help-unavailable"), value, b"")
+            auth = b"Logged in using API key" if fault == "login" else b"Logged in using ChatGPT"
+            return subprocess.CompletedProcess(argv, int(fault == "login-nonzero"), b"", auth)
 
         assert timeout == 60 and len(reserved) == 1
         packet = json.loads(input)
         assert packet["task"] == task and packet["task_sha256"] == digest(task)
-        assert ("Invocation ID " in packet["instruction"]) == (fault != "mock")
+        assert "Invocation ID " in packet["instruction"]
         expected = [str(Path(cwd) / "output-schema.json") if arg == "{schema}" else arg for arg in cap["argv"]]
         assert argv == expected
         schema = json.loads(Path(expected[-3]).read_bytes())
@@ -360,12 +359,12 @@ def test_native_codex_probes_and_session_are_bound_before_output_is_accepted(nat
             value["reported_model"] = "self-reported-fallback"
         elif fault == "rights":
             value["rights_status"] = "VERIFIED"
-        elif fault == "quota":
+        elif fault == "self-reported-quota":
             value.update(status="QUOTA", claims=[])
         output = canonical_bytes(value).decode()
         records = [
             {"type": "session_meta", "payload": {"id": thread, "session_id": thread, "source": "exec", "cwd": cwd,
-                "cli_version": installed_version, "model_provider": "openai"}},
+                "model_provider": "openai"}},
             {"type": "turn_context", "payload": {"model": "fallback" if fault == "session-model" else cap["model"],
                 "effort": "low" if fault == "session-effort" else cap["effort"], "cwd": cwd, "approval_policy": "never",
                 "sandbox_policy": {"type": "danger-full-access" if fault == "session-sandbox" else "read-only"}}},
@@ -374,6 +373,21 @@ def test_native_codex_probes_and_session_are_bound_before_output_is_accepted(nat
             {"type": "response_item", "payload": {"type": "message", "role": "assistant",
                 "content": [{"type": "output_text", "text": "{}" if fault == "session-output" else output}]}},
         ]
+        if installed_version is not None:
+            records[0]["payload"]["cli_version"] = installed_version
+        if fault in ("managed-read-only", "managed-write"):
+            context = records[1]["payload"]
+            if fault == "managed-read-only":
+                del context["sandbox_policy"]
+            context["permission_profile"] = {"type": "managed", "network": "restricted",
+                "file_system": {"type": "restricted", "entries": [
+                    {"access": "read" if fault == "managed-read-only" else "write",
+                     "path": {"type": "special", "value": {"kind": "root"}}},
+                ]}}
+        if terminal_code is not None:
+            records[-1] = {"type": "event_msg", "payload": {
+                "type": "task_complete", "error": {"message": terminal_message,
+                                                   "codex_error_info": terminal_code}}}
         if fault == "session-tool":
             records.append({"type": "response_item", "payload": {"type": "function_call"}})
         if fault != "no-session":
@@ -388,6 +402,10 @@ def test_native_codex_probes_and_session_are_bound_before_output_is_accepted(nat
                 records[2]["payload"]["content"][0]["text"] = canonical_bytes(replay).decode()
                 rollout = b"\n".join(canonical_bytes(record) for record in records) + b"\n"
             path.write_bytes(rollout)
+            if fault in ("session-clock-skew", "effort-unsupported"):
+                earlier_ns = before_invocation_ns - 10_000_000
+                os.utime(path, ns=(earlier_ns, earlier_ns))
+                assert path.stat().st_mtime_ns < before_invocation_ns
             proof.update(rollout_sha256=sha256_bytes(rollout), output_sha256=sha256_bytes(output.encode()))
 
         item = {"id": "item_0", "type": "agent_message", "text": output}
@@ -399,64 +417,71 @@ def test_native_codex_probes_and_session_are_bound_before_output_is_accepted(nat
             events.append({"type": "item.completed", "item": {"id": "tool", "type": "command_execution", "text": "fixture"}})
         events.append({"type": "turn.completed", "usage": {"input_tokens": 5, "cached_input_tokens": 0,
             "cache_write_input_tokens": 0, "output_tokens": 5, "reasoning_output_tokens": 0}})
+        if terminal_code is not None:
+            events[2:] = [{"type": "turn.failed", "error": {"message": terminal_message}}]
         stdout = b"\n".join(canonical_bytes(event) for event in events) + b"\n"
         if fault == "jsonl":
             stdout = canonical_bytes(value)
         elif fault == "duplicate-key":
             stdout = stdout.replace(b'"type":"turn.started"', b'"type":"turn.started","type":"turn.started"')
         invocations[-1] = stdout
-        return subprocess.CompletedProcess(argv, int(fault == "nonzero"), stdout,
+        return subprocess.CompletedProcess(argv, int(fault == "nonzero" or terminal_code is not None), stdout,
                                            b"x" * (max_bytes + 1) if fault == "stderr-limit" else b"")
 
-    monkeypatch.setattr(models, "_bounded_native_codex", fake)
+    before_invocation_ns = time.time_ns()
     receipt = run_ai_research(task, permissions=["AI_RESEARCH"], capability=cap,
-                              runner=fake if fault == "mock" else None, before_invoke=reserve)
+                              runner=fake, before_invoke=reserve)
     assert len(probes) == probe_count
     assert validate_ai_research_receipt(receipt, task) == receipt
-    if fault in (None, "mock", "quota"):
+    success = {None, "no-cache", "catalog-version", "different-version", "prerelease",
+               "unknown-version", "no-version", "help", "no-host-verification", "managed-read-only",
+               "session-clock-skew"}
+    preflight_failures = {
+        "flag": ("UNSUPPORTED", "AI_ARGV_INVALID"),
+        "binary": ("UNSUPPORTED", "NATIVE_CODEX_BINARY_UNAVAILABLE"),
+        "help-flags": ("UNSUPPORTED", "HOLD_DEPENDENCY_NATIVE_CODEX_EXEC_FLAGS"),
+        "help-unavailable": ("UNSUPPORTED", "NATIVE_CODEX_HELP_UNAVAILABLE"),
+        "private-config": ("UNSUPPORTED", "HOLD_DEPENDENCY_NATIVE_CODEX_DEDICATED_HOME"),
+        "login": ("NEEDS_HUMAN", "NATIVE_CODEX_LOGIN_UNVERIFIED"),
+        "login-nonzero": ("NEEDS_HUMAN", "NATIVE_CODEX_LOGIN_UNVERIFIED"),
+        "no-auth-file": ("NEEDS_HUMAN", "NATIVE_CODEX_LOGIN_UNVERIFIED"),
+    }
+    provider_rejections = {
+        "quota": ("QUOTA", "NATIVE_CODEX_QUOTA"),
+        "model-unavailable": ("UNSUPPORTED", "NATIVE_CODEX_MODEL_UNSUPPORTED"),
+        "effort-unsupported": ("UNSUPPORTED", "NATIVE_CODEX_EFFORT_UNSUPPORTED"),
+        "provider-unavailable": ("UNSUPPORTED", "NATIVE_CODEX_PROVIDER_UNAVAILABLE"),
+        "expired-auth": ("NEEDS_HUMAN", "NATIVE_CODEX_LOGIN_UNVERIFIED"),
+    }
+    if fault in success:
         assert len(invocations) == len(reserved) == 1
-        assert receipt["status"] == ("QUOTA" if fault == "quota" else "OK")
+        assert (receipt["status"], receipt["reason"]) == ("OK", "CONNECTOR_MOCK_VERIFIED")
         assert receipt["reported_model"] == cap["model"] and receipt["reported_effort"] == cap["effort"]
         execution = receipt["execution"].copy()
+        assert execution["kind"] == "MOCK_AUTHENTICATED_RUNNER"
         assert execution["capability_sha256"] == digest(cap)
         assert receipt["raw_output_sha256"] == sha256_bytes(invocations[0])
-        if fault == "mock":
-            assert receipt["reason"] == "NATIVE_CODEX_MOCK_VERIFIED"
-            assert execution["kind"] == "MOCK_AUTHENTICATED_RUNNER"
-        else:
-            assert receipt["reason"] == "NATIVE_CODEX_VERIFIED"
-            assert execution["kind"] == "AUTHENTICATED_CLI_PROBE"
-            assert execution.pop("session_sha256") == digest({**proof, "thread_id": thread,
-                "probe_sha256": execution["probe_sha256"], "stdout_sha256": receipt["raw_output_sha256"]})
+        proof_sha = digest({**proof, "thread_id": thread, "stdout_sha256": receipt["raw_output_sha256"]})
+        assert execution.pop("session_sha256") == digest({"task_sha256": digest(task),
+            "probe_sha256": execution["probe_sha256"], "transport_sha256": proof_sha})
         assert reserved == [execution]
     else:
         assert receipt["execution"] is None and receipt["decision"] is None
         assert all(claim["origin"] == "LOCAL_SNAPSHOT" for claim in receipt["claims"])
-        preflight_failures = {
-            "flag": "AI_ARGV_INVALID",
-            "binary": "NATIVE_CODEX_BINARY_MISMATCH",
-            "catalog-hash": "NATIVE_CODEX_CATALOG_MISMATCH",
-            "catalog-version": "HOLD_DEPENDENCY_NATIVE_CODEX_REVIEWED_VERSION",
-            "catalog-effort": "NATIVE_CODEX_SELECTOR_UNSUPPORTED",
-            "version": "HOLD_DEPENDENCY_NATIVE_CODEX_REVIEWED_VERSION",
-            "version-malformed": "NATIVE_CODEX_VERSION_INVALID",
-            "version-prerelease": "NATIVE_CODEX_VERSION_INVALID",
-            "version-overlong": "NATIVE_CODEX_VERSION_INVALID",
-            "help": "NATIVE_CODEX_HELP_MISMATCH",
-            "help-flags": "HOLD_DEPENDENCY_NATIVE_CODEX_EXEC_FLAGS",
-            "host-verification": "HOLD_DEPENDENCY_NATIVE_CODEX_HOST_VERIFICATION",
-            "private-config": "HOLD_DEPENDENCY_NATIVE_CODEX_DEDICATED_HOME",
-            "login": "NATIVE_CODEX_LOGIN_UNVERIFIED",
-        }
+        outcome = (receipt["status"], receipt["reason"])
         if fault in preflight_failures:
             assert not reserved and not invocations
-            assert (receipt["status"], receipt["reason"], receipt["effect"]) == (
-                "UNSUPPORTED", preflight_failures[fault], "NOT_ATTEMPTED")
+            assert outcome == preflight_failures[fault] and receipt["effect"] == "NOT_ATTEMPTED"
+        elif fault in provider_rejections:
+            assert len(reserved) == len(invocations) == 1
+            assert outcome == provider_rejections[fault] and receipt["effect"] == "PROCESS_INVOKED"
         else:
             assert len(reserved) == 1 and len(invocations) == (0 if fault == "repin" else 1)
             assert (receipt["status"], receipt["effect"]) == ("UNKNOWN_EFFECT", "UNKNOWN")
-            if fault == "repin":
-                assert receipt["reason"] == "NATIVE_CODEX_BINARY_MISMATCH"
+            reasons = {"repin": "NATIVE_CODEX_BINARY_MISMATCH", "session-model": "NATIVE_CODEX_SESSION_MODEL_MISMATCH",
+                       "session-effort": "NATIVE_CODEX_SESSION_EFFORT_MISMATCH"}
+            if fault in reasons:
+                assert receipt["reason"] == reasons[fault]
 
 
 def test_native_codex_requires_reservation_even_with_a_trusted_capability(native_codex, monkeypatch):
@@ -473,7 +498,7 @@ def test_native_codex_requires_reservation_even_with_a_trusted_capability(native
         "NEEDS_HUMAN", "PERMISSION_DENIED", "NOT_ATTEMPTED")
     receipt = run_ai_research(task, permissions=["AI_RESEARCH"], capability=cap)
     assert (receipt["status"], receipt["reason"], receipt["effect"]) == (
-        "UNSUPPORTED", "NATIVE_CODEX_RESERVATION_REQUIRED", "NOT_ATTEMPTED")
+        "UNSUPPORTED", "AI_CONNECTOR_RESERVATION_REQUIRED", "NOT_ATTEMPTED")
 
 
 @pytest.mark.parametrize("fault", [None, "stdout", "stderr", "timeout"])
@@ -540,35 +565,78 @@ def test_model_identity_text_cannot_authenticate_an_attended_or_parsed_receipt()
     assert rejected["status"] == "UNKNOWN_EFFECT" and rejected["execution"] is None
 
 
-def test_native_codex_post_reservation_catalog_drift_fails_closed(native_codex, monkeypatch):
-    from ai_commerce.opportunity import run_ai_research, validate_ai_research_receipt
+def test_historical_native_receipt_still_validates_without_connector_provenance():
+    from ai_commerce.opportunity import validate_ai_research_receipt
+    from ai_commerce.opportunity.core.models import OpportunityError, ai_research_receipt
+
+    task = research_task()
+    execution = {"kind": "AUTHENTICATED_CLI_PROBE", "capability_sha256": "a" * 64,
+                 "probe_sha256": "b" * 64, "session_sha256": "c" * 64}
+    historical = ai_research_receipt(task, status="OK", reason="NATIVE_CODEX_VERIFIED",
+                                     effect="PROCESS_INVOKED", raw=research_output(task), execution=execution,
+                                     reported_model=task["provider"]["model"], reported_effort=task["provider"]["effort"])
+    assert validate_ai_research_receipt(historical, task) == historical
+    with pytest.raises(OpportunityError, match="AI_EXECUTION_INVALID"):
+        ai_research_receipt(task, status="OK", reason="CONNECTOR_VERIFIED", execution=execution,
+                            effect="PROCESS_INVOKED", raw=research_output(task),
+                            reported_model=task["provider"]["model"], reported_effort=task["provider"]["effort"])
+
+
+def test_antigravity_selection_does_not_imply_native_transport():
+    from ai_commerce.opportunity import run_ai_research
+
+    task = research_task("antigravity-cli", model="gemini-synthetic", effort="custom-depth")
+    capability = {"transport": "AntigravityUnregistered", "selector": {
+        "provider": "antigravity-cli", "model": "gemini-synthetic", "effort": "custom-depth"}}
+    receipt = run_ai_research(task, permissions=["AI_RESEARCH"], capability=capability)
+    assert (receipt["status"], receipt["reason"], receipt["effect"], receipt["execution"]) == (
+        "UNSUPPORTED", "NATIVE_PROVIDER_UNSUPPORTED", "NOT_ATTEMPTED", None)
+
+
+@pytest.mark.parametrize("fault,reason", [
+    ("missing-ack", "AI_TRANSPORT_ACK_REQUIRED"),
+    ("cross-selector", "AI_ATTESTED_SELECTOR_MISMATCH"),
+    ("cross-task", "OUTPUT_REJECTED"),
+    ("malformed", "OUTPUT_REJECTED"),
+])
+def test_connector_rejects_unverified_responses_without_retry(monkeypatch, fault, reason):
+    from contextlib import contextmanager
+
+    from ai_commerce.opportunity import AIConnectorCall, AIConnectorResponse, run_ai_research
     from ai_commerce.opportunity.core import models
 
-    task, cap, help_bytes, catalog_path = native_codex
-    invocations, reserved = [], []
+    task = research_task("fake-gemini", model="synthetic", effort="deep")
+    capability = {"transport": "Synthetic.v1", "selector": {
+        "provider": "fake-gemini", "model": "synthetic", "effort": "deep"}}
+    calls = []
 
-    def reserve(execution):
-        reserved.append(execution)
-        catalog_path.write_bytes(b'{"client_version":"0.170.0","models":[]}')
+    class FakeConnector:
+        simulated = True
 
-    def fake(argv, *, input, cwd, codex_home, shell, timeout, max_bytes):
-        args = argv[1:]
-        if args == ["--version"]:
-            return subprocess.CompletedProcess(argv, 0, ("codex-cli " + cap["version"]).encode(), b"")
-        if args == ["exec", "--help"]:
-            return subprocess.CompletedProcess(argv, 0, help_bytes, b"")
-        if args == ["login", "status"]:
-            return subprocess.CompletedProcess(argv, 0, b"", b"Logged in using ChatGPT")
-        invocations.append(argv)
-        raise AssertionError("codex exec must not run after catalog drift")
+        @contextmanager
+        def probe(self, task, capability):
+            def invoke():
+                calls.append("invoke")
+                if fault == "malformed":
+                    return b"{"
+                if fault == "cross-task":
+                    return research_output(task, task_id="aitask-" + "f" * 64)
+                return research_output(task)
 
-    monkeypatch.setattr(models, "_bounded_native_codex", fake)
-    receipt = run_ai_research(task, permissions=["AI_RESEARCH"], capability=cap, before_invoke=reserve)
-    assert validate_ai_research_receipt(receipt, task) == receipt
-    assert len(reserved) == 1 and not invocations
-    assert (receipt["status"], receipt["reason"], receipt["effect"]) == (
-        "UNKNOWN_EFFECT", "NATIVE_CODEX_CATALOG_MISMATCH", "UNKNOWN"
-    )
+            def normalize(raw):
+                selector = task["provider"]
+                if fault == "cross-selector":
+                    selector = {**selector, "model": "fallback"}
+                return AIConnectorResponse(raw, "" if fault == "missing-ack" else sha256_bytes(raw), selector)
+
+            yield AIConnectorCall(digest({"simulated": True}), invoke, normalize)
+
+    monkeypatch.setitem(models._AI_CONNECTOR_ADAPTERS, ("fake-gemini", "Synthetic.v1"), lambda _: FakeConnector())
+    receipt = run_ai_research(task, permissions=["AI_RESEARCH"], capability=capability,
+                              before_invoke=lambda _: calls.append("reserve"))
+    assert calls == ["reserve", "invoke"]
+    assert (receipt["status"], receipt["reason"], receipt["effect"], receipt["execution"]) == (
+        "UNKNOWN_EFFECT", reason, "UNKNOWN", None)
 
 
 def test_native_codex_policy_contract_has_no_static_version_pin():

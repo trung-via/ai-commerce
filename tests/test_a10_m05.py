@@ -542,33 +542,72 @@ def test_automation_selection_binds_operator_proposal_and_sidecar(automation_job
     assert before == {p.name: p.read_bytes() for p in job_dir.glob("*.sqlite")}
 
 
-@pytest.mark.parametrize("profile", ["codex-cli", "antigravity-cli"])
-def test_automation_fake_provider_sidecar_preserves_m04_and_runs_once(automation_job, profile):
-    from types import SimpleNamespace
-    from ai_commerce.opportunity import run_automation
+@pytest.mark.parametrize("profile,model,effort", [
+    ("codex-cli", "synthetic-codex-model", "high"),
+    ("gemini-test", "models/synthetic-gemini-model", "deep"),
+])
+def test_automation_fake_connectors_preserve_m04_and_run_once(automation_job, profile, model, effort, monkeypatch):
+    from contextlib import contextmanager
+
+    from ai_commerce.opportunity import AIConnectorCall, AIConnectorResponse, run_automation
+    from ai_commerce.opportunity.core import models
+
     manifest, kwargs = automation_job
     manifest.update(provider=profile, ai_assessment=True)
-    kwargs = {**kwargs, "mode": "execute", "capability": automation_capability(profile)}
+    transport = "FakeCodex" if profile == "codex-cli" else "FakeGemini"
+    selector = {"provider": profile, "model": model, "effort": effort}
+    kwargs = {**kwargs, "mode": "execute", "capability": {"transport": transport, "selector": selector}}
     calls = []
-    def fake(argv, **kw):
-        task = json.loads(kw["input"])["task"]
+
+    def answer(task):
         calls.append(task)
         assert task["stage"] == "OPPORTUNITY_ASSESSMENT" and task["context"]["proposals"]
         assert (kwargs["state_dir"] / manifest["job_id"] / "invocation.json").exists()
-        return SimpleNamespace(returncode=0, stdout=automation_output(task))
-    completed = run_automation(manifest, **kwargs, runner=fake)
+        assert task["provider"] == {"profile": profile, "model": model, "effort": effort}
+        return automation_output(task)
+
+    class FakeCodex:
+        simulated = True
+
+        @contextmanager
+        def probe(self, task, capability):
+            assert capability["selector"] == selector
+            yield AIConnectorCall(digest({"fake": "stdio"}), lambda: answer(task),
+                lambda raw: AIConnectorResponse(raw, sha256_bytes(raw), task["provider"]))
+
+    class FakeGemini:
+        simulated = True
+
+        @contextmanager
+        def probe(self, task, capability):
+            assert capability["selector"] == selector
+
+            def invoke():
+                return {"candidate": answer(task), "selector": task["provider"], "ack": "SYNTHETIC"}
+
+            def normalize(reply):
+                assert reply["ack"] == "SYNTHETIC"
+                return AIConnectorResponse(reply["candidate"], digest(reply["selector"]), reply["selector"])
+
+            yield AIConnectorCall(digest({"fake": "envelope"}), invoke, normalize)
+
+    monkeypatch.setitem(models._AI_CONNECTOR_ADAPTERS, ("codex-cli", "FakeCodex"), lambda _: FakeCodex())
+    monkeypatch.setitem(models._AI_CONNECTOR_ADAPTERS, ("gemini-test", "FakeGemini"), lambda _: FakeGemini())
+    completed = run_automation(manifest, **kwargs, runner=answer)
     assert completed["status"] == "COMPLETE" and len(calls) == 1
     assert completed["proposals"] == calls[0]["context"]["proposals"]
     assert all(p["manual_input"] is None and p["creative_overrides"] == {} for p in completed["proposals"])
     assert completed["decision"]["actor"] == "BRAIN"
     assert completed["decision"]["assessment_receipt_id"] == completed["assessment"]["receipt_id"]
     assert completed["assessment"]["execution"]["kind"] == "MOCK_AUTHENTICATED_RUNNER"
-    assert completed["assessment"]["reported_model"] == calls[0]["provider"]["model"]
+    assert completed["assessment"]["reason"] == "CONNECTOR_MOCK_VERIFIED"
+    assert completed["assessment"]["reported_model"] == model and completed["assessment"]["reported_effort"] == effort
     assert completed["decision"]["scoring"][0]["score"] == 91
     assert completed["decision"]["selected_proposal_id"] == completed["assessment"]["decision"]["selected_proposal_id"]
     assert completed["next_state"] == "READY_FOR_A03_DISPATCH"
     assert completed["brief"]["opportunity_bridge"]["human_edits"] == {}
-    assert completed == run_automation(manifest, **kwargs, runner=fake)
+    assert intake_brief(completed["brief"]) == completed["brief"]
+    assert completed == run_automation(manifest, **kwargs, runner=answer)
     assert len(calls) == 1
 
 
@@ -905,7 +944,8 @@ def test_cli_native_codex_reserves_once_and_can_dispatch_the_a03_source_handoff(
     from datetime import datetime, timezone
 
     from ai_commerce.opportunity import NATIVE_CODEX_TRANSPORT, codex_research_argv
-    from ai_commerce.opportunity.core import models
+    from ai_commerce.opportunity.bridge import cli as opportunity_cli
+    from ai_commerce.opportunity.core.models import AI_MAX_BYTES
 
     def forbidden(*args, **kwargs):
         raise AssertionError("Test must never start a real process")
@@ -935,6 +975,10 @@ def test_cli_native_codex_reserves_once_and_can_dispatch_the_a03_source_handoff(
         del cap["boundary"]
     elif scenario == "host":
         del cap["host_verification_sha256"]
+    elif scenario in ("success", "timeout"):
+        cap = {"transport": NATIVE_CODEX_TRANSPORT,
+               "selector": {"provider": "codex-cli", "model": model, "effort": effort},
+               "boundary": "WINDOWS_JOB_READ_ONLY_V1", "executable": str(executable), "codex_home": str(home)}
     capability_path = write(base / "capability.json", cap)
     if scenario == "invalid":
         capability_path.write_bytes(b"invalid JSON")
@@ -948,14 +992,14 @@ def test_cli_native_codex_reserves_once_and_can_dispatch_the_a03_source_handoff(
     job = base / "state" / manifest["job_id"]
     calls = []
     thread = "1a2b3c4d-0000-0000-0000-0123456789ab"
+    successful = scenario in ("success", "version", "host")
 
     def synthetic_process(argv, *, input, cwd, codex_home, shell, timeout, max_bytes):
-        assert scenario in ("success", "timeout")
+        assert successful or scenario == "timeout"
         assert argv[0] == str(executable) and codex_home == str(home) and shell is False
-        assert max_bytes == models.AI_MAX_BYTES
+        assert max_bytes == AI_MAX_BYTES
         calls.append(argv[1:])
-        probes = {("--version",): ("codex-cli " + version).encode(),
-                  ("exec", "--help"): help_bytes, ("login", "status"): b"Logged in using ChatGPT"}
+        probes = {("exec", "--help"): help_bytes, ("login", "status"): b"Logged in using ChatGPT"}
         if tuple(argv[1:]) in probes:
             assert not (job / "invocation.json").exists() and timeout == 15
             return subprocess.CompletedProcess(argv, 0, probes[tuple(argv[1:])], b"")
@@ -963,7 +1007,7 @@ def test_cli_native_codex_reserves_once_and_can_dispatch_the_a03_source_handoff(
         task = json.loads(input)["task"]
         intent = read(job / "invocation.json")
         assert intent["task_sha256"] == digest(task)
-        assert intent["execution"]["kind"] == "AUTHENTICATED_CLI_PROBE"
+        assert intent["execution"]["kind"] == "MOCK_AUTHENTICATED_RUNNER"
         assert intent["execution"]["capability_sha256"] == digest(cap)
         if scenario == "timeout":
             raise subprocess.TimeoutExpired(argv, timeout)
@@ -987,15 +1031,20 @@ def test_cli_native_codex_reserves_once_and_can_dispatch_the_a03_source_handoff(
                   {"type": "turn.completed"}]
         return subprocess.CompletedProcess(argv, 0, b"\n".join(canonical_bytes(event) for event in events), b"")
 
-    monkeypatch.setattr(models, "_bounded_native_codex", synthetic_process)
-    code = 0 if scenario == "success" else 3
+    automation = opportunity_cli.run_automation
+
+    def run_with_fake_transport(manifest, **options):
+        return automation(manifest, **options, runner=synthetic_process)
+
+    monkeypatch.setattr(opportunity_cli, "run_automation", run_with_fake_transport)
+    code = 0 if successful else 3
     actual = handoff_cli(capsys, args, code=code)
     event = read(base / "event.json")
-    if scenario == "success":
+    if successful:
         assert actual["status"] == "SUCCESS" and actual["scope"] == "SOURCE_ONLY_LOCAL"
         assert actual["event"]["receipt"]["consumer_executed"] is True
         assert event["ai_task"]["provider"] == {"profile": "codex-cli", "model": model, "effort": effort}
-        assert event["assessment"]["reason"] == "NATIVE_CODEX_VERIFIED"
+        assert event["assessment"]["reason"] == "CONNECTOR_MOCK_VERIFIED"
         assert len(event["assessment"]["execution"]["session_sha256"]) == 64
         assert event["decision"]["actor"] == "BRAIN"
         assert intake_brief(event["brief"]) == event["brief"]
@@ -1006,16 +1055,13 @@ def test_cli_native_codex_reserves_once_and_can_dispatch_the_a03_source_handoff(
             assert event["reason"] == "UNKNOWN_EFFECT"
             assert (job / "invocation.json").is_file() and (job / "assessment.json").is_file()
         else:
-            hold_reasons = {"version": "HOLD_DEPENDENCY_NATIVE_CODEX_REVIEWED_VERSION",
-                            "boundary": "HOLD_DEPENDENCY_NATIVE_CODEX_READ_ONLY_BOUNDARY",
-                            "host": "HOLD_DEPENDENCY_NATIVE_CODEX_HOST_VERIFICATION"}
-            assert event["reason"] == ("HOLD_DEPENDENCY" if scenario in hold_reasons else "PROVIDER_UNAVAILABLE")
-            if scenario in hold_reasons:
-                assert event["assessment"]["reason"] == hold_reasons[scenario]
+            assert event["reason"] == ("HOLD_DEPENDENCY" if scenario == "boundary" else "PROVIDER_UNAVAILABLE")
+            if scenario == "boundary":
+                assert event["assessment"]["reason"] == "HOLD_DEPENDENCY_NATIVE_CODEX_READ_ONLY_BOUNDARY"
             assert event["assessment"]["effect"] == "NOT_ATTEMPTED"
             assert not (job / "invocation.json").exists()
     assert handoff_cli(capsys, args, code=code) == actual
-    assert len(calls) == (4 if scenario in ("success", "timeout") else 0)
+    assert len(calls) == (3 if successful or scenario == "timeout" else 0)
 
 
 def test_automation_operator_selector_cannot_rebind_reserved_task(automation_job):
