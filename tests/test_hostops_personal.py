@@ -336,6 +336,9 @@ Options:
             self._output(b"codex-cli private version"),
             self._output(b"codex-cli 0.1.0", returncode=3),
             self._output(b"codex-cli 0.1.0", stderr=b"private error"),
+            self._output(b"codex-cli 0.1.0", stderr=b"warning: diagnostic\r\nprivate error"),
+            self._output(b"codex-cli 0.1.0", stderr=b"warning: " + b"x" * hostops._A10_PROBE_MAX_BYTES),
+            self._output(b"codex-cli private version", stderr=b"warning: diagnostic"),
             self._output(b"x" * (hostops._A10_PROBE_MAX_BYTES + 1)),
         ):
             with self.subTest(response=type(response)):
@@ -362,6 +365,11 @@ Options:
             (models._NATIVE_CODEX_VERSION, "MATCHES_SOURCE_VERSION", "HOST_UNVERIFIED"),
             ("9999.0.0", "DIFFERS_FROM_SOURCE_VERSION", "HOST_UNSUPPORTED"),
         ):
+            stderr = (
+                b"2026-11-21T00:00:00Z WARN codex_cli: private warning detail\r\n"
+                b"warning: other private warning detail\r\n"
+                if version != models._NATIVE_CODEX_VERSION else b""
+            )
             executable.reset_mock()
             with (self.subTest(version=version),
                   patch.object(hostops, "_a10_find_executable", return_value=("OBSERVED", executable, digest)),
@@ -369,8 +377,8 @@ Options:
                   patch.object(hostops, "_a10_pin_local_path") as pin,
                   patch.object(hostops.tempfile, "TemporaryDirectory", return_value=nullcontext(temp_home)) as temp,
                   patch.object(models, "_bounded_native_codex", side_effect=[
-                      self._output(f"codex-cli {version}".encode()),
-                      self._output(self.ROOT_HELP), self._output(self.EXEC_HELP),
+                      self._output(f"codex-cli {version}".encode(), stderr=stderr),
+                      self._output(self.ROOT_HELP, stderr=stderr), self._output(self.EXEC_HELP, stderr=stderr),
                   ]) as runner):
                 code, result = self._main(event("read", self.OP, {}), self._protected_env())
                 temp.assert_called_once_with(prefix="a10-readiness-")
@@ -393,7 +401,8 @@ Options:
                 self.assertEqual(readiness["feature_disable_flag"], "DECLARED")
                 self.assertFalse(readiness["native_inference_executed"])
                 public = json.dumps(result)
-                for private in (str(executable), temp_home, "user@example.test", "Codex CLI", "9999.0.0"):
+                for private in (str(executable), temp_home, "user@example.test", "Codex CLI", "9999.0.0",
+                                "private warning detail"):
                     self.assertNotIn(json.dumps(private)[1:-1], public)
 
     def test_missing_replaced_or_mutated_binary_stops_probes_and_preserves_passive_hash(self):
