@@ -384,7 +384,8 @@ jobs:
               const nativeRead = row && row.state !== "SOURCE_PRESENT" &&
                 record.status === "HOLD" && record.code === row.state &&
                 sha64(row.public_observation_sha256) &&
-                ((row.state === "HOST_UNSUPPORTED") ===
+                // R5: version divergence is diagnostic, not automatic HOST_UNSUPPORTED.
+                (row.state !== "HOST_UNSUPPORTED" ||
                  (row.binary === "OBSERVED" && row.version === "DIFFERS_FROM_SOURCE_VERSION"));
               let digestValid = false;
               if (identity && nativeRead) {
