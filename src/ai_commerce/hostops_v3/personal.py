@@ -1,13 +1,14 @@
-"""Personal HostOps v3: bounded reads and individually approved fixed writes.
+"""Personal HostOps v3 with a separate, privately enrolled execution broker.
 
-ChatGPT-approved READ sends only public committed source, safe git metadata or
-file hashes to public Issues. A Human GitHub comment authorizes each WRITE.
-No arbitrary shell, secret file access, force update, delete or provider effect.
+Legacy READ reports public committed source, safe git metadata or file hashes.
+A Human GitHub comment authorizes each fixed WRITE. The separate exec route
+requires native owner enrollment and an authenticated protected workflow job.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 from collections import namedtuple
 from contextlib import contextmanager, suppress
 from dataclasses import replace
@@ -20,15 +21,20 @@ from os.path import normpath
 from pathlib import Path, PureWindowsPath
 import platform
 import re
+import secrets
 import shutil
 import sqlite3
+import ssl
 import stat
+import struct
 import subprocess
 import sys
+import tempfile
 from threading import Lock
 import time
 from typing import Callable, Literal, Mapping, TypedDict
-from urllib.request import Request, ProxyHandler, HTTPRedirectHandler, build_opener
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.request import Request, ProxyHandler, HTTPRedirectHandler, HTTPSHandler, build_opener
 
 REPO = "trung-via/ai-commerce"
 OWNER = "trung-via"
@@ -2121,9 +2127,16 @@ HOSTOPS_EXEC_V1_JOURNAL_MAX_RECORDS = 2048
 HOSTOPS_EXEC_V1_ENROLLMENT_FILENAME = "hostops-exec-v1-enrollment.json"
 HOSTOPS_EXEC_V1_JOURNAL_FILENAME = "hostops-exec-v1-journal.sqlite3"
 HOSTOPS_EXEC_V1_PAYLOAD_DIRNAME = "payloads"
+_EXEC_V1_KEY_FILENAME = "owner.key"
+_EXEC_V1_REVOKED_FILENAME = "revoked"
+_EXEC_V1_STATE_DIRNAME = "AI-Commerce-HostOps-Exec-V1"
+_EXEC_V1_RUNNER_ROOT = Path("C:/TOOL/ai-commerce-runner-hostops-01")
+_EXEC_V1_SOURCE_PATH = Path("src/ai_commerce/hostops_v3/personal.py")
+_EXEC_V1_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
+_EXEC_V1_WORKFLOW_ENVIRONMENT = "hostops-exec-v1"
 
 HOSTOPS_EXEC_V1_STATUSES = frozenset({
-    "PLANNED", "DISABLED", "ENROLLED", "EXECUTED", "REJECTED", "UNKNOWN_EFFECT",
+    "PLANNED", "DISABLED", "ENROLLED", "REVOKED", "STAGED", "EXECUTED", "REJECTED", "UNKNOWN_EFFECT",
 })
 HOSTOPS_EXEC_V1_CODES = frozenset({
     "READY_TO_EXECUTE",
@@ -2133,6 +2146,12 @@ HOSTOPS_EXEC_V1_CODES = frozenset({
     "ENROLLMENT_INVALID",
     "ENROLLMENT_RECORDED",
     "ALREADY_ENROLLED_NO_OVERWRITE",
+    "ATTENDED_OWNER_REQUIRED",
+    "PRIVATE_STATE_UNSAFE",
+    "PAYLOAD_STAGED",
+    "PAYLOAD_ALREADY_STAGED",
+    "SOURCE_REVISION_MISMATCH",
+    "RECEIPT_OUTPUT_UNAVAILABLE",
     "PROTECTED_WORKFLOW_DISPATCH_DISABLED",
     "EVENT_OWNER_OR_REPO_DENIED",
     "EVENT_SHAPE_OR_STATE_DENIED",
@@ -2204,12 +2223,15 @@ def _exec_v1_stamp(now: datetime | None = None) -> str:
 def _exec_v1_no_reparse(path: Path) -> bool:
     if not path.is_absolute():
         return False
-    for part in (path, *path.parents):
+    for part in (*reversed(path.parents), path):
         try:
-            exists = part.exists() or part.is_symlink()
+            info = part.lstat()
+        except FileNotFoundError:
+            continue
         except OSError:
             return False
-        if exists and _is_reparse(part):
+        if (stat.S_ISLNK(info.st_mode)
+                or getattr(info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)):
             return False
     return True
 
@@ -2470,6 +2492,13 @@ class HostOpsExecV1Enrollment(_HostOpsExecV1EnrollmentBase):
             deny("ENROLLMENT_DISABLED")
 
 
+def _exec_v1_source_ci(env: Mapping[str, str]) -> bool:
+    return (any(key.upper().startswith("AI_COMMERCE_GIT_GUARD_") for key in env)
+            or "PYTEST_CURRENT_TEST" in env or "pytest" in sys.modules
+            or (env.get("CI", "").lower() == "true" and env.get("GITHUB_ACTIONS") != "true")
+            or env.get("RUNNER_NAME", "").upper().startswith("AI-COMMERCE-EF02"))
+
+
 def _verify_hostops_exec_v1_runtime(
     ctx: HostOpsExecV1RuntimeContext,
     *,
@@ -2481,13 +2510,13 @@ def _verify_hostops_exec_v1_runtime(
         deny("PROTECTED_HOSTOPS_ONLY")
     if ctx.os_name != "nt":
         deny("WINDOWS_ONLY")
-    if (any(key.startswith("AI_COMMERCE_GIT_GUARD_") for key in ctx.env)
+    if (any(key.upper().startswith("AI_COMMERCE_GIT_GUARD_") for key in ctx.env)
             or "PYTEST_CURRENT_TEST" in ctx.env):
         deny("SOURCE_CI_EXECUTION_FORBIDDEN")
     if ctx.runner_name != HOSTOPS_EXEC_V1_RUNNER_NAME:
         deny("WRONG_RUNNER_FORBIDDEN")
     in_actions = ctx.env.get("GITHUB_ACTIONS") == "true"
-    if in_actions and forbid_github_actions:
+    if forbid_github_actions and "GITHUB_ACTIONS" in ctx.env:
         deny("SOURCE_CI_EXECUTION_FORBIDDEN")
     if in_actions:
         expected = {
@@ -2615,6 +2644,8 @@ def enroll_hostops_exec_v1(
         deny("ALREADY_ENROLLED_NO_OVERWRITE")
     except OSError:
         deny("ENROLLMENT_INVALID")
+    if load_hostops_exec_v1_enrollment(enrollment_file) != enrollment:
+        deny("ENROLLMENT_INVALID")
     receipt = validate_hostops_exec_v1_receipt({
         "schema": HOSTOPS_EXEC_V1_RECEIPT_SCHEMA,
         "status": "ENROLLED",
@@ -2690,10 +2721,13 @@ def load_hostops_exec_v1_enrollment(path: Path) -> HostOpsExecV1Enrollment | Non
 class HostOpsExecV1Journal:
     """Durable operator-owned SQLite journal; intent before effect, no plaintext secrets."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, existing: bool = False):
         if not isinstance(path, Path) or not _exec_v1_no_reparse(path):
             deny("REPARSE_PATH_DENIED")
         self.path = path
+        self._existing = existing
+        if existing:
+            return
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             if not _exec_v1_no_reparse(self.path):
@@ -2730,7 +2764,8 @@ class HostOpsExecV1Journal:
 
     @contextmanager
     def _session(self):
-        db = sqlite3.connect(self.path, timeout=1, isolation_level="IMMEDIATE")
+        location = self.path.as_uri() + "?mode=rw" if self._existing else self.path
+        db = sqlite3.connect(location, uri=self._existing, timeout=1, isolation_level="IMMEDIATE")
         try:
             db.execute("PRAGMA synchronous=FULL")
             with db:
@@ -2745,7 +2780,7 @@ class HostOpsExecV1Journal:
                 pin = db.execute(
                     "SELECT enrollment_id, owner_sid, source_sha FROM enrollment_pin WHERE id=1"
                 ).fetchone()
-                if pin is not None and pin != (enrollment.enrollment_id, enrollment.owner_sid, enrollment.source_sha):
+                if (self._existing or pin is not None) and pin != self._pin(enrollment):
                     deny("ENROLLMENT_PIN_MISMATCH")
                 if db.execute("SELECT 1 FROM jobs WHERE state IN ('INTENT','UNKNOWN_EFFECT')").fetchone():
                     deny("UNKNOWN_EFFECT_HOLD")
@@ -2772,11 +2807,13 @@ class HostOpsExecV1Journal:
                     "SELECT enrollment_id, owner_sid, source_sha FROM enrollment_pin WHERE id=1"
                 ).fetchone()
                 if pin is None:
+                    if self._existing:
+                        deny("ENROLLMENT_PIN_MISMATCH")
                     db.execute(
                         "INSERT INTO enrollment_pin VALUES (1,?,?,?)",
-                        (enrollment.enrollment_id, enrollment.owner_sid, enrollment.source_sha),
+                        self._pin(enrollment),
                     )
-                elif pin != (enrollment.enrollment_id, enrollment.owner_sid, enrollment.source_sha):
+                elif pin != self._pin(enrollment):
                     deny("ENROLLMENT_PIN_MISMATCH")
                 if db.execute("SELECT 1 FROM jobs WHERE state IN ('INTENT','UNKNOWN_EFFECT')").fetchone():
                     deny("UNKNOWN_EFFECT_HOLD")
@@ -2799,6 +2836,19 @@ class HostOpsExecV1Journal:
                 )
         except Denied:
             raise
+        except sqlite3.Error:
+            deny("JOURNAL_UNAVAILABLE")
+
+    @staticmethod
+    def _pin(enrollment):
+        return enrollment.enrollment_id, enrollment.owner_sid, enrollment.source_sha
+
+    def pin_new_enrollment(self, enrollment: HostOpsExecV1Enrollment) -> None:
+        try:
+            with self._session() as db:
+                db.execute("INSERT INTO enrollment_pin VALUES (1,?,?,?)", self._pin(enrollment))
+                if db.execute("SELECT enrollment_id, owner_sid, source_sha FROM enrollment_pin").fetchone() != self._pin(enrollment):
+                    deny("ENROLLMENT_PIN_MISMATCH")
         except sqlite3.Error:
             deny("JOURNAL_UNAVAILABLE")
 
@@ -2992,7 +3042,8 @@ def _exec_v1_windows_job():
 
 
 async def _capture_hostops_exec_v1(
-    argv: tuple[str, ...], script: bytes, timeout_seconds: int, max_output_bytes: int
+    argv: tuple[str, ...], script: bytes, timeout_seconds: int, max_output_bytes: int,
+    *, child_env: Mapping[str, str] | None = None,
 ) -> HostOpsExecV1ProcessResult:
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_seconds
@@ -3007,6 +3058,7 @@ async def _capture_hostops_exec_v1(
                     lambda: capture, *argv,
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    env=child_env,
                 )
                 stdin = transport.get_pipe_transport(0)
                 # Attach before giving PowerShell any user script to run.
@@ -3048,31 +3100,236 @@ def _default_hostops_exec_v1_runner(
     script_utf8: str, timeout_seconds: int, max_output_bytes: int
 ) -> HostOpsExecV1ProcessResult:
     """Default local Windows PowerShell runner; hard-blocked in CI/pytest/EF02."""
-    if (os.name != "nt"
-            or any(key.startswith("AI_COMMERCE_GIT_GUARD_") for key in os.environ)
-            or "PYTEST_CURRENT_TEST" in os.environ
+    if (os.name != "nt" or _exec_v1_source_ci(os.environ)
             or os.environ.get("RUNNER_NAME") != HOSTOPS_EXEC_V1_RUNNER_NAME):
         deny("SOURCE_CI_EXECUTION_FORBIDDEN")
     if (os.environ.get("GITHUB_ACTIONS") == "true"
             and os.environ.get("HOSTOPS_EXEC_V1_PROTECTED_DISPATCH") != "ENABLED"):
         deny("PROTECTED_WORKFLOW_DISPATCH_DISABLED")
-    # Pass UTF-8 script over stdin so raw script text never appears in process CommandLine.
-    argv = ("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", "-")
+    _verify_hostops_exec_v1_runtime(_default_hostops_exec_v1_runtime(), require_protected_workflow=True)
+    import ctypes
+    from ctypes import wintypes as w
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    system_dir = _exec_v1_winfn(kernel, "GetSystemDirectoryW", (w.LPWSTR, w.UINT), w.UINT)
+    buf = ctypes.create_unicode_buffer(32768)
+    if not 0 < system_dir(buf, len(buf)) < len(buf):
+        deny("PROTECTED_HOSTOPS_ONLY")
+    executable = Path(buf.value) / "WindowsPowerShell/v1.0/powershell.exe"
+    if not _exec_v1_no_reparse(executable) or not executable.is_file():
+        deny("PROTECTED_HOSTOPS_ONLY")
+    # PowerShell 5.1 otherwise uses the console code page for redirected stdin.
+    # The child receives the exact UTF-8 bytes and no Actions credentials in its environment.
+    command = ("[Console]::InputEncoding = [Text.UTF8Encoding]::new($false, $true); "
+               "& ([ScriptBlock]::Create([Console]::In.ReadToEnd())); if (-not $?) { exit 1 }")
+    argv = (str(executable), "-NoProfile", "-NonInteractive", "-Command", command)
+    child_env = {key: os.environ[key] for key in (
+        "SystemRoot", "WINDIR", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA",
+        "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "PATH", "PATHEXT", "PSModulePath",
+    ) if key in os.environ}
     with asyncio.Runner(loop_factory=asyncio.ProactorEventLoop) as runner:
         return runner.run(_capture_hostops_exec_v1(
-            argv, script_utf8.encode("utf-8"), timeout_seconds, max_output_bytes,
+            argv, script_utf8.encode("utf-8"), timeout_seconds, max_output_bytes, child_env=child_env,
         ))
+
+
+def _exec_v1_winfn(dll, name, arguments, result):
+    function = getattr(dll, name)
+    function.argtypes = arguments
+    function.restype = result
+    return function
+
+
+def _exec_v1_interactive_token() -> tuple[int, bool, str, str]:
+    """Read process/token facts and independently resolve the active WTS user's SID."""
+    import ctypes as c
+    from ctypes import wintypes as w
+    from ai_commerce.hostops_v3.security import windows_identity
+
+    kernel = c.WinDLL("kernel32", use_last_error=True)
+    adv = c.WinDLL("advapi32", use_last_error=True)
+    wts = c.WinDLL("wtsapi32", use_last_error=True)
+    shell = c.WinDLL("shell32", use_last_error=True)
+    user = c.WinDLL("user32", use_last_error=True)
+    ptr = c.c_void_p
+    current_process = _exec_v1_winfn(kernel, "GetCurrentProcess", (), w.HANDLE)
+    current_thread = _exec_v1_winfn(kernel, "GetCurrentThread", (), w.HANDLE)
+    thread_token = _exec_v1_winfn(adv, "OpenThreadToken", (w.HANDLE, w.DWORD, w.BOOL, c.POINTER(w.HANDLE)), w.BOOL)
+    close = _exec_v1_winfn(kernel, "CloseHandle", (w.HANDLE,), w.BOOL)
+    token = w.HANDLE()
+    if thread_token(current_thread(), 8, True, c.byref(token)):
+        close(token)
+        deny("WRONG_SESSION_OR_ELEVATED")
+    if c.get_last_error() != 1008:  # ERROR_NO_TOKEN
+        deny("WRONG_SESSION_OR_ELEVATED")
+    open_token = _exec_v1_winfn(adv, "OpenProcessToken", (w.HANDLE, w.DWORD, c.POINTER(w.HANDLE)), w.BOOL)
+    token_info = _exec_v1_winfn(adv, "GetTokenInformation", (w.HANDLE, c.c_int, ptr, w.DWORD, c.POINTER(w.DWORD)), w.BOOL)
+    if not open_token(current_process(), 8, c.byref(token)):
+        deny("WRONG_SESSION_OR_ELEVATED")
+    try:
+        session, elevation_type, size = w.DWORD(), w.DWORD(), w.DWORD()
+        if (not token_info(token, 12, c.byref(session), 4, c.byref(size)) or not session.value
+                or not token_info(token, 18, c.byref(elevation_type), 4, c.byref(size))):
+            deny("WRONG_SESSION_OR_ELEVATED")
+    finally:
+        close(token)
+    owner_sid, elevated = windows_identity()
+    is_admin = _exec_v1_winfn(shell, "IsUserAnAdmin", (), w.BOOL)
+    if elevated or elevation_type.value != 1 or is_admin():  # Refuse filtered admin tokens too.
+        deny("WRONG_SESSION_OR_ELEVATED")
+    process_id = _exec_v1_winfn(kernel, "GetCurrentProcessId", (), w.DWORD)
+    process_session = _exec_v1_winfn(kernel, "ProcessIdToSessionId", (w.DWORD, c.POINTER(w.DWORD)), w.BOOL)
+    actual = w.DWORD()
+    if not process_session(process_id(), c.byref(actual)) or actual.value != session.value:
+        deny("WRONG_SESSION_OR_ELEVATED")
+    open_desktop = _exec_v1_winfn(user, "OpenInputDesktop", (w.DWORD, w.BOOL, w.DWORD), w.HANDLE)
+    close_desktop = _exec_v1_winfn(user, "CloseDesktop", (w.HANDLE,), w.BOOL)
+    desktop = open_desktop(0, False, 1)
+    if not desktop:
+        deny("WRONG_SESSION_OR_ELEVATED")
+    close_desktop(desktop)
+
+    query = _exec_v1_winfn(wts, "WTSQuerySessionInformationW", (w.HANDLE, w.DWORD, c.c_int, c.POINTER(ptr), c.POINTER(w.DWORD)), w.BOOL)
+    free = _exec_v1_winfn(wts, "WTSFreeMemory", (ptr,), None)
+
+    def session_info(field, *, text=False):
+        value, length = ptr(), w.DWORD()
+        if not query(None, session, field, c.byref(value), c.byref(length)):
+            deny("WRONG_SESSION_OR_ELEVATED")
+        try:
+            if text and value and 2 <= length.value <= 2048 and length.value % 2 == 0:
+                return c.wstring_at(value, length.value // 2).rstrip("\x00")
+            if not text and value and length.value == 4:
+                return w.DWORD.from_address(value.value).value
+            deny("WRONG_SESSION_OR_ELEVATED")
+        finally:
+            free(value)
+
+    if session_info(8) != 0:  # WTSActive
+        deny("WRONG_SESSION_OR_ELEVATED")
+    username, domain = session_info(5, text=True), session_info(7, text=True)
+    if not username or not domain:
+        deny("OWNER_SID_MISMATCH")
+    lookup = _exec_v1_winfn(adv, "LookupAccountNameW", (w.LPCWSTR, w.LPCWSTR, ptr, c.POINTER(w.DWORD),
+                             w.LPWSTR, c.POINTER(w.DWORD), c.POINTER(w.DWORD)), w.BOOL)
+    sid, referenced_domain = c.create_string_buffer(68), c.create_unicode_buffer(256)
+    sid_length, domain_length, sid_use = w.DWORD(len(sid)), w.DWORD(len(referenced_domain)), w.DWORD()
+    if (not lookup(None, f"{domain}\\{username}", sid, c.byref(sid_length), referenced_domain,
+                   c.byref(domain_length), c.byref(sid_use)) or sid_use.value != 1):
+        deny("OWNER_SID_MISMATCH")
+    convert = _exec_v1_winfn(adv, "ConvertSidToStringSidW", (ptr, c.POINTER(w.LPWSTR)), w.BOOL)
+    local_free = _exec_v1_winfn(kernel, "LocalFree", (ptr,), ptr)
+    sid_text = w.LPWSTR()
+    if not convert(sid, c.byref(sid_text)):
+        deny("OWNER_SID_MISMATCH")
+    try:
+        return session.value, elevated, owner_sid, sid_text.value
+    finally:
+        local_free(c.cast(sid_text, ptr))
+
+
+def _exec_v1_runner_lineage(session_id: int, owner_sid: str) -> str:
+    """Identify the dedicated Listener/Worker by their live Windows process images."""
+    import ctypes as c
+    from ctypes import wintypes as w
+    from ai_commerce.hostops_v3.security import windows_acl, windows_identity
+
+    class ProcessEntry(c.Structure):
+        _fields_ = [("size", w.DWORD), ("usage", w.DWORD), ("pid", w.DWORD), ("heap", c.c_size_t),
+                    ("module", w.DWORD), ("threads", w.DWORD), ("parent", w.DWORD),
+                    ("priority", w.LONG), ("flags", w.DWORD), ("image", w.WCHAR * 260)]
+
+    kernel = c.WinDLL("kernel32", use_last_error=True)
+    snapshot = _exec_v1_winfn(kernel, "CreateToolhelp32Snapshot", (w.DWORD, w.DWORD), w.HANDLE)
+    first = _exec_v1_winfn(kernel, "Process32FirstW", (w.HANDLE, c.POINTER(ProcessEntry)), w.BOOL)
+    next_entry = _exec_v1_winfn(kernel, "Process32NextW", (w.HANDLE, c.POINTER(ProcessEntry)), w.BOOL)
+    close = _exec_v1_winfn(kernel, "CloseHandle", (w.HANDLE,), w.BOOL)
+    handle = snapshot(2, 0)
+    if handle == c.c_void_p(-1).value:
+        deny("WRONG_RUNNER_FORBIDDEN")
+    entries = {}
+    try:
+        entry = ProcessEntry(size=c.sizeof(ProcessEntry))
+        if not first(handle, c.byref(entry)):
+            deny("WRONG_RUNNER_FORBIDDEN")
+        while True:
+            entries[entry.pid] = (entry.parent, entry.image.lower())
+            if not next_entry(handle, c.byref(entry)):
+                if c.get_last_error() != 18:  # ERROR_NO_MORE_FILES
+                    deny("WRONG_RUNNER_FORBIDDEN")
+                break
+    finally:
+        close(handle)
+
+    open_process = _exec_v1_winfn(kernel, "OpenProcess", (w.DWORD, w.BOOL, w.DWORD), w.HANDLE)
+    process_session = _exec_v1_winfn(kernel, "ProcessIdToSessionId", (w.DWORD, c.POINTER(w.DWORD)), w.BOOL)
+    image_name = _exec_v1_winfn(kernel, "QueryFullProcessImageNameW", (w.HANDLE, w.DWORD, w.LPWSTR, c.POINTER(w.DWORD)), w.BOOL)
+    get_times = _exec_v1_winfn(kernel, "GetProcessTimes", (w.HANDLE, *(c.POINTER(w.FILETIME),) * 4), w.BOOL)
+
+    pid, child_created, worker = os.getpid(), None, False
+    for _ in range(32):
+        parent, image = entries.get(pid, (0, ""))
+        if not image:
+            return "OTHER" if worker else ""
+        runner_image = image in ("runner.worker.exe", "runner.listener.exe")
+        process = open_process(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not process:
+            return "OTHER" if worker or runner_image else ""
+        try:
+            created, exited, kernel_time, user_time = (w.FILETIME() for _ in range(4))
+            if not get_times(process, *(c.byref(value) for value in (created, exited, kernel_time, user_time))):
+                deny("WRONG_RUNNER_FORBIDDEN")
+            created_time = (created.dwHighDateTime << 32) | created.dwLowDateTime
+            if child_created is not None and created_time > child_created:
+                return "OTHER" if worker or runner_image else ""  # The parent PID was reused.
+            child_created = created_time
+            if runner_image:
+                buf = c.create_unicode_buffer(32768)
+                length, session = w.DWORD(len(buf)), w.DWORD()
+                if (not image_name(process, 0, buf, c.byref(length))
+                        or not process_session(pid, c.byref(session)) or session.value != session_id):
+                    return "OTHER"
+                expected = _EXEC_V1_RUNNER_ROOT / "bin" / image
+                if (Path(buf.value) != expected or not _exec_v1_no_reparse(expected)
+                        or windows_identity(process) != (owner_sid, False)):
+                    return "OTHER"
+                for path in (expected, expected.parent, _EXEC_V1_RUNNER_ROOT, _EXEC_V1_RUNNER_ROOT.parent):
+                    windows_acl(path, {owner_sid, "S-1-5-18", "S-1-5-32-544"})
+                if image == "runner.listener.exe":
+                    return HOSTOPS_EXEC_V1_RUNNER_NAME if worker else "OTHER"
+                worker = True
+        finally:
+            close(process)
+        pid = parent
+    deny("WRONG_RUNNER_FORBIDDEN")
 
 
 def _default_hostops_exec_v1_runtime(env: Mapping[str, str] | None = None) -> HostOpsExecV1RuntimeContext:
     current_env = os.environ if env is None else env
+    if _exec_v1_source_ci(current_env):
+        deny("SOURCE_CI_EXECUTION_FORBIDDEN")
+    if os.name != "nt":
+        deny("WINDOWS_ONLY")
+    if sys.version_info < (3, 14):
+        deny("PROTECTED_HOSTOPS_ONLY")
+    try:
+        session, elevated, owner_sid, interactive_sid = _exec_v1_interactive_token()
+        if type(session) is not int or session <= 0 or elevated is not False:
+            deny("WRONG_SESSION_OR_ELEVATED")
+        if (type(owner_sid) is not str or _EXEC_V1_USER_SID_RE.fullmatch(owner_sid) is None
+                or owner_sid != interactive_sid):
+            deny("OWNER_SID_MISMATCH")
+        lineage = _exec_v1_runner_lineage(session, owner_sid)
+    except Denied:
+        raise
+    except Exception:
+        deny("PROTECTED_HOSTOPS_ONLY")
+    if current_env.get("GITHUB_ACTIONS") != "true":
+        if lineage:
+            deny("SOURCE_CI_EXECUTION_FORBIDDEN")
+        # The local operator has no runner parent. The enrollment is for this fixed runner.
+        lineage = HOSTOPS_EXEC_V1_RUNNER_NAME
     return HostOpsExecV1RuntimeContext(
-        os_name=os.name,
-        runner_name=current_env.get("RUNNER_NAME", ""),
-        session_id=0,
-        elevated=True,
-        owner_sid="",
-        env=current_env,
+        os.name, lineage, session, elevated, owner_sid, current_env,
     )
 
 
@@ -3183,6 +3440,8 @@ class HostOpsExecV1Broker:
             authed = False
         if not authed:
             deny("AUTHENTICATION_UNPROVEN")
+        if self._require_protected_workflow:
+            _exec_v1_verify_source(ctx.env["GITHUB_SHA"], enrollment_sha=enrollment.source_sha)
         if public_issue and request["payload_mode"] != "PRIVATE_DIGEST":
             deny("PUBLIC_ISSUE_RAW_SCRIPT_DENIED")
         if request["payload_mode"] == "PRIVATE_DIGEST":
@@ -3228,7 +3487,8 @@ class HostOpsExecV1Broker:
             and enrollment.revoked is False
             and safe_code not in ("BLOCKED_NOT_ENROLLED", "ENROLLMENT_DISABLED", "ENROLLMENT_REVOKED", "ENROLLMENT_INVALID")
         )
-        source_sha = enrollment.source_sha if enrollment and _EXEC_V1_HEX40_RE.fullmatch(enrollment.source_sha) else None
+        source_sha = enrollment.source_sha if (enrollment and type(enrollment.source_sha) is str
+                                                and _EXEC_V1_HEX40_RE.fullmatch(enrollment.source_sha)) else None
         return self._receipt(
             status=status,
             code=safe_code,
@@ -3426,64 +3686,467 @@ class HostOpsExecV1Broker:
         )
 
 
+def _exec_v1_https_read(url: str, limit: int, *, bearer: str | None = None) -> bytes:
+    """Use Windows TLS trust and a direct connection with no credential redirects."""
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    certificates = [ssl.DER_cert_to_PEM_cert(cert) for cert, encoding, trust in ssl.enum_certificates("ROOT")
+                    if encoding == "x509_asn" and (trust is True or "1.3.6.1.5.5.7.3.1" in trust)]
+    tls.load_verify_locations(cadata="".join(certificates))
+    headers = {"User-Agent": "AI-Commerce-HostOps-Exec-V1"}
+    if bearer is not None:
+        headers["Authorization"] = "Bearer " + bearer
+    with build_opener(ProxyHandler({}), HTTPSHandler(context=tls), _CdpNoRedirect()).open(
+            Request(url, headers=headers), timeout=5) as response:
+        raw = response.read(limit + 1)
+    if not 0 < len(raw) <= limit:
+        deny("PROTECTED_HOSTOPS_ONLY")
+    return raw
+
+
+def _exec_v1_b64url(value: str) -> bytes:
+    if type(value) is not str or re.fullmatch(r"[A-Za-z0-9_-]+", value) is None:
+        deny("PROTECTED_HOSTOPS_ONLY")
+    return base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
+
+
+def _exec_v1_verify_rs256(data: bytes, signature: bytes, key: dict) -> None:
+    """Verify the issuer's RSA key with Windows CNG, using PKCS#1 SHA-256."""
+    import ctypes as c
+    from ctypes import wintypes as w
+
+    class Padding(c.Structure):
+        _fields_ = [("algorithm", w.LPCWSTR)]
+
+    exponent = _exec_v1_b64url(key["e"])
+    modulus = _exec_v1_b64url(key["n"])
+    if (exponent != b"\x01\x00\x01" or len(modulus) not in (256, 384, 512)
+            or not modulus[0] & 0x80 or len(signature) != len(modulus)):
+        deny("PROTECTED_HOSTOPS_ONLY")
+    blob = struct.pack("<6I", 0x31415352, len(modulus) * 8, len(exponent), len(modulus), 0, 0)
+    blob += exponent + modulus
+    crypto = c.WinDLL("bcrypt", use_last_error=True)
+    ptr, status = c.c_void_p, w.LONG
+    open_provider = _exec_v1_winfn(crypto, "BCryptOpenAlgorithmProvider", (c.POINTER(ptr), w.LPCWSTR, w.LPCWSTR, w.ULONG), status)
+    close_provider = _exec_v1_winfn(crypto, "BCryptCloseAlgorithmProvider", (ptr, w.ULONG), status)
+    import_key = _exec_v1_winfn(crypto, "BCryptImportKeyPair", (ptr, ptr, w.LPCWSTR, c.POINTER(ptr), ptr, w.ULONG, w.ULONG), status)
+    destroy_key = _exec_v1_winfn(crypto, "BCryptDestroyKey", (ptr,), status)
+    verify = _exec_v1_winfn(crypto, "BCryptVerifySignature", (ptr, ptr, ptr, w.ULONG, ptr, w.ULONG, w.ULONG), status)
+    provider, imported = ptr(), ptr()
+    if open_provider(c.byref(provider), "RSA", None, 0):
+        deny("PROTECTED_HOSTOPS_ONLY")
+    try:
+        if import_key(provider, None, "RSAPUBLICBLOB", c.byref(imported), blob, len(blob), 0):
+            deny("PROTECTED_HOSTOPS_ONLY")
+        try:
+            digest = hashlib.sha256(data).digest()
+            if verify(imported, c.byref(Padding("SHA256")), digest, len(digest), signature, len(signature), 2):
+                deny("PROTECTED_HOSTOPS_ONLY")
+        finally:
+            destroy_key(imported)
+    finally:
+        close_provider(provider, 0)
+
+
+def _exec_v1_check_oidc(env: Mapping[str, str], request_digest: str, *, action: str) -> None:
+    """Require fresh GitHub-signed claims for the protected job and selected request."""
+    endpoint = urlsplit(env.get("ACTIONS_ID_TOKEN_REQUEST_URL", ""))
+    bearer = env.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+    run_id = env.get("GITHUB_RUN_ID", "")
+    if (endpoint.scheme != "https" or re.fullmatch(r"pipelines[a-z0-9]+\.actions\.githubusercontent\.com", endpoint.netloc) is None
+            or re.fullmatch(r"/[A-Za-z0-9/_-]+/idtoken", endpoint.path) is None or endpoint.fragment
+            or re.fullmatch(r"[A-Za-z0-9._~-]{20,8192}", bearer) is None
+            or re.fullmatch(r"[1-9][0-9]{0,19}", run_id) is None):
+        deny("PROTECTED_HOSTOPS_ONLY")
+    query = parse_qsl(endpoint.query, keep_blank_values=True, max_num_fields=16)
+    if any(key.lower() == "audience" for key, _ in query):
+        deny("PROTECTED_HOSTOPS_ONLY")
+    audience = f"ai-commerce:hostops-exec-v1:{action}:{request_digest}:{secrets.token_hex(16)}"
+    url = urlunsplit(endpoint._replace(query=urlencode([*query, ("audience", audience)])))
+    envelope = json.loads(_exec_v1_https_read(url, 16384, bearer=bearer), object_pairs_hook=_object_unique)
+    header_part, claims_part, sig_part = envelope["value"].split(".")
+    header = json.loads(_exec_v1_b64url(header_part), object_pairs_hook=_object_unique)
+    if header.get("alg") != "RS256" or type(header.get("kid")) is not str or "crit" in header:
+        deny("PROTECTED_HOSTOPS_ONLY")
+    keys = json.loads(_exec_v1_https_read(_EXEC_V1_OIDC_ISSUER + "/.well-known/jwks", 32768),
+                      object_pairs_hook=_object_unique)["keys"]
+    matching = [key for key in keys if key.get("kid") == header["kid"] and key.get("kty") == "RSA"
+                and key.get("alg", "RS256") == "RS256" and key.get("use", "sig") == "sig"]
+    if len(matching) != 1:
+        deny("PROTECTED_HOSTOPS_ONLY")
+    _exec_v1_verify_rs256(f"{header_part}.{claims_part}".encode("ascii"), _exec_v1_b64url(sig_part), matching[0])
+    claims = json.loads(_exec_v1_b64url(claims_part), object_pairs_hook=_object_unique)
+    expected = {
+        "iss": _EXEC_V1_OIDC_ISSUER, "aud": audience,
+        "environment": _EXEC_V1_WORKFLOW_ENVIRONMENT,
+        "repository": REPO, "repository_owner": OWNER, "repository_visibility": "public",
+        "actor": OWNER, "event_name": "issues", "ref": "refs/heads/main", "ref_type": "branch",
+        "workflow_ref": HOSTOPS_EXEC_V1_WORKFLOW_REF, "workflow_sha": env["GITHUB_SHA"],
+        "sha": env["GITHUB_SHA"], "runner_environment": "self-hosted", "run_attempt": "1", "run_id": run_id,
+    }
+    now = int(time.time())
+    if (any(claims.get(name) != value for name, value in expected.items())
+            or (claims.get("ref_protected") is not True and claims.get("ref_protected") != "true")
+            or any(type(claims.get(name)) is not int for name in ("iat", "nbf", "exp"))
+            or not now - 120 <= claims["iat"] <= now + 30
+            or claims["nbf"] > now + 30 or claims["exp"] <= now
+            or not 0 < claims["exp"] - claims["iat"] <= 600):
+        deny("PROTECTED_HOSTOPS_ONLY")
+
+
+def _exec_v1_pinned_source(sha: str, limit: int) -> bytes:
+    if type(sha) is not str or _EXEC_V1_HEX40_RE.fullmatch(sha) is None:
+        deny("SOURCE_REVISION_MISMATCH")
+    url = f"https://raw.githubusercontent.com/{REPO}/{sha}/{_EXEC_V1_SOURCE_PATH.as_posix()}"
+    try:
+        return _exec_v1_https_read(url, limit)
+    except (Denied, OSError):
+        deny("SOURCE_REVISION_MISMATCH")
+
+
+def _exec_v1_verify_source(sha: str, *, enrollment_sha: str | None = None) -> None:
+    source = Path(__file__).absolute()
+    if not _exec_v1_no_reparse(source):
+        deny("SOURCE_REVISION_MISMATCH")
+    limit = 512 * 1024
+    with source.open("rb") as stream:
+        current = stream.read(limit + 1)
+    if len(current) > limit:
+        deny("SOURCE_REVISION_MISMATCH")
+    pinned = _exec_v1_pinned_source(sha, limit)
+    if not _clean_source_bytes_match(source, current, pinned):
+        deny("SOURCE_REVISION_MISMATCH")
+    # Only the checkout may differ in line endings. The two GitHub revisions
+    # must contain identical committed bytes.
+    if enrollment_sha is not None and enrollment_sha != sha:
+        if pinned != _exec_v1_pinned_source(enrollment_sha, limit):
+            deny("SOURCE_REVISION_MISMATCH")
+
+
+def _exec_v1_native_state_root(owner_sid: str) -> Path:
+    import ctypes as c
+    from ctypes import wintypes as w
+    from uuid import UUID
+    from ai_commerce.hostops_v3.security import windows_acl
+
+    shell = c.WinDLL("shell32", use_last_error=True)
+    ole = c.WinDLL("ole32", use_last_error=True)
+    known_folder = _exec_v1_winfn(shell, "SHGetKnownFolderPath", (c.c_void_p, w.DWORD, w.HANDLE,
+                                                                    c.POINTER(w.LPWSTR)), w.LONG)
+    free = _exec_v1_winfn(ole, "CoTaskMemFree", (c.c_void_p,), None)
+    guid = (c.c_ubyte * 16).from_buffer_copy(UUID("F1B32785-6FBA-4FCF-9D55-7B8E7F157091").bytes_le)
+    directory = w.LPWSTR()
+    if known_folder(guid, 0, None, c.byref(directory)):
+        deny("PRIVATE_STATE_UNSAFE")
+    try:
+        parent = Path(directory.value or "")
+    finally:
+        free(c.cast(directory, c.c_void_p))
+    if not parent.is_dir() or not _exec_v1_no_reparse(parent) or parent.drive.startswith("\\"):
+        deny("PRIVATE_STATE_UNSAFE")
+    windows_acl(parent, {owner_sid, "S-1-5-18", "S-1-5-32-544"})
+    return parent / _EXEC_V1_STATE_DIRNAME
+
+
+def _exec_v1_private_path(path: Path, owner_sid: str, *, directory: bool = False) -> None:
+    from ai_commerce.remote.local_completion_handoff import _check_windows_acl, _windows_acl
+
+    if not _exec_v1_no_reparse(path):
+        deny("REPARSE_PATH_DENIED")
+    try:
+        info = path.lstat()
+        if directory:
+            if not stat.S_ISDIR(info.st_mode):
+                deny("PRIVATE_STATE_UNSAFE")
+        elif not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            deny("PRIVATE_STATE_UNSAFE")
+        _check_windows_acl(*_windows_acl(path), owner_sid)
+    except Denied:
+        raise
+    except Exception:
+        deny("PRIVATE_STATE_UNSAFE")
+
+
+def _exec_v1_write_private(stream, path: Path, raw: bytes, owner_sid: str) -> None:
+    _exec_v1_private_path(path, owner_sid)
+    stream.write(raw)
+    stream.flush()
+    os.fsync(stream.fileno())
+    stream.seek(0)
+    if stream.read(len(raw) + 1) != raw:
+        deny("PRIVATE_STATE_UNSAFE")
+
+
+def _exec_v1_enroll_native(root: Path, ctx: HostOpsExecV1RuntimeContext, sha: str) -> dict:
+    _verify_hostops_exec_v1_runtime(ctx, forbid_github_actions=True)
+    if type(sha) is not str or not _EXEC_V1_HEX40_RE.fullmatch(sha):
+        deny("SOURCE_REVISION_MISMATCH")
+    if not _exec_v1_no_reparse(root):
+        deny("REPARSE_PATH_DENIED")
+    try:
+        root.mkdir(mode=0o700)  # Windows 3.14 applies a user/administrators DACL at creation.
+    except FileExistsError:
+        # A source upgrade needs an owner-attended migration that verifies the
+        # new revision and preserves the key, prior pin, journal (including
+        # UNKNOWN_EFFECT and replay history), and any revocation marker.
+        # Key loss, partial enrollment, and revocation also require separate
+        # recovery procedures. Enrollment leaves the existing root intact.
+        deny("ALREADY_ENROLLED_NO_OVERWRITE")
+    _exec_v1_private_path(root, ctx.owner_sid, directory=True)
+    payload_root = root / HOSTOPS_EXEC_V1_PAYLOAD_DIRNAME
+    payload_root.mkdir(mode=0o700)
+    _exec_v1_private_path(payload_root, ctx.owner_sid, directory=True)
+    key = secrets.token_bytes(32)
+    key_path = root / _EXEC_V1_KEY_FILENAME
+    with key_path.open("x+b") as stream:
+        _exec_v1_write_private(stream, key_path, key, ctx.owner_sid)
+    enrollment, receipt = enroll_hostops_exec_v1(
+        enrollment_id=secrets.token_hex(16), source_sha=sha, state_root=root, auth_key=key, runtime=ctx,
+    )
+    journal = HostOpsExecV1Journal(enrollment.journal_path)
+    journal.pin_new_enrollment(enrollment)
+    _exec_v1_load_native(root, ctx)
+    return receipt
+
+
+def _exec_v1_load_native(
+    root: Path, ctx: HostOpsExecV1RuntimeContext,
+) -> tuple[HostOpsExecV1Enrollment, bytes]:
+    if not _exec_v1_no_reparse(root):
+        deny("REPARSE_PATH_DENIED")
+    if not root.exists():
+        deny("BLOCKED_NOT_ENROLLED")
+    owner = ctx.owner_sid
+    _exec_v1_private_path(root, owner, directory=True)
+    revoked = root / _EXEC_V1_REVOKED_FILENAME
+    if not _exec_v1_no_reparse(revoked) or revoked.exists():
+        deny("ENROLLMENT_REVOKED")
+    record = root / HOSTOPS_EXEC_V1_ENROLLMENT_FILENAME
+    _exec_v1_private_path(record, owner)
+    enrollment = load_hostops_exec_v1_enrollment(record)
+    if enrollment is None:
+        deny("ENROLLMENT_INVALID")
+    enrollment.validate()
+    if (enrollment.state_root != root or enrollment.journal_path != root / HOSTOPS_EXEC_V1_JOURNAL_FILENAME
+            or enrollment.payload_root != root / HOSTOPS_EXEC_V1_PAYLOAD_DIRNAME or not enrollment.require_private_payload):
+        deny("ENROLLMENT_INVALID")
+    if enrollment.owner_sid != owner:
+        deny("OWNER_SID_MISMATCH")
+    _exec_v1_private_path(enrollment.payload_root, owner, directory=True)
+    _exec_v1_private_path(enrollment.journal_path, owner)
+    for suffix in ("-journal", "-wal", "-shm"):
+        sidecar = enrollment.journal_path.with_name(enrollment.journal_path.name + suffix)
+        if not _exec_v1_no_reparse(sidecar) or sidecar.exists():
+            _exec_v1_private_path(sidecar, owner)
+    key_path = root / _EXEC_V1_KEY_FILENAME
+    _exec_v1_private_path(key_path, owner)
+    with key_path.open("rb") as stream:
+        key = stream.read(33)
+    if len(key) != 32 or not hmac.compare_digest(_exec_v1_sha256(key), enrollment.auth_key_sha256):
+        deny("AUTHENTICATION_UNPROVEN")
+    return enrollment, key
+
+
+def _exec_v1_stage_native(enrollment: HostOpsExecV1Enrollment, stream) -> str:
+    raw = stream.read(HOSTOPS_EXEC_V1_MAX_SCRIPT_BYTES + 1)
+    if not 0 < len(raw) <= HOSTOPS_EXEC_V1_MAX_SCRIPT_BYTES or b"\x00" in raw:
+        deny("PAYLOAD_OVERSIZED_OR_INVALID")
+    try:
+        raw.decode("utf-8")
+    except UnicodeError:
+        deny("PAYLOAD_OVERSIZED_OR_INVALID")
+    digest = _exec_v1_sha256(raw)
+    destination = enrollment.payload_root / (digest + ".ps1")
+    if not _exec_v1_no_reparse(destination):
+        deny("REPARSE_PATH_DENIED")
+    temp = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=enrollment.payload_root, delete=False) as output:
+            temp = Path(output.name)
+            _exec_v1_write_private(output, temp, raw, enrollment.owner_sid)
+        # A hard link publishes all bytes at once and fails if the digest already exists.
+        os.link(temp, destination)
+    except FileExistsError:
+        deny("PAYLOAD_ALREADY_STAGED")
+    finally:
+        if temp is not None:
+            temp.unlink()
+    _exec_v1_private_path(destination, enrollment.owner_sid)
+    return digest
+
+
+def _exec_v1_runner_temp() -> Path:
+    return _EXEC_V1_RUNNER_ROOT / "_work/_temp"
+
+
+def _exec_v1_event_path(value: str, ctx: HostOpsExecV1RuntimeContext) -> Path:
+    from ai_commerce.hostops_v3.security import windows_acl
+
+    event_path = Path(value)
+    expected = _exec_v1_runner_temp() / "_github_workflow/event.json"
+    workspace = _EXEC_V1_RUNNER_ROOT / "_work/ai-commerce/ai-commerce"
+    if (event_path != expected or Path(ctx.env.get("GITHUB_EVENT_PATH", "")) != expected
+            or Path(ctx.env.get("GITHUB_WORKSPACE", "")) != workspace
+            or Path(__file__).absolute() != workspace / _EXEC_V1_SOURCE_PATH
+            or not _exec_v1_no_reparse(event_path)):
+        deny("PROTECTED_HOSTOPS_ONLY")
+    if not event_path.is_file() or event_path.stat().st_nlink != 1:
+        deny("EVENT_SHAPE_OR_STATE_DENIED")
+    for path in (event_path, event_path.parent, event_path.parent.parent):
+        windows_acl(path, {ctx.owner_sid, "S-1-5-18", "S-1-5-32-544"})
+    return event_path
+
+
+def _exec_v1_read_event(event_path: Path) -> dict:
+    try:
+        with event_path.open("rb") as stream:
+            raw = stream.read(HOSTOPS_EXEC_V1_MAX_EVENT_BYTES + 1)
+        if not 0 < len(raw) <= HOSTOPS_EXEC_V1_MAX_EVENT_BYTES:
+            deny("PAYLOAD_OVERSIZED_OR_INVALID")
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=_object_unique)
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        deny("EVENT_SHAPE_OR_STATE_DENIED")
+
+
+def _exec_v1_protected_dispatch(args, ctx: HostOpsExecV1RuntimeContext) -> dict:
+    _verify_hostops_exec_v1_runtime(ctx, require_protected_workflow=True)
+    event_path = _exec_v1_event_path(args.event or ctx.env.get("GITHUB_EVENT_PATH", ""), ctx)
+    event = _exec_v1_read_event(event_path)
+    parsed = parse_hostops_exec_v1_event(event)
+    if not parsed["public_issue"] or parsed["request"]["payload_mode"] != "PRIVATE_DIGEST":
+        deny("PUBLIC_ISSUE_RAW_SCRIPT_DENIED")
+    request = parsed["request"]
+    _exec_v1_check_oidc(ctx.env, request["request_digest"], action=args.action)
+    # The broker checks the current and enrolled source before resolving payloads.
+    root = _exec_v1_native_state_root(ctx.owner_sid)
+    enrollment, key = _exec_v1_load_native(root, ctx)
+
+    def resolve(digest, policy):
+        path = policy.payload_root / (digest + ".ps1")
+        if path.exists() or not _exec_v1_no_reparse(path):
+            _exec_v1_private_path(path, policy.owner_sid)
+        return _default_hostops_exec_v1_payload_resolver(digest, policy)
+
+    def run(script, timeout, limit):
+        # Recheck the current policy just before the reserved job starts.
+        current, _ = _exec_v1_load_native(root, ctx)
+        if current != enrollment:
+            deny("ENROLLMENT_PIN_MISMATCH")
+        return _default_hostops_exec_v1_runner(script, timeout, limit)
+
+    # The GitHub event and its proven job authorize minting the internal broker MAC.
+    # The owner key, MAC and script never travel through GitHub.
+    token = sign_hostops_exec_v1_request(request, key)
+    broker = HostOpsExecV1Broker(
+        enrollment=enrollment, journal=HostOpsExecV1Journal(enrollment.journal_path, existing=True),
+        authenticator=make_hostops_exec_v1_hmac_authenticator(key),
+        runtime_inspector=lambda: ctx, payload_resolver=resolve, runner=run, require_protected_workflow=True,
+    )
+    return broker.handle_event(event, action=args.action, auth_token=token)
+
+
+def _exec_v1_attended_action(args, ctx: HostOpsExecV1RuntimeContext) -> dict:
+    _verify_hostops_exec_v1_runtime(ctx, forbid_github_actions=True)
+    if not sys.stdout.isatty() or sys.stdin.isatty() != (args.action != "stage"):
+        deny("ATTENDED_OWNER_REQUIRED")
+    root = _exec_v1_native_state_root(ctx.owner_sid)
+    if args.action == "enroll":
+        _exec_v1_verify_source(args.source_sha)
+        return _exec_v1_enroll_native(root, ctx, args.source_sha)
+    if args.action == "revoke":
+        if not root.exists() and _exec_v1_no_reparse(root):
+            deny("BLOCKED_NOT_ENROLLED")
+        _exec_v1_private_path(root, ctx.owner_sid, directory=True)
+        marker = root / _EXEC_V1_REVOKED_FILENAME
+        if not _exec_v1_no_reparse(marker):
+            deny("REPARSE_PATH_DENIED")
+        try:
+            with marker.open("x+b") as stream:
+                _exec_v1_write_private(stream, marker, b"revoked\n", ctx.owner_sid)
+        except FileExistsError:
+            pass
+        return HostOpsExecV1Broker()._receipt(status="REVOKED", code="ENROLLMENT_REVOKED", readback_verified=True)
+    enrollment, _ = _exec_v1_load_native(root, ctx)
+    _exec_v1_verify_source(enrollment.source_sha)
+    digest = _exec_v1_stage_native(enrollment, sys.stdin.buffer)
+    receipt = HostOpsExecV1Broker()._receipt(status="STAGED", code="PAYLOAD_STAGED", enrolled=True,
+                                             readback_verified=True)
+    return validate_hostops_exec_v1_receipt({**receipt, "script_sha256": digest, "payload_mode": "PRIVATE_DIGEST"})
+
+
+class _ExecV1ArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        deny("REQUEST_INVALID")
+
+
+def _exec_v1_receipt_file(output: Path, raw: bytes) -> None:
+    temp = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=output.parent, delete=False) as stream:
+            temp = Path(stream.name)
+            stream.write(raw)
+        os.replace(temp, output)
+    finally:
+        if temp is not None:
+            temp.unlink(missing_ok=True)
+
+
 def hostops_exec_v1_cli(
     argv: list[str] | None = None,
     *,
     env: Mapping[str, str] | None = None,
     broker: HostOpsExecV1Broker | None = None,
 ) -> int:
-    """Dedicated CLI interface for a future SEPARATE protected workflow PR.
-
-    Not wired into personal.main() or .github/workflows/issue-ingress.yml.
-    Remains fail-closed / DISABLED without explicit enrollment and protected dispatch.
-    """
-    parser = argparse.ArgumentParser(prog="hostops-exec-v1")
-    parser.add_argument("--action", choices=("plan", "execute"), default="plan")
-    parser.add_argument("--event", required=True)
-    parser.add_argument("--enrollment", default=None)
-    parser.add_argument("--output", required=True)
-    args = parser.parse_args(argv)
+    """Separate attended enrollment and authenticated protected-dispatch CLI."""
+    parser = _ExecV1ArgumentParser(prog="hostops-exec-v1", add_help=False, allow_abbrev=False)
+    parser.add_argument("--action", choices=("plan", "execute", "enroll", "stage", "revoke"), default="plan")
+    parser.add_argument("--event")
+    parser.add_argument("--source-sha")
+    parser.add_argument("--output")
     current_env = os.environ if env is None else env
-    active_broker = broker
-    if active_broker is None:
-        enrollment = None
-        if args.enrollment:
-            try:
-                enrollment = load_hostops_exec_v1_enrollment(Path(args.enrollment))
-            except Denied as exc:
-                receipt = HostOpsExecV1Broker()._error_receipt(str(exc))
-                output = Path(args.output)
-                output.parent.mkdir(parents=True, exist_ok=True)
-                output.write_text(json.dumps(receipt, ensure_ascii=True, separators=(",", ":")) + "\n", encoding="utf-8")
-                return 2
-        active_broker = HostOpsExecV1Broker(
-            enrollment=enrollment,
-            runtime_inspector=lambda: _default_hostops_exec_v1_runtime(current_env),
-            require_protected_workflow=True,
-        )
+    fallback = HostOpsExecV1Broker()
+    output = None
     try:
-        event_path = Path(args.event)
-        if not event_path.is_file():
-            deny("EVENT_SHAPE_OR_STATE_DENIED")
-        with event_path.open("rb") as stream:
-            raw = stream.read(HOSTOPS_EXEC_V1_MAX_EVENT_BYTES + 1)
-        if not 0 < len(raw) <= HOSTOPS_EXEC_V1_MAX_EVENT_BYTES:
-            deny("PAYLOAD_OVERSIZED_OR_INVALID")
-        event = json.loads(raw.decode("utf-8"), object_pairs_hook=_object_unique)
-        receipt = active_broker.handle_event(
-            event,
-            action=args.action,
-            auth_token=current_env.get("HOSTOPS_EXEC_V1_AUTH_TOKEN"),
-        )
+        args = parser.parse_args(argv)
+        local = args.action in ("enroll", "stage", "revoke")
+        if ((args.source_sha is not None) != (args.action == "enroll")
+                or local and (args.event is not None or args.output is not None or broker is not None)):
+            deny("REQUEST_INVALID")
+        if broker is None and (_exec_v1_source_ci(current_env) or local and "GITHUB_ACTIONS" in current_env):
+            deny("SOURCE_CI_EXECUTION_FORBIDDEN")
+        if args.output is not None:
+            candidate = Path(args.output).absolute()
+            if ((broker is None and (candidate.parent != _exec_v1_runner_temp()
+                                      or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}\.json", candidate.name)))
+                    or not _exec_v1_no_reparse(candidate) or not candidate.parent.is_dir()
+                    or candidate.exists() and not candidate.is_file()):
+                deny("RECEIPT_OUTPUT_UNAVAILABLE")
+            output = candidate
+        if broker is not None:
+            event = _exec_v1_read_event(Path(args.event or current_env.get("GITHUB_EVENT_PATH", "")))
+            receipt = broker.handle_event(event, action=args.action,
+                                          auth_token=current_env.get("HOSTOPS_EXEC_V1_AUTH_TOKEN"))
+        else:
+            ctx = _default_hostops_exec_v1_runtime(current_env)
+            receipt = _exec_v1_attended_action(args, ctx) if local else _exec_v1_protected_dispatch(args, ctx)
+        receipt = validate_hostops_exec_v1_receipt(receipt)
     except Denied as exc:
-        receipt = active_broker._error_receipt(str(exc), enrollment=active_broker._enrollment)
-    except (OSError, ValueError, UnicodeError, RecursionError):
-        receipt = active_broker._error_receipt("EVENT_SHAPE_OR_STATE_DENIED", enrollment=active_broker._enrollment)
-    receipt = validate_hostops_exec_v1_receipt(receipt)
-    output = Path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(receipt, ensure_ascii=True, separators=(",", ":")) + "\n", encoding="utf-8")
-    return 0 if receipt["status"] in ("PLANNED", "ENROLLED", "EXECUTED") else 2
+        receipt = fallback._error_receipt(str(exc))
+    except (Exception, KeyboardInterrupt):
+        receipt = fallback._error_receipt("PROTECTED_HOSTOPS_ONLY")
+    raw = _exec_v1_canonical(receipt) + b"\n"
+    try:
+        if output is None:
+            sys.stdout.write(raw.decode("ascii"))
+        else:
+            _exec_v1_receipt_file(output, raw)
+    except (OSError, ValueError, KeyboardInterrupt):
+        if output is not None:
+            with suppress(OSError, ValueError):
+                sys.stdout.write(raw.decode("ascii"))
+        return 2
+    if receipt["status"] in ("PLANNED", "ENROLLED", "REVOKED", "STAGED", "EXECUTED"):
+        return 0
+    return 2
 
 
 def perform(request):
@@ -3611,6 +4274,8 @@ def perform(request):
 
 
 def main():
+    if sys.argv[1:2] == ["--hostops-exec-v1"]:
+        return hostops_exec_v1_cli(sys.argv[2:])
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("read", "write"), required=True)
     parser.add_argument("--output", required=True)
