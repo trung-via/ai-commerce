@@ -3004,7 +3004,7 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
                             ("AUTOSTART_RUNTIME_UNAVAILABLE", "TASK_READ_UNVERIFIED"),
                             ("AUTOSTART_CONFLICT", "TASK_REGISTRATION_CONFLICT"),
                             ("WINDOWS_OWNER_CONTEXT_UNVERIFIED", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"),
-                            ("UNKNOWN_EFFECT", "UNKNOWN"), ("PRIVATE", "UNKNOWN")):
+                            ("UNKNOWN_EFFECT", "UNKNOWN_EFFECT"), ("PRIVATE", "UNKNOWN")):
             with self.subTest(reply=reply):
                 self.task.return_value = reply
                 self.assertEqual(self.invoke_probe()["code"], code)
@@ -3249,7 +3249,7 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.record.assert_not_called()
         self.probe.assert_not_called()
 
-    def test_create_then_independent_readback_before_one_owner_session_start(self):
+    def test_create_then_independent_readback_leaves_chrome_idle(self):
         directory = self.local / "AI-Commerce" / self.acq._CLEAN_9444_PROFILE
         (directory / "Default").mkdir(parents=True)
         executable = self.local / "Google" / "Chrome" / "Application" / "chrome.exe"
@@ -3266,42 +3266,35 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.task.assert_called_once_with(self.owner, self.target, self.candidates, install=False)
         self.task.reset_mock()
 
-        responses = iter(("AUTOSTART_NOT_ENROLLED", "ENROLLED", "ALREADY_ENROLLED", "START_REQUESTED"))
+        responses = iter(("AUTOSTART_NOT_ENROLLED", "ENROLLED", "ALREADY_ENROLLED"))
 
         def scheduler(owner, target, candidates, *, install, start=False):
             self.assertEqual((owner, target, candidates), (self.owner, self.target, self.candidates))
-            if not start:
-                self.assertEqual(self.slot, self.task.call_count != 1)
-            else:
-                self.assertFalse(self.slot)
-                self.assertIn("AutostartPending", self.pending)
-                self.inventory.return_value = ("OWNED", (5, self.target.executable, "created", "PRIVATE"))
-                self.launch_pending.side_effect = (True, False)
+            self.assertFalse(start)
+            self.assertEqual(self.slot, self.task.call_count != 1)
             return next(responses)
 
         self.task.side_effect = scheduler
         with patch.object(hostops.time, "sleep") as wait:
             receipt = self.invoke()
-        wait.assert_called_once_with(0.5)
-        self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "CDP_VERIFIED"))
-        self.assertIs(receipt["devtools_protocol_ok"], True)
+        wait.assert_not_called()
+        self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "INSTALLED_BUT_NOT_RUNNING"))
+        self.assertIs(receipt["devtools_protocol_ok"], False)
         for key in ("exact_chat_verified", "wake_sent", "arbitrary_shell_enabled"):
             self.assertIs(receipt[key], False)
         self.assertEqual(self.task.call_args_list, [
             call(self.owner, self.target, self.candidates, install=False),
             call(self.owner, self.target, self.candidates, install=True),
             call(self.owner, self.target, self.candidates, install=False),
-            call(self.owner, self.target, self.candidates, install=False, start=True),
         ])
-        self.probe.assert_called_once_with(self.target)
+        self.probe.assert_not_called()
         self.assertFalse(self.pending)
         windows_acl.assert_not_called()
         private_id.assert_not_called()
 
-    def test_uncertain_registration_or_first_start_persists_and_never_replays(self):
+    def test_uncertain_registration_persists_and_never_replays(self):
         for responses in (("AUTOSTART_NOT_ENROLLED", "UNKNOWN_EFFECT"),
-                          ("AUTOSTART_NOT_ENROLLED", "ENROLLED", "AUTOSTART_CONFLICT"),
-                          ("AUTOSTART_NOT_ENROLLED", "ENROLLED", "ALREADY_ENROLLED", "UNKNOWN_EFFECT")):
+                          ("AUTOSTART_NOT_ENROLLED", "ENROLLED", "AUTOSTART_CONFLICT")):
             self.pending.clear()
             self.task.reset_mock()
             self.task.side_effect = responses
@@ -3310,6 +3303,54 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
             self.assertEqual(self.pending, {"AutostartPending"})
             self.assertEqual(self.invoke()["code"], "UNKNOWN_EFFECT")
             self.assertEqual(self.task.call_count, len(responses))
+        self.probe.assert_not_called()
+
+    def test_migration_uses_only_the_protected_owner_write_and_leaves_browser_untouched(self):
+        op = "migrate_clean_9444_demand_task"
+        request = event("write", op, {})
+        self.assertEqual(hostops.perform(hostops.parse_event(request, "write"))["code"],
+                         "PROTECTED_HOSTOPS_ONLY")
+        for payload, expected in (
+            (event("write", op, {"command": "PRIVATE"}), "INVALID_PARAMETERS"),
+            (event("write", op, {}, comment="APPROVE WRITE #17 "), "EXACT_WRITE_APPROVAL_REQUIRED"),
+        ):
+            self.assertEqual(self.invoke(payload)["code"], expected)
+        with patch.dict(self.env, GITHUB_RUN_ATTEMPT="2"):
+            self.assertEqual(self.invoke(request)["code"], "PROTECTED_HOSTOPS_ONLY")
+        self.task.assert_not_called()
+
+        def scheduler(owner, target, candidates, *, install, migrate):
+            self.assertTrue(self.slot)
+            self.assertEqual((owner, target, candidates), (self.owner, self.target, self.candidates))
+            self.assertFalse(install)
+            self.assertTrue(migrate)
+            return "DEMAND_MIGRATED"
+
+        self.task.side_effect = scheduler
+        with patch.dict(self.env, GITHUB_WORKFLOW_SHA=""):
+            receipt = self.invoke(request)
+        self.assertEqual((receipt["operation"], receipt["code"], receipt["status"]),
+                         (op, "DEMAND_MIGRATED", "OBSERVED"))
+        self.assertNotIn("devtools_protocol_ok", receipt)
+        self.task.assert_called_once()
+        self.source.assert_called_once_with(self.acq, self.sha)
+        self.inventory.assert_not_called()
+        self.probe.assert_not_called()
+        self.record.assert_not_called()
+
+    def test_migration_projects_ambiguity_replay_and_unknown_effect_without_retry(self):
+        request = event("write", "migrate_clean_9444_demand_task", {})
+        for code in ("AUTOSTART_CONFLICT", "TASK_MIGRATION_AMBIGUOUS", "TASK_MIGRATION_NOT_READY",
+                     "TASK_MIGRATION_REPLAY", "UNKNOWN_EFFECT", "PRIVATE native details"):
+            with self.subTest(code=code):
+                self.task.reset_mock()
+                self.task.return_value = code
+                receipt = self.invoke(request)
+                self.assertEqual(receipt["status"], "HOLD")
+                self.assertEqual(receipt["code"], "UNKNOWN_EFFECT" if code.startswith("PRIVATE") else code)
+                self.task.assert_called_once_with(self.owner, self.target, self.candidates,
+                                                  install=False, migrate=True)
+        self.inventory.assert_not_called()
         self.probe.assert_not_called()
 
     def _clean_source_fixture(self):
@@ -3642,7 +3683,7 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
                 self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "SOURCE_PATH_UNTRUSTED"))
                 self.task.assert_not_called()
 
-    def test_start_requests_only_the_exact_powershell_task_in_owner_session(self):
+    def test_start_requests_only_the_exact_demand_task_in_owner_session(self):
         powershell = self.local / "PowerShell" / "7" / "pwsh.exe"
         with patch.object(self.acq, "_powershell", return_value=powershell):
             self.native_run.side_effect = None
@@ -3652,13 +3693,15 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         task_call = self.native_run.call_args
         script, env = task_call.args[0][-1], task_call.kwargs["env"]
         self.assertEqual(env["AI_COMMERCE_TASK_POWERSHELL"], str(powershell))
-        self.assertEqual(env["AI_COMMERCE_TASK_DIRECTORY"], str(powershell.parent))
+        self.assertEqual(Path(env["AI_COMMERCE_TASK_GUI"]).name, "pythonw.exe")
         self.assertEqual(env["AI_COMMERCE_TASK_SESSION"], "7")
         self.assertEqual(env["AI_COMMERCE_TASK_START_SESSION"], "7")
         self.assertEqual(env["AI_COMMERCE_TASK_INSTALL"], "0")
         self.assertIn("-Command", env["AI_COMMERCE_TASK_ARGUMENTS"])
         self.assertIn(".RunEx($null, 12, $session, $sid)", script)
         self.assertIn(".RegisterTaskDefinition($name, $expected, 34, $sid, $null, 3, $sddl)", script)
+        self.assertNotIn("Triggers.Create", script)
+        self.assertNotIn("PT1M", script)
         self.assertNotRegex(script, r"Stop-Process|\.Stop\(|DeleteTask|TerminateProcess")
 
 
