@@ -21,11 +21,12 @@ import time
 import uuid
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from threading import Thread
-from typing import Literal, TypedDict
+from typing import Callable, ContextManager, Literal, Protocol, TypedDict
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from jsonschema import Draft202012Validator
@@ -174,11 +175,15 @@ def validate_signal_import(record: dict) -> dict:
 AI_MAX_BYTES = 1024 * 1024
 AIStage = Literal["SIGNAL_RESEARCH", "AUDIENCE_DRAFT", "OPPORTUNITY_ASSESSMENT"]
 AIStatus = Literal["OK", "UNSUPPORTED", "NEEDS_HUMAN", "QUOTA", "FAILED", "UNKNOWN_EFFECT"]
-AIProviderName = Literal["chatgpt-attended", "codex-cli", "antigravity-cli"]
+_AI_HISTORICAL_SELECTORS = {
+    "chatgpt-attended": ("HUMAN_SELECTED", "HUMAN_SELECTED"),
+    "codex-cli": ("gpt-6.1-sol", "xhigh"),
+    "antigravity-cli": ("gemini-4-hydrogen-xhigh", "xhigh"),
+}
 
 
 class AIProviderSelector(TypedDict):
-    profile: AIProviderName
+    profile: str
     model: str
     effort: str
 
@@ -225,6 +230,11 @@ class A10AIResearchReceipt(TypedDict):
     execution: dict | None
 
 
+def validate_ai_provider_name(name: str) -> None:
+    require(isinstance(name, str) and re.fullmatch(r"[a-z][a-z0-9-]{0,63}", name) is not None,
+            "AI_PROVIDER_UNSUPPORTED")
+
+
 def ai_provider_profile(name: str, *, model: str | None = None,
                         effort: str | None = None) -> AIProviderSelector:
     """Historical defaults or an explicit pair supplied by the operator.
@@ -232,20 +242,16 @@ def ai_provider_profile(name: str, *, model: str | None = None,
     Attended ChatGPT has no programmatically attested model/effort. HUMAN_SELECTED
     is a selector, not a claim that any particular model ran. No UI/CDP is used.
     """
-    profiles = {
-        "chatgpt-attended": ("HUMAN_SELECTED", "HUMAN_SELECTED"),
-        "codex-cli": ("gpt-6.1-sol", "xhigh"),
-        "antigravity-cli": ("gemini-4-hydrogen-xhigh", "xhigh"),
-    }
-    require(isinstance(name, str) and name in profiles, "AI_PROVIDER_UNSUPPORTED")
+    validate_ai_provider_name(name)
     if model is None and effort is None:
-        model, effort = profiles[name]
+        require(name in _AI_HISTORICAL_SELECTORS, "AI_PROVIDER_UNSUPPORTED")
+        model, effort = _AI_HISTORICAL_SELECTORS[name]
     elif name == "chatgpt-attended":
-        require((model, effort) == profiles[name], "AI_SELECTOR_MISMATCH")
+        require((model, effort) == _AI_HISTORICAL_SELECTORS[name], "AI_SELECTOR_MISMATCH")
     else:
         require(isinstance(model, str) and isinstance(effort, str)
-                and re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", model) is not None
-                and effort in ("minimal", "low", "medium", "high", "xhigh"), "AI_SELECTOR_INVALID")
+                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", model) is not None
+                and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", effort) is not None, "AI_SELECTOR_INVALID")
     return {"profile": name, "model": model, "effort": effort}
 
 
@@ -260,6 +266,24 @@ def _ai_bounded(value) -> None:
         if isinstance(exc, OpportunityError):
             raise
         raise SignalValidationError("AI_INVALID_VALUE") from None
+
+
+def ai_connector_selector(provider: str, capability: dict | None) -> AIProviderSelector:
+    """Resolve the trusted operator selector and preserve legacy flat grants."""
+    validate_ai_provider_name(provider)
+    if isinstance(capability, dict):
+        if "selector" in capability:
+            selector = capability["selector"]
+            _ai_object(selector, {"provider", "model", "effort"}, "AI_SELECTOR_INVALID")
+            require(selector["provider"] == provider and not {"model", "effort"} & capability.keys(),
+                    "AI_CAPABILITY_SELECTOR")
+            require(selector["model"] is not None and selector["effort"] is not None, "AI_SELECTOR_INVALID")
+            return ai_provider_profile(provider, model=selector["model"], effort=selector["effort"])
+        if provider != "chatgpt-attended" and {"model", "effort"} & capability.keys():
+            model, effort = capability.get("model"), capability.get("effort")
+            require(model is not None and effort is not None, "AI_SELECTOR_INVALID")
+            return ai_provider_profile(provider, model=model, effort=effort)
+    return ai_provider_profile(provider)
 
 
 def _ai_sources(sources) -> None:
@@ -360,16 +384,23 @@ def validate_ai_research_receipt(receipt: dict, task: dict) -> A10AIResearchRece
     require(receipt["status"] == "OK" or not model_claims, "AI_FAILED_OUTPUT_IGNORED")
     execution = receipt["execution"]
     native = receipt["reason"] == "NATIVE_CODEX_VERIFIED"
-    require(not native or execution is not None, "AI_EXECUTION_INVALID")
+    connector_kind = {"CONNECTOR_VERIFIED": "AUTHENTICATED_CONNECTOR",
+                      "CONNECTOR_MOCK_VERIFIED": "MOCK_AUTHENTICATED_RUNNER"}.get(receipt["reason"])
+    require(not (native or connector_kind) or isinstance(execution, dict), "AI_EXECUTION_INVALID")
     if execution is not None:
         keys = {"kind", "capability_sha256", "probe_sha256"}
-        if native:
+        if native or connector_kind:
             keys.add("session_sha256")
+        if connector_kind:
+            require(receipt["status"] == "OK" and execution.get("kind") == connector_kind
+                    and task["provider"]["profile"] != "chatgpt-attended", "AI_EXECUTION_INVALID")
+        elif native:
             require(task["provider"]["profile"] == "codex-cli" and isinstance(execution, dict)
                     and execution.get("kind") == "AUTHENTICATED_CLI_PROBE", "AI_EXECUTION_INVALID")
         _ai_object(execution, keys, "AI_EXECUTION_INVALID")
-        require(execution["kind"] in ("AUTHENTICATED_CLI_PROBE", "MOCK_AUTHENTICATED_RUNNER")
-                and receipt["effect"] == "PROCESS_INVOKED", "AI_EXECUTION_INVALID")
+        require((connector_kind is not None or execution["kind"] in ("AUTHENTICATED_CLI_PROBE", "MOCK_AUTHENTICATED_RUNNER"))
+                and receipt["effect"] == "PROCESS_INVOKED"
+                and task["provider"]["profile"] != "chatgpt-attended", "AI_EXECUTION_INVALID")
         require(all(isinstance(execution[k], str) and re.fullmatch(r"[a-f0-9]{64}", execution[k])
                     for k in keys - {"kind"}), "AI_EXECUTION_INVALID")
     if receipt["decision"] is not None:
@@ -394,17 +425,18 @@ def parse_ai_research_output(task: dict, raw: bytes, *, effect: str,
                               execution: dict | None = None) -> A10AIResearchReceipt:
     """One strict JSON object, no fences, wrappers, fallback, rights or effects.
 
-    Provider reports are self-reported selectors, not provider attestation. Any
-    malformed/unauthorized output is discarded and ends in UNKNOWN_EFFECT.
+    This parser validates self-reported selectors. The connector records
+    authenticated transport evidence after a bound invocation. Malformed or
+    unauthorized output is discarded and ends in UNKNOWN_EFFECT.
     """
     return _parse_ai_research_output(task, raw, effect=effect, execution=execution)
 
 
-def _parse_ai_research_output(task, raw, *, effect, execution, native_stdout=None):
+def _parse_ai_research_output(task, raw, *, effect, execution, reason="STRUCTURED_OUTPUT", raw_transport=None):
     validate_ai_research_task(task)
-    retained = raw if native_stdout is None else native_stdout
+    retained = raw if raw_transport is None else raw_transport
     try:
-        require(native_stdout is not None or execution is None
+        require(reason != "STRUCTURED_OUTPUT" or execution is None
                 or execution.get("kind") == "MOCK_AUTHENTICATED_RUNNER", "AI_NATIVE_PROOF_REQUIRED")
         require(isinstance(raw, bytes) and 0 < len(raw) <= AI_MAX_BYTES, "AI_OUTPUT_SIZE")
         value = parse_json(raw)
@@ -417,16 +449,14 @@ def _parse_ai_research_output(task, raw, *, effect, execution, native_stdout=Non
                 and value["task_sha256"] == digest(task) and value["provider"] == task["provider"], "AI_OUTPUT_BINDING")
         require(value["effects"] == [], "AI_UNAUTHORIZED_EFFECT")
         _ai_model_claims(value["claims"], task)
-        reason = "STRUCTURED_OUTPUT"
-        if native_stdout is not None:
-            reason = "NATIVE_CODEX_VERIFIED" if "session_sha256" in execution else "NATIVE_CODEX_MOCK_VERIFIED"
         return ai_research_receipt(task, status=value["status"], reason=reason,
                                   effect=effect, claims=value["claims"], raw=retained,
                                   reported_model=value["reported_model"], reported_effort=value["reported_effort"],
                                   decision=value.get("decision"), execution=execution)
     except (OpportunityError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        output_hash_input = retained if isinstance(retained, bytes) and len(retained) <= AI_MAX_BYTES else None
         return ai_research_receipt(task, status="UNKNOWN_EFFECT", reason="OUTPUT_REJECTED",
-                                  effect="UNKNOWN", raw=retained if isinstance(retained, bytes) else None)
+                                  effect="UNKNOWN", raw=output_hash_input)
 
 
 def ai_handoff_packet(task: dict) -> dict:
@@ -825,40 +855,30 @@ def require_codex_effective_config_proven(evidence: dict) -> None:
     raise SignalValidationError("HOLD_DEPENDENCY_NATIVE_CODEX_EFFECTIVE_CONFIG_UNVERIFIED")
 
 
-def _native_codex_capability(task, capability, *, native):
-    keys = {"transport", "argv", "model", "effort", "executable_sha256", "version",
-            "help_sha256", "model_catalog_sha256", "codex_home"}
-    if native or "boundary" in capability:
-        require(capability.get("boundary") == _NATIVE_CODEX_BOUNDARY,
-                "HOLD_DEPENDENCY_NATIVE_CODEX_READ_ONLY_BOUNDARY")
-        keys.add("boundary")
-    if native or "host_verification_sha256" in capability:
-        # The trusted grant pins the operator's host review, including system
-        # and account config layers that --ignore-user-config does not cover.
-        verification = capability.get("host_verification_sha256")
-        require(isinstance(verification, str) and re.fullmatch(r"[a-f0-9]{64}", verification) is not None,
-                "HOLD_DEPENDENCY_NATIVE_CODEX_HOST_VERIFICATION")
-        keys.add("host_verification_sha256")
-    _ai_object(capability, keys, "NATIVE_CODEX_CAPABILITY_INVALID")
-    selector = task["provider"]
-    require(all(capability[k] == selector[k] for k in ("model", "effort")), "AI_CAPABILITY_SELECTOR")
-    for key in ("executable_sha256", "help_sha256", "model_catalog_sha256"):
-        require(isinstance(capability[key], str) and re.fullmatch(r"[a-f0-9]{64}", capability[key]) is not None,
+def _native_codex_capability(task, capability):
+    require(capability.get("boundary") == _NATIVE_CODEX_BOUNDARY,
+            "HOLD_DEPENDENCY_NATIVE_CODEX_READ_ONLY_BOUNDARY")
+    common = {"transport", "boundary", "codex_home"}
+    legacy = {"argv", "model", "effort", "version", "executable_sha256",
+              "help_sha256", "model_catalog_sha256", "host_verification_sha256"}
+    if "selector" in capability:
+        _ai_object(capability, common | {"selector", "executable"}, "NATIVE_CODEX_CAPABILITY_INVALID")
+        binary = capability["executable"]
+    else:
+        # Historical approval metadata is accepted for replay compatibility.
+        require(common | {"argv", "model", "effort"} <= capability.keys() <= common | legacy,
                 "NATIVE_CODEX_CAPABILITY_INVALID")
-    version = capability["version"]
-    version_pattern = _NATIVE_CODEX_STABLE_VERSION if native else r"[0-9]+\.[0-9]+\.[0-9]+(?:-[a-z0-9.-]+)?"
-    require(isinstance(version, str) and len(version) <= 64 and re.fullmatch(version_pattern, version) is not None,
-            "NATIVE_CODEX_VERSION_INVALID")
-    argv = capability["argv"]
-    require(isinstance(argv, list) and bool(argv), "AI_ARGV_INVALID")
-    for value in (argv[0], capability["codex_home"]):
+        argv = capability["argv"]
+        require(isinstance(argv, list) and bool(argv), "AI_ARGV_INVALID")
+        binary = argv[0]
+    selector = task["provider"]
+    for value in (binary, capability["codex_home"]):
         require(isinstance(value, str) and 0 < len(value) <= 1024 and "\x00" not in value
                 and Path(value).is_absolute() and not value.startswith(("//", "\\\\")), "NATIVE_CODEX_PATH_INVALID")
-    executable = Path(argv[0])
-    require(executable.name.lower() in ("codex", "codex.exe")
-            and argv == codex_research_argv(argv[0], model=selector["model"], effort=selector["effort"]),
-            "AI_ARGV_INVALID")
-    return executable, Path(capability["codex_home"])
+    executable = Path(binary)
+    argv = codex_research_argv(binary, model=selector["model"], effort=selector["effort"])
+    require(executable.name.lower() == "codex.exe" and capability.get("argv", argv) == argv, "AI_ARGV_INVALID")
+    return executable, Path(capability["codex_home"]), argv
 
 
 def _native_file(path, limit):
@@ -881,13 +901,14 @@ def _native_binary_digest(path):
 
 
 def _check_native_codex_home(executable, home):
+    require(executable.is_file(), "NATIVE_CODEX_BINARY_UNAVAILABLE")
     require(executable.suffix.lower() == ".exe" and executable.resolve(strict=True) == executable
             and home.is_dir() and home.resolve() == home, "NATIVE_CODEX_PATH_INVALID")
     # Auth stays in the dedicated home and is opened only by Codex.
     for name in _NATIVE_CODEX_FORBIDDEN_HOME_ENTRIES:
         require(not os.path.lexists(home / name), "HOLD_DEPENDENCY_NATIVE_CODEX_DEDICATED_HOME")
-    require((home / "auth.json").is_file() and (home / "auth.json").resolve() == home / "auth.json",
-            "NATIVE_CODEX_LOGIN_UNVERIFIED")
+    if not (home / "auth.json").is_file() or (home / "auth.json").resolve() != home / "auth.json":
+        raise AIConnectorRejection("NEEDS_HUMAN", "NATIVE_CODEX_LOGIN_UNVERIFIED", attempted=False)
 
 
 @contextmanager
@@ -1007,43 +1028,19 @@ def _native_codex_process(runner, argv, packet, directory, home, timeout):
     return result
 
 
-def _native_codex_probe(task, cap, runner, executable, home, directory, *, native):
-    require(_native_binary_digest(executable) == cap["executable_sha256"], "NATIVE_CODEX_BINARY_MISMATCH")
-    catalog_path = home / "models_cache.json"
-    require(catalog_path.resolve().parent == home.resolve(), "NATIVE_CODEX_PATH_INVALID")
-    raw = _native_file(catalog_path, AI_MAX_BYTES)
-    require(sha256_bytes(raw) == cap["model_catalog_sha256"], "NATIVE_CODEX_CATALOG_MISMATCH")
-    catalog = parse_json(raw)
-    # Keep the automation hold code for a mismatch with the operator's grant.
-    require(catalog.get("client_version") == cap["version"],
-            "HOLD_DEPENDENCY_NATIVE_CODEX_REVIEWED_VERSION" if native else "NATIVE_CODEX_CATALOG_MISMATCH")
-    require(isinstance(catalog.get("models"), list), "NATIVE_CODEX_CATALOG_MISMATCH")
-    matches = [m for m in catalog["models"] if isinstance(m, dict) and m.get("slug") == cap["model"]]
-    require(len(matches) == 1 and isinstance(matches[0].get("supported_reasoning_levels"), list)
-            and sum(isinstance(level, dict) and level.get("effort") == cap["effort"]
-                    for level in matches[0]["supported_reasoning_levels"]) == 1, "NATIVE_CODEX_SELECTOR_UNSUPPORTED")
-    observations = {"executable_sha256": cap["executable_sha256"],
-                    "model_catalog_sha256": cap["model_catalog_sha256"], "provider": task["provider"]}
-    for name, arguments in (("version", ["--version"]), ("help", ["exec", "--help"]),
-                            ("login", ["login", "status"])):
-        result = _native_codex_process(runner, [cap["argv"][0], *arguments], b"", directory, home, 15)
-        require(result.returncode == 0, "NATIVE_CODEX_PROBE_FAILED")
-        if name == "version":
-            require(result.stdout.decode("utf-8").strip() == "codex-cli " + cap["version"],
-                    "HOLD_DEPENDENCY_NATIVE_CODEX_REVIEWED_VERSION" if native else "NATIVE_CODEX_VERSION_MISMATCH")
-        elif name == "help":
-            help_text = result.stdout.decode("utf-8")
-            flags = {arg for arg in cap["argv"][1:] if arg.startswith("--")}
-            require(all(re.search(r"(?<![\w-])" + flag + r"(?![\w-])", help_text) for flag in flags),
-                    "HOLD_DEPENDENCY_NATIVE_CODEX_EXEC_FLAGS" if native else "NATIVE_CODEX_HELP_MISMATCH")
-            require(sha256_bytes(result.stdout) == cap["help_sha256"], "NATIVE_CODEX_HELP_MISMATCH")
-        else:
-            lines = (result.stdout + b"\n" + result.stderr).decode("utf-8").splitlines()
-            require([line.strip() for line in lines if line.strip()] == ["Logged in using ChatGPT"],
-                    "NATIVE_CODEX_LOGIN_UNVERIFIED")
-        observations[name] = {"stdout_sha256": sha256_bytes(result.stdout),
-                              "stderr_sha256": sha256_bytes(result.stderr)}
-    return observations
+def _native_codex_probe(argv, runner, directory, home):
+    binary = argv[0]
+    help_result = _native_codex_process(runner, [binary, "exec", "--help"], b"", directory, home, 15)
+    require(help_result.returncode == 0, "NATIVE_CODEX_HELP_UNAVAILABLE")
+    flags = {arg for arg in argv[2:] if arg.startswith("--")}
+    help_text = help_result.stdout.decode("utf-8", errors="replace")
+    require(all(re.search(r"(?<![\w-])" + flag + r"(?![\w-])", help_text) for flag in flags),
+            "HOLD_DEPENDENCY_NATIVE_CODEX_EXEC_FLAGS")
+    login = _native_codex_process(runner, [binary, "login", "status"], b"", directory, home, 15)
+    lines = (login.stdout + b"\n" + login.stderr).decode("utf-8", errors="replace").splitlines()
+    if login.returncode != 0 or [line.strip() for line in lines if line.strip()] != ["Logged in using ChatGPT"]:
+        raise AIConnectorRejection("NEEDS_HUMAN", "NATIVE_CODEX_LOGIN_UNVERIFIED")
+    return {"help_sha256": sha256_bytes(help_result.stdout), "auth_mode": "CHATGPT"}
 
 
 def _native_output_schema(task):
@@ -1089,14 +1086,22 @@ def _native_jsonl(raw, *, min_lines, max_lines):
     return [parse_json(line) for line in lines]
 
 
-def _native_codex_events(stdout):
-    first, turn, *body, final = _native_jsonl(stdout, min_lines=4, max_lines=256)
+def _native_codex_events(stdout, *, failed):
+    first, turn, *body, final = _native_jsonl(stdout, min_lines=3 if failed else 4, max_lines=256)
     _ai_object(first, {"type", "thread_id"}, "NATIVE_CODEX_EVENTS_INVALID")
     thread = first["thread_id"]
     require(first["type"] == "thread.started" and isinstance(thread, str)
             and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", thread) is not None
-            and turn == {"type": "turn.started"} and final.get("type") == "turn.completed"
-            and set(final) <= {"type", "usage"}, "NATIVE_CODEX_EVENTS_INVALID")
+            and turn == {"type": "turn.started"}, "NATIVE_CODEX_EVENTS_INVALID")
+    if failed:
+        error = final.get("error")
+        require(final.get("type") == "turn.failed" and isinstance(error, dict)
+                and isinstance(error.get("message"), str)
+                and all(event == {"type": "error", "message": error["message"]} for event in body),
+                "PROCESS_EXIT_UNCERTAIN")
+        return thread, None
+    require(final.get("type") == "turn.completed" and set(final) <= {"type", "usage"},
+            "NATIVE_CODEX_EVENTS_INVALID")
     if "usage" in final:
         usage = final["usage"]
         require(isinstance(usage, dict) and set(usage) <= {"input_tokens", "cached_input_tokens", "output_tokens",
@@ -1119,12 +1124,26 @@ def _native_codex_events(stdout):
     return thread, messages[0]
 
 
-def _native_codex_session(home, thread, started_ns, packet, cap, *, directory, output, native):
+def _native_codex_read_only(context):
+    legacy = context.get("sandbox_policy")
+    if "sandbox_policy" in context and legacy not in ({"type": "read-only"},
+                                                      {"type": "read-only", "network_access": False}):
+        return False
+    if "permission_profile" in context:
+        return context["permission_profile"] == {
+            "type": "managed", "network": "restricted",
+            "file_system": {"type": "restricted", "entries": [
+                {"access": "read", "path": {"type": "special", "value": {"kind": "root"}}},
+            ]},
+        }
+    return legacy is not None
+
+
+def _native_codex_session(home, thread, started_on, packet, selector, *, directory, output):
     root = home / "sessions"
     require(root.resolve().parent == home.resolve(), "NATIVE_CODEX_PATH_INVALID")
-    start, end = (datetime.fromtimestamp(ns / 1_000_000_000, tz=timezone.utc).date()
-                  for ns in (started_ns, time.time_ns()))
-    dates = {day + timedelta(days=offset) for day in (start, end) for offset in (-1, 0, 1)}
+    ended_on = datetime.now(timezone.utc).date()
+    dates = {day + timedelta(days=offset) for day in (started_on, ended_on) for offset in (-1, 0, 1)}
     candidates, scanned = [], 0
     for day in sorted(dates):
         folder = root / day.strftime("%Y/%m/%d")
@@ -1139,11 +1158,10 @@ def _native_codex_session(home, thread, started_ns, packet, cap, *, directory, o
                     candidates.append(Path(entry.path))
     require(len(candidates) == 1, "NATIVE_CODEX_SESSION_UNVERIFIED")
     path = candidates[0]
-    require(path.resolve().parent == path.parent.resolve()
-            and path.stat().st_mtime_ns >= started_ns, "NATIVE_CODEX_SESSION_UNVERIFIED")
+    require(path.resolve().parent == path.parent.resolve(), "NATIVE_CODEX_SESSION_UNVERIFIED")
     rollout = _native_file(path, 4 * AI_MAX_BYTES)
     records = _native_jsonl(rollout, min_lines=3, max_lines=4096)
-    metadata, contexts, users, answers = [], [], [], []
+    metadata, contexts, users, answers, errors = [], [], [], [], []
     for record in records:
         payload = record.get("payload")
         require(isinstance(payload, dict), "NATIVE_CODEX_SESSION_UNVERIFIED")
@@ -1172,171 +1190,272 @@ def _native_codex_session(home, thread, started_ns, packet, cap, *, directory, o
                 require(payload.get("thread_id") == thread and isinstance(item, dict)
                         and item.get("type") in ("UserMessage", "AgentMessage", "Reasoning"),
                         "NATIVE_CODEX_SESSION_EVENT_UNEXPECTED")
+            elif event == "error" or (event == "task_complete" and payload.get("error") is not None):
+                require(output is None, "NATIVE_CODEX_SESSION_EVENT_UNEXPECTED")
+                error = payload if event == "error" else payload["error"]
+                require(isinstance(error, dict) and isinstance(error.get("codex_error_info"), str)
+                        and isinstance(error.get("message"), str),
+                        "PROCESS_EXIT_UNCERTAIN")
+                errors.append((error["codex_error_info"], error["message"]))
             else:
                 require(event in ("task_started", "user_message", "agent_message", "agent_reasoning",
                                   "agent_reasoning_raw_content", "token_count", "task_complete"),
                         "NATIVE_CODEX_SESSION_EVENT_UNEXPECTED")
         else:
             require(kind == "token_usage_record", "NATIVE_CODEX_SESSION_EVENT_UNEXPECTED")
+    # A fresh nonce in the exact prompt binds the rollout to this invocation.
+    # Windows can record a last-write timestamp earlier than the process start clock.
     require(len(metadata) == len(contexts) == 1 and metadata[0].get("id") == thread
-            and metadata[0].get("cli_version") == cap["version"] and metadata[0].get("model_provider") == "openai"
+            and metadata[0].get("model_provider") == "openai"
             and users == [[{"type": "input_text", "text": packet.decode("utf-8")}]], "NATIVE_CODEX_SESSION_UNVERIFIED")
-    context = contexts[0]
-    require(all(context.get(key) == cap[key] for key in ("model", "effort")), "NATIVE_CODEX_SESSION_SELECTOR")
-    if native:
-        meta = metadata[0]
-        require(records[0]["type"] == "session_meta" and meta.get("source") == "exec"
-                and meta.get("session_id") == thread and meta.get("parent_thread_id") is None
-                and meta.get("forked_from_id") is None and not meta.get("dynamic_tools")
-                and Path(meta["cwd"]).resolve() == directory and Path(context["cwd"]).resolve() == directory
-                and context.get("approval_policy") == "never"
-                and context.get("sandbox_policy") in ({"type": "read-only"},
-                    {"type": "read-only", "network_access": False})
-                and answers == [[{"type": "output_text", "text": output}]], "NATIVE_CODEX_SESSION_UNVERIFIED")
+    meta, context = metadata[0], contexts[0]
+    require(context.get("model") == selector["model"], "NATIVE_CODEX_SESSION_MODEL_MISMATCH")
+    require(context.get("effort") == selector["effort"], "NATIVE_CODEX_SESSION_EFFORT_MISMATCH")
+    require(records[0]["type"] == "session_meta" and meta.get("source") == "exec"
+            and meta.get("session_id") == thread and meta.get("parent_thread_id") is None
+            and meta.get("forked_from_id") is None and not meta.get("dynamic_tools")
+            and Path(meta["cwd"]).resolve() == directory and Path(context["cwd"]).resolve() == directory
+            and context.get("approval_policy") == "never"
+            and _native_codex_read_only(context)
+            and answers == ([] if output is None else [[{"type": "output_text", "text": output}]]),
+            "NATIVE_CODEX_SESSION_UNVERIFIED")
+    if output is None:
+        require(errors and len(set(errors)) == 1, "PROCESS_EXIT_UNCERTAIN")
+        code, message = errors[0]
+        if code in ("usage_limit_exceeded", "api_key_spend_limit_exceeded", "project_spend_limit_exceeded",
+                    "organization_spend_limit_exceeded"):
+            raise AIConnectorRejection("QUOTA", "NATIVE_CODEX_QUOTA")
+        if code == "model_not_found":
+            raise AIConnectorRejection("UNSUPPORTED", "NATIVE_CODEX_MODEL_UNSUPPORTED")
+        if code == "unauthorized":
+            raise AIConnectorRejection("NEEDS_HUMAN", "NATIVE_CODEX_LOGIN_UNVERIFIED")
+        if code in ("flex_unavailable", "server_overloaded", "policy_capacity_unavailable"):
+            raise AIConnectorRejection("UNSUPPORTED", "NATIVE_CODEX_PROVIDER_UNAVAILABLE")
+        unsupported_effort = f"Unsupported value: '{selector['effort']}' is not supported with the '{selector['model']}' model."
+        if code == "bad_request" and message.startswith(unsupported_effort + " Supported values are: "):
+            raise AIConnectorRejection("UNSUPPORTED", "NATIVE_CODEX_EFFORT_UNSUPPORTED")
+        raise SignalValidationError("PROCESS_EXIT_UNCERTAIN")
     return sha256_bytes(rollout)
 
 
-def _run_native_codex(task, capability, runner, before_invoke):
-    if task["provider"]["profile"] != "codex-cli":
-        return ai_research_receipt(task, status="UNSUPPORTED", reason="NATIVE_PROVIDER_UNSUPPORTED")
-    native = runner is None
-    if native and not callable(before_invoke):
-        return ai_research_receipt(task, status="UNSUPPORTED", reason="NATIVE_CODEX_RESERVATION_REQUIRED")
+class AIConnectorRejection(OpportunityError):
+    """A bounded rejection established by the runtime or adapter protocol."""
 
-    stdout, reserved, reserving = None, False, False
-    try:
-        executable, home = _native_codex_capability(task, capability, native=native)
-        if native:
-            _check_native_codex_home(executable, home)
-            runner = _bounded_native_codex
-        with tempfile.TemporaryDirectory(prefix="a10-codex-", dir=home if native else None) as temporary:
+    def __init__(self, status: Literal["UNSUPPORTED", "NEEDS_HUMAN", "QUOTA", "FAILED"],
+                 code: str, *, attempted: bool = True):
+        super().__init__(code)
+        self.status = status
+        self.attempted = attempted
+
+
+@dataclass(frozen=True)
+class AIConnectorResponse:
+    """Structured output and acknowledgment verified by the adapter.
+
+    observed_selector is set when the transport attests the selection.
+    """
+
+    output: bytes
+    transport_sha256: str
+    observed_selector: AIProviderSelector | None = None
+    raw_transport: bytes | None = None
+
+
+@dataclass(frozen=True)
+class AIConnectorCall:
+    probe_sha256: str
+    invoke: Callable[[], object]
+    normalize: Callable[[object], AIConnectorResponse]
+
+
+class AIConnectorAdapter(Protocol):
+    """Prepare one bounded call and verify its transport before normalizing output.
+
+    Probe may inspect capabilities and auth status. Invoke sends the task once.
+    Normalize authenticates the response and binds it to that invocation.
+    """
+
+    simulated: bool
+
+    def probe(self, task: A10AIResearchTask, capability: dict) -> ContextManager[AIConnectorCall]: ...
+
+
+class _CodexConnector:
+    def __init__(self, runner=None):
+        self.simulated = runner is not None
+        self.runner = _bounded_native_codex if runner is None else runner
+
+    @contextmanager
+    def probe(self, task, capability):
+        executable, home, argv = _native_codex_capability(task, capability)
+        _check_native_codex_home(executable, home)
+        binary_sha = _native_binary_digest(executable)
+        with tempfile.TemporaryDirectory(prefix="a10-codex-", dir=home) as temporary:
             directory = Path(temporary).resolve()
-            observations = _native_codex_probe(task, capability, runner, executable, home, directory, native=native)
+            observations = _native_codex_probe(argv, self.runner, directory, home)
             handoff = ai_handoff_packet(task)
-            if native:
-                handoff["instruction"] += " Invocation ID " + uuid.uuid4().hex + "."
+            handoff["instruction"] += " Invocation ID " + uuid.uuid4().hex + "."
             packet = canonical_bytes(handoff)
             require(len(packet) <= AI_MAX_BYTES, "AI_OUTPUT_SIZE")
             output_schema = _native_output_schema(task)
             schema_bytes = canonical_bytes(output_schema)
             schema_path = directory / "output-schema.json"
             schema_path.write_bytes(schema_bytes)
-            argv = [str(schema_path) if arg == "{schema}" else arg for arg in capability["argv"]]
-            execution = {"kind": "AUTHENTICATED_CLI_PROBE" if native else "MOCK_AUTHENTICATED_RUNNER",
-                         "capability_sha256": digest(capability),
-                         "probe_sha256": digest({**observations, "prompt_sha256": sha256_bytes(packet),
-                                                "schema_sha256": sha256_bytes(schema_bytes)})}
-            if before_invoke is not None:
-                reserving = True
-                before_invoke(deepcopy(execution))
-                reserving = False
-                reserved = True
-            require(digest(capability) == execution["capability_sha256"], "NATIVE_CODEX_CAPABILITY_INVALID")
-            if native:
+            argv = [str(schema_path) if arg == "{schema}" else arg for arg in argv]
+            probe_sha = digest({**observations, "executable_sha256": binary_sha,
+                                "prompt_sha256": sha256_bytes(packet), "schema_sha256": sha256_bytes(schema_bytes)})
+
+            def invoke():
                 _check_native_codex_home(executable, home)
-            require(_native_binary_digest(executable) == capability["executable_sha256"], "NATIVE_CODEX_BINARY_MISMATCH")
-            catalog_path = home / "models_cache.json"
-            require(catalog_path.resolve().parent == home.resolve(), "NATIVE_CODEX_PATH_INVALID")
-            require(sha256_bytes(_native_file(catalog_path, AI_MAX_BYTES)) == capability["model_catalog_sha256"],
-                    "NATIVE_CODEX_CATALOG_MISMATCH")
-            started_ns = time.time_ns()
-            reserved = True  # Injected runners can omit a durable journal.
-            result = _native_codex_process(runner, argv, packet, directory, home, 60)
-            stdout = result.stdout
+                require(_native_binary_digest(executable) == binary_sha, "NATIVE_CODEX_BINARY_MISMATCH")
+                started_on = datetime.now(timezone.utc).date()
+                return started_on, _native_codex_process(self.runner, argv, packet, directory, home, 60)
+
+            def normalize(invocation):
+                started_on, result = invocation
+                thread, output = _native_codex_events(result.stdout, failed=result.returncode != 0)
+                rollout_sha = _native_codex_session(home, thread, started_on, packet, task["provider"],
+                                                   directory=directory, output=output)
+                raw = output.encode("utf-8")
+                require(Draft202012Validator(output_schema).is_valid(parse_json(raw)), "NATIVE_CODEX_SCHEMA_MISMATCH")
+                proof = digest({"thread_id": thread, "rollout_sha256": rollout_sha,
+                                "stdout_sha256": sha256_bytes(result.stdout), "output_sha256": sha256_bytes(raw)})
+                return AIConnectorResponse(raw, proof, task["provider"], result.stdout)
+
+            yield AIConnectorCall(probe_sha, invoke, normalize)
+
+
+class _MockStdioConnector:
+    """Compatibility transport for callers using the historical fake subprocess."""
+
+    simulated = True
+
+    def __init__(self, runner, executable):
+        self.runner = runner
+        self.executable = executable
+
+    @contextmanager
+    def probe(self, task, capability):
+        keys = {"argv", "model", "effort", "structured_json_stdio", "read_only", "no_tools"}
+        require(keys <= capability.keys() <= keys | {"installed_probe"}, "CAPABILITY_REJECTED")
+        require(all(capability[k] is True for k in ("structured_json_stdio", "read_only", "no_tools")),
+                "CAPABILITY_REJECTED")
+        argv = capability["argv"]
+        require(isinstance(argv, list) and 1 < len(argv) <= 64
+                and all(isinstance(a, str) and 0 < len(a) <= 1024 and "\x00" not in a for a in argv),
+                "CAPABILITY_REJECTED")
+        model, effort = task["provider"]["model"], task["provider"]["effort"]
+        require(argv[0] in (self.executable, self.executable + ".exe") and model in argv
+                and (effort in argv or "model_reasoning_effort=" + json.dumps(effort) in argv), "CAPABILITY_REJECTED")
+        packet = canonical_bytes(ai_handoff_packet(task))
+
+        def invoke():
+            try:
+                return self.runner(list(argv), input=packet, capture_output=True, shell=False, timeout=60, check=False)
+            except FileNotFoundError:
+                raise AIConnectorRejection("UNSUPPORTED", "EXECUTABLE_UNAVAILABLE", attempted=False) from None
+            except PermissionError:
+                raise AIConnectorRejection("FAILED", "PROCESS_PERMISSION_DENIED", attempted=False) from None
+
+        def normalize(result):
             require(result.returncode == 0, "PROCESS_EXIT_UNCERTAIN")
-            thread, output = _native_codex_events(stdout)
-            rollout_sha = _native_codex_session(home, thread, started_ns, packet, capability,
-                                               directory=directory, output=output, native=native)
-            raw = output.encode("utf-8")
-            require(Draft202012Validator(output_schema).is_valid(parse_json(raw)), "NATIVE_CODEX_SCHEMA_MISMATCH")
-            if native:
-                execution["session_sha256"] = digest({"thread_id": thread, "rollout_sha256": rollout_sha,
-                    "probe_sha256": execution["probe_sha256"], "stdout_sha256": sha256_bytes(stdout),
-                    "output_sha256": sha256_bytes(raw)})
-            return _parse_ai_research_output(task, raw, effect="PROCESS_INVOKED", execution=execution,
-                                             native_stdout=stdout)
-    except OpportunityError as exc:
-        if reserving:
-            raise  # Reservation/storage failures belong to the job owner.
-        reason = exc.code
-    except subprocess.TimeoutExpired:
-        if reserving:
-            raise
-        reason = "NATIVE_CODEX_PROCESS_TIMEOUT" if reserved else "NATIVE_CODEX_PROBE_TIMEOUT"
-    except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
-        if reserving:
-            raise
-        reason = "INVOCATION_UNCERTAIN" if reserved else "NATIVE_CODEX_PROBE_FAILED"
-    return ai_research_receipt(task, status="UNKNOWN_EFFECT" if reserved else "UNSUPPORTED", reason=reason,
-                               effect="UNKNOWN" if reserved else "NOT_ATTEMPTED", raw=stdout)
+            require(isinstance(result.stdout, bytes) and len(result.stdout) <= AI_MAX_BYTES, "AI_OUTPUT_SIZE")
+            return AIConnectorResponse(result.stdout, sha256_bytes(result.stdout))
+
+        yield AIConnectorCall(digest({"runner": "INJECTED_MOCK"}), invoke, normalize)
+
+
+_AI_CONNECTOR_ADAPTERS: dict[tuple[str, str], Callable[..., AIConnectorAdapter]] = {
+    ("codex-cli", NATIVE_CODEX_TRANSPORT): _CodexConnector,
+}
+_LEGACY_MOCK_EXECUTABLES = {"codex-cli": "codex", "antigravity-cli": "antigravity"}
 
 
 def run_ai_research(task: dict, *, permissions=(), capability: dict | None = None,
                     runner=None, attended_output: bytes | None = None, before_invoke=None) -> A10AIResearchReceipt:
-    """Dispatch by an operator-issued transport capability; runner is test-only.
+    """Use one source-registered adapter for the operator's exact selector."""
+    task = deepcopy(validate_ai_research_task(task))
 
-    A10CodexExecJsonl.v1 pins the argv template, selector, native binary,
-    version, help and model cache bytes, and a dedicated Codex home. The native
-    route requires the reviewed Windows read-only boundary and a durable
-    before_invoke reservation from the caller. The job prevents child processes;
-    the read-only Codex configuration restricts writes and external tools.
-    JSONL and rollout checks independently reject unexpected activity.
-    Legacy JSON stdio remains available to injected test runners.
-    """
-    validate_ai_research_task(task)
     def stopped(status, reason):
         return ai_research_receipt(task, status=status, reason=reason)
+
     if "AI_RESEARCH" not in permissions:
         return stopped("NEEDS_HUMAN", "PERMISSION_DENIED")
-    if task["provider"]["profile"] == "chatgpt-attended":
+    provider = task["provider"]["profile"]
+    if provider == "chatgpt-attended":
         return (parse_ai_research_output(task, attended_output, effect="NOT_ATTEMPTED")
                 if attended_output is not None else stopped("NEEDS_HUMAN", "ATTENDED_HANDOFF_REQUIRED"))
     if attended_output is not None:
         return stopped("FAILED", "ATTENDED_OUTPUT_WRONG_PROVIDER")
     if capability is None:
         return stopped("UNSUPPORTED", "CAPABILITY_REQUIRED")
-    if isinstance(capability, dict) and "transport" in capability:
-        if capability["transport"] != NATIVE_CODEX_TRANSPORT:
-            return stopped("UNSUPPORTED", "AI_TRANSPORT_UNSUPPORTED")
-        return _run_native_codex(task, deepcopy(capability), runner, before_invoke)
+
+    invoked, reserving = False, False
     try:
-        keys = {"argv", "model", "effort", "structured_json_stdio", "read_only", "no_tools"}
-        require(isinstance(capability, dict) and keys <= set(capability) <= keys | {"installed_probe"}, "AI_CAPABILITY_INVALID")
-        require(all(capability[k] is True for k in ("structured_json_stdio", "read_only", "no_tools")), "AI_CAPABILITY_INVALID")
-        require(all(capability[k] == task["provider"][k] for k in ("model", "effort")), "AI_CAPABILITY_SELECTOR")
-        argv = capability["argv"]
-        require(isinstance(argv, list) and 1 < len(argv) <= 64
-                and all(isinstance(a, str) and 0 < len(a) <= 1024 and "\x00" not in a for a in argv), "AI_ARGV_INVALID")
-        expected = "codex" if task["provider"]["profile"] == "codex-cli" else "antigravity"
-        require(argv[0] in (expected, expected + ".exe") and task["provider"]["model"] in argv, "AI_ARGV_SELECTOR")
-        effort = task["provider"]["effort"]
-        require(effort in argv or "model_reasoning_effort=" + json.dumps(effort) in argv, "AI_ARGV_EFFORT")
-    except OpportunityError:
-        return stopped("UNSUPPORTED", "CAPABILITY_REJECTED")
-    if runner is None:
-        if task["provider"]["profile"] != "codex-cli":
-            return stopped("UNSUPPORTED", "NATIVE_PROVIDER_UNSUPPORTED")
-        return stopped("UNSUPPORTED", "INSTALLED_CAPABILITY_OR_AUTHENTICATION_UNAVAILABLE")
-    execution = {"kind": "MOCK_AUTHENTICATED_RUNNER", "capability_sha256": digest(capability),
-                 "probe_sha256": digest({"runner": "INJECTED_MOCK"})}
-    packet = canonical_bytes(ai_handoff_packet(task))
-    if before_invoke is not None:
-        before_invoke(deepcopy(execution))
-    try:
-        result = runner(list(argv), input=packet, capture_output=True, shell=False, timeout=60, check=False)
-        # A nonzero exit (including quota without structured output) cannot prove
-        # absence of an effect. Only a valid typed response resolves its status.
-        receipt = parse_ai_research_output(task, result.stdout, effect="PROCESS_INVOKED", execution=execution)
-        if result.returncode != 0 and receipt["status"] == "OK":
-            return ai_research_receipt(task, status="UNKNOWN_EFFECT", reason="PROCESS_EXIT_UNCERTAIN",
-                                       effect="UNKNOWN", raw=result.stdout)
-        return receipt
-    except FileNotFoundError:
-        return stopped("UNSUPPORTED", "EXECUTABLE_UNAVAILABLE")
-    except PermissionError:
-        return stopped("FAILED", "PROCESS_PERMISSION_DENIED")
-    except (subprocess.SubprocessError, OSError, ValueError, TypeError, AttributeError):
-        return ai_research_receipt(task, status="UNKNOWN_EFFECT", reason="INVOCATION_UNCERTAIN", effect="UNKNOWN")
+        require(isinstance(capability, dict), "CAPABILITY_REJECTED")
+        _ai_bounded(capability)
+        capability = deepcopy(capability)
+        transport = capability.get("transport")
+        if "transport" in capability:
+            require(isinstance(transport, str), "AI_TRANSPORT_UNSUPPORTED")
+            factory = _AI_CONNECTOR_ADAPTERS.get((provider, transport))
+            if factory is None:
+                reason = ("AI_TRANSPORT_UNSUPPORTED" if any(name == provider for name, _ in _AI_CONNECTOR_ADAPTERS)
+                          else "NATIVE_PROVIDER_UNSUPPORTED")
+                return stopped("UNSUPPORTED", reason)
+            adapter = factory(runner)
+        elif runner is not None and provider in _LEGACY_MOCK_EXECUTABLES:
+            adapter = _MockStdioConnector(runner, _LEGACY_MOCK_EXECUTABLES[provider])
+        else:
+            reason = ("INSTALLED_CAPABILITY_OR_AUTHENTICATION_UNAVAILABLE"
+                      if any(name == provider for name, _ in _AI_CONNECTOR_ADAPTERS) else "NATIVE_PROVIDER_UNSUPPORTED")
+            return stopped("UNSUPPORTED", reason)
+        require(ai_connector_selector(provider, capability) == task["provider"], "AI_CAPABILITY_SELECTOR")
+        simulated = runner is not None or adapter.simulated
+        if not simulated:
+            require(callable(before_invoke), "AI_CONNECTOR_RESERVATION_REQUIRED")
+        with adapter.probe(deepcopy(task), deepcopy(capability)) as call:
+            require(isinstance(call.probe_sha256, str) and re.fullmatch(r"[a-f0-9]{64}", call.probe_sha256),
+                    "AI_CONNECTOR_PROBE_INVALID")
+            execution = {"kind": "MOCK_AUTHENTICATED_RUNNER" if simulated else "AUTHENTICATED_CONNECTOR",
+                         "capability_sha256": digest(capability), "probe_sha256": call.probe_sha256}
+            if before_invoke is not None:
+                reserving = True
+                before_invoke(deepcopy(execution))
+                reserving = False
+            invoked = True
+            response = call.normalize(call.invoke())
+            require(isinstance(response.transport_sha256, str)
+                    and re.fullmatch(r"[a-f0-9]{64}", response.transport_sha256), "AI_TRANSPORT_ACK_REQUIRED")
+            require(response.observed_selector is None or response.observed_selector == task["provider"],
+                    "AI_ATTESTED_SELECTOR_MISMATCH")
+            require(response.raw_transport is None or
+                    isinstance(response.raw_transport, bytes) and len(response.raw_transport) <= AI_MAX_BYTES,
+                    "AI_OUTPUT_SIZE")
+            execution["session_sha256"] = digest({"task_sha256": digest(task), "probe_sha256": call.probe_sha256,
+                                                  "transport_sha256": response.transport_sha256})
+            return _parse_ai_research_output(task, response.output, effect="PROCESS_INVOKED", execution=execution,
+                reason="CONNECTOR_MOCK_VERIFIED" if simulated else "CONNECTOR_VERIFIED",
+                raw_transport=response.raw_transport)
+    except AIConnectorRejection as exc:
+        if reserving:
+            raise
+        return ai_research_receipt(task, status=exc.status, reason=exc.code,
+                                   effect="PROCESS_INVOKED" if invoked and exc.attempted else "NOT_ATTEMPTED")
+    except OpportunityError as exc:
+        if reserving:
+            raise  # The job owner handles reservation and journal failures.
+        reason = exc.code
+    except subprocess.TimeoutExpired:
+        if reserving:
+            raise
+        reason = "AI_CONNECTOR_PROCESS_TIMEOUT" if invoked else "AI_CONNECTOR_PROBE_TIMEOUT"
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
+        if reserving:
+            raise
+        reason = "INVOCATION_UNCERTAIN" if invoked else "AI_CONNECTOR_PROBE_FAILED"
+    return ai_research_receipt(task, status="UNKNOWN_EFFECT" if invoked else "UNSUPPORTED", reason=reason,
+                               effect="UNKNOWN" if invoked else "NOT_ATTEMPTED")
 
 
 class A10OpportunityDecision(TypedDict):
@@ -1452,9 +1571,9 @@ def make_opportunity_decision(*, proposals: list[dict], job_id: str, manifest_sh
                                human_identity: dict | None = None) -> A10OpportunityDecision:
     """Build from replayed M04 and trusted runtime inputs, never model identity claims.
 
-    SYSTEM is the explicit offline policy. BRAIN requires the runtime's exact
-    installed/authenticated CLI probe (or labelled mock runner), a strict chooser
-    and its bound receipt. An attended self-report cannot become BRAIN. HUMAN
+    SYSTEM is the explicit offline policy. BRAIN requires an authenticated
+    connector receipt (or explicitly labelled mock) with a bound structured
+    choice. An attended self-report cannot become BRAIN. HUMAN
     requires a separate trusted runner identity attestation for the exact user
     selection; neither the job nor a provider response can supply that identity.
     Local hashes detect alteration; they are not cryptographic provider attestation.
