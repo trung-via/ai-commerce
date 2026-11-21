@@ -65,6 +65,9 @@ jobs:
         shell: pwsh
         env:
           HOSTOPS_PERSONAL_MODE: ${{ github.event_name == 'issues' && 'read' || 'write' }}
+          # A10-O2b READ only: no activation for unrelated HostOps issues.
+          HOSTOPS_A10_READINESS_DISPATCH: ${{ github.event_name == 'issues' && github.event.action == 'opened' && startsWith(github.event.issue.title, '[HOSTOPS READ] A10-O2b ') && 'A10CodexHostReadiness.v1' || '' }}
+          GITHUB_WORKFLOW_SHA: ${{ github.event_name == 'issues' && github.event.action == 'opened' && startsWith(github.event.issue.title, '[HOSTOPS READ] A10-O2b ') && github.sha || '' }}
         run: |
           $env:PYTHONPATH = Join-Path $env:GITHUB_WORKSPACE "src"
           python -m ai_commerce.hostops_v3.personal --mode "$env:HOSTOPS_PERSONAL_MODE" --output "$env:RUNNER_TEMP\personal-hostops-result.json"
@@ -310,6 +313,100 @@ jobs:
                   approval_channel:'CHATGPT_TO_AI_COMMERCE_ISSUE',
                   source_sha:record.source_sha,
                 });
+              }
+            }
+            // One-time A10-O2b HostOps READ sanitizer. No inherited generic projection.
+            let a10Requested = false;
+            try {
+              const issue = context.payload?.issue, req = JSON.parse(issue?.body || "");
+              a10Requested = context.eventName === "issues" &&
+                context.payload?.action === "opened" &&
+                context.payload?.sender?.login === context.repo.owner &&
+                issue?.user?.login === context.repo.owner &&
+                typeof issue?.title === "string" &&
+                issue.title.startsWith("[HOSTOPS READ] A10-O2b ") &&
+                req && typeof req === "object" && !Array.isArray(req) &&
+                Object.keys(req).length === 3 &&
+                ["schema","operation","parameters"].every(k => Object.prototype.hasOwnProperty.call(req,k)) &&
+                req.schema === "ai-commerce.personal-hostops.v1" &&
+                req.operation === "a10_codex_native_readiness" &&
+                req.parameters && typeof req.parameters === "object" &&
+                !Array.isArray(req.parameters) && Object.keys(req.parameters).length === 0;
+            } catch (_) { /* Invalid Issue never authorizes READ. */ }
+            if (a10Requested || record.operation === "a10_codex_native_readiness") {
+              const fields = ["status","code","operation","a10_readiness","issue_number",
+                              "source_sha","approval_channel","remote_shell_enabled"];
+              const codes = {
+                binary:["OBSERVED","NOT_FOUND_IN_SCOPE","AMBIGUOUS","UNSAFE"],
+                version:["MATCHES_SOURCE_VERSION","DIFFERS_FROM_SOURCE_VERSION"],
+                root_help:["USAGE_OBSERVED"],exec_help:["USAGE_OBSERVED"],
+                root_flags:["DECLARED","NOT_DECLARED"],exec_flags:["DECLARED","NOT_DECLARED"],
+                config_override_flags:["DECLARED","NOT_DECLARED"],
+                feature_disable_flag:["DECLARED","NOT_DECLARED"],
+                catalog:["DEFAULT_CACHE_PRESENT","DEFAULT_CACHE_ABSENT"],
+                system_config:[],account_config:[],disabled_features:[],read_only_policy:[]
+              };
+              const checkKeys = Object.keys(codes);
+              const nestedKeys = ["schema_version","state",...checkKeys,"observed_binary_sha256",
+                                  "native_inference_executed","public_observation_sha256"];
+              const row = record.a10_readiness;
+              const exact = (v, keys) => v && typeof v === "object" && !Array.isArray(v) &&
+                Object.keys(v).length === keys.length && Object.keys(v).every(k => keys.includes(k));
+              const sha40 = v => typeof v === "string" && /^[0-9a-f]{40}$/.test(v);
+              const sha64 = v => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
+              const canonical = typeof rawNativeText === "string" &&
+                rawNativeText.trim() === JSON.stringify(record) &&
+                Buffer.byteLength(rawNativeText,"utf8") <= 8192;
+              const checksValid = exact(row,nestedKeys) && checkKeys.every(k =>
+                typeof row[k] === "string" && (row[k] === "UNKNOWN" || codes[k].includes(row[k])));
+              const identity = a10Requested && canonical && exact(record,fields) &&
+                record.operation === "a10_codex_native_readiness" &&
+                record.issue_number === context.issue.number && sha40(record.source_sha) &&
+                record.source_sha === context.sha &&
+                record.approval_channel === "CHATGPT_TO_AI_COMMERCE_ISSUE" &&
+                record.remote_shell_enabled === false && checksValid &&
+                row.schema_version === "A10CodexHostReadiness.v1" &&
+                ["SOURCE_PRESENT","HOST_UNVERIFIED","HOST_UNSUPPORTED"].includes(row.state) &&
+                row.native_inference_executed === false &&
+                ((row.binary === "OBSERVED" && sha64(row.observed_binary_sha256)) ||
+                 (row.binary !== "OBSERVED" && row.observed_binary_sha256 === null));
+              const cliConsistent = row &&
+                (row.root_help === "USAGE_OBSERVED" || row.root_flags === "UNKNOWN") &&
+                (row.exec_help === "USAGE_OBSERVED" ||
+                 ["exec_flags","config_override_flags","feature_disable_flag"].every(k => row[k] === "UNKNOWN")) &&
+                (row.binary === "OBSERVED" ||
+                 ["version","root_help","exec_help","root_flags","exec_flags",
+                  "config_override_flags","feature_disable_flag"].every(k => row[k] === "UNKNOWN"));
+              const sourceOnly = row && row.state === "SOURCE_PRESENT" &&
+                record.status === "BLOCKED" && record.code === "A10_PROTECTED_WORKFLOW_REQUIRED" &&
+                row.public_observation_sha256 === null && row.observed_binary_sha256 === null &&
+                checkKeys.every(k => row[k] === "UNKNOWN");
+              const nativeRead = row && row.state !== "SOURCE_PRESENT" &&
+                record.status === "HOLD" && record.code === row.state &&
+                sha64(row.public_observation_sha256) &&
+                ((row.state === "HOST_UNSUPPORTED") ===
+                 (row.binary === "OBSERVED" && row.version === "DIFFERS_FROM_SOURCE_VERSION"));
+              let digestValid = false;
+              if (identity && nativeRead) {
+                const copy = JSON.parse(JSON.stringify(record));
+                delete copy.a10_readiness.public_observation_sha256;
+                const sorted = v => Array.isArray(v) ? v.map(sorted) :
+                  v && typeof v === "object" ?
+                  Object.fromEntries(Object.keys(v).sort().map(k => [k,sorted(v[k])])) : v;
+                digestValid = require("crypto").createHash("sha256")
+                  .update(JSON.stringify(sorted(copy)),"ascii").digest("hex") === row.public_observation_sha256;
+              }
+              const valid = identity && cliConsistent && (sourceOnly || (nativeRead && digestValid));
+              for (const key of Object.keys(sanitized)) delete sanitized[key];
+              if (!valid) {
+                Object.assign(sanitized,{status:"BLOCKED",operation:"a10_codex_native_readiness",
+                  code:"INVALID_PUBLIC_A10_READINESS_RECEIPT"});
+              } else {
+                Object.assign(sanitized,{status:record.status,code:record.code,
+                  operation:"a10_codex_native_readiness",issue_number:context.issue.number,
+                  source_sha:record.source_sha,approval_channel:"CHATGPT_TO_AI_COMMERCE_ISSUE",
+                  remote_shell_enabled:false,
+                  a10_readiness:Object.fromEntries(nestedKeys.map(k => [k,row[k]]))});
               }
             }
             const result = 'AI_COMMERCE_PERSONAL_HOSTOPS_RESULT_V1\n' + JSON.stringify(sanitized);

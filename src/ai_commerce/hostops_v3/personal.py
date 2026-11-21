@@ -10,7 +10,7 @@ import argparse
 import asyncio
 import base64
 from collections import namedtuple
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -52,6 +52,8 @@ MAX_READ = 8192
 MAX_WRITE = 2048
 _CLEAN_AUTOSTART = "install_clean_9444_autostart"
 _CLEAN_RUNTIME_PROBE = "clean_9444_runtime_probe"
+_A10_READINESS = "a10_codex_native_readiness"
+_A10_READINESS_SCHEMA = "A10CodexHostReadiness.v1"
 _ACQUISITION_SOURCE = Path("src/ai_commerce/remote/chrome_acquisition.py")
 
 # Source-owned PUBLIC vocabulary. Private config is locally validated by the
@@ -186,7 +188,12 @@ def parse_event(event, mode):
     params = _dict(request["parameters"])
     operation = request["operation"]
     if mode == "read":
-        if operation in ("inventory", "runner_runtime_inventory", "cdp_9333_status", "cdp_9444_topology",
+        if operation == _A10_READINESS:
+            if params:
+                deny("INVALID_PARAMETERS")
+            if number > 2**53 - 1:
+                deny("ISSUE_OWNER_OR_STATE_DENIED")
+        elif operation in ("inventory", "runner_runtime_inventory", "cdp_9333_status", "cdp_9444_topology",
                          "cdp_9444_config_registry", "standing_read_diagnostics", _CLEAN_RUNTIME_PROBE):
             # Runtime inventory has fixed, compiled-in three-runner targets.
             # The public Issue cannot choose a task, executable or command.
@@ -4405,9 +4412,343 @@ def hostops_exec_v1_cli(
     return 2
 
 
+_A10ReadinessState = Literal["SOURCE_PRESENT", "HOST_UNVERIFIED", "HOST_UNSUPPORTED", "HOST_READINESS_VERIFIED"]
+_A10_CHECK_CODES = {
+    "binary": ("OBSERVED", "NOT_FOUND_IN_SCOPE", "AMBIGUOUS", "UNSAFE"),
+    "version": ("MATCHES_SOURCE_VERSION", "DIFFERS_FROM_SOURCE_VERSION"),
+    "root_help": ("USAGE_OBSERVED",),
+    "exec_help": ("USAGE_OBSERVED",),
+    "root_flags": ("DECLARED", "NOT_DECLARED"),
+    "exec_flags": ("DECLARED", "NOT_DECLARED"),
+    "config_override_flags": ("DECLARED", "NOT_DECLARED"),
+    "feature_disable_flag": ("DECLARED", "NOT_DECLARED"),
+    "catalog": ("DEFAULT_CACHE_PRESENT", "DEFAULT_CACHE_ABSENT"),
+    "system_config": (),
+    "account_config": (),
+    "disabled_features": (),
+    "read_only_policy": (),
+}
+# Adding a pin requires independent review of the exact release and its
+# version/help behavior. Workflow registration needs only the dispatch marker.
+_A10_REVIEWED_BINARY_PINS: frozenset[str] = frozenset()
+_A10_HELP_OPTION = re.compile(r"(?m)^ {2,8}(?:-[A-Za-z], )?(--[a-z][a-z0-9-]*)(?=[ \t=,]|$)")
+_A10_CONFIG_FLAGS = frozenset({"--config", "--ignore-user-config", "--strict-config"})
+_A10_PROBE_ARGS = (("--version",), ("--help",), ("exec", "--help"))
+_A10_PROBE_TIMEOUT = 5
+_A10_PROBE_MAX_BYTES = 32768
+
+
+def _a10_readiness_receipt(issue_number, source_sha=None, *, observations=None):
+    """Public observation checksum only. A host-verification grant is separate."""
+    if type(issue_number) is not int or not 0 < issue_number <= 2**53 - 1:
+        deny("ISSUE_OWNER_OR_STATE_DENIED")
+    if source_sha is not None or observations is not None:
+        if type(source_sha) is not str or not re.fullmatch(r"[0-9a-f]{40}", source_sha):
+            deny("PROTECTED_HOSTOPS_ONLY")
+    observed = observations if observations is not None else {}
+    checks = dict.fromkeys(_A10_CHECK_CODES, "UNKNOWN")
+    for field, allowed in _A10_CHECK_CODES.items():
+        value = observed.get(field)
+        if type(value) is str and value in allowed:
+            checks[field] = value
+    binary_sha = observed.get("observed_binary_sha256")
+    if (checks["binary"] != "OBSERVED" or type(binary_sha) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", binary_sha) is None):
+        binary_sha = None
+        if checks["binary"] == "OBSERVED":
+            checks["binary"] = "UNKNOWN"
+
+    state: _A10ReadinessState
+    if observations is None:
+        state = "SOURCE_PRESENT"
+    elif binary_sha and checks["version"] == "DIFFERS_FROM_SOURCE_VERSION":
+        state = "HOST_UNSUPPORTED"
+    else:
+        # Help declarations cannot establish effective config, feature disable
+        # behavior or sandbox enforcement. HOST_READINESS_VERIFIED is reserved.
+        state = "HOST_UNVERIFIED"
+    readiness = {
+        "schema_version": _A10_READINESS_SCHEMA, "state": state, **checks,
+        "observed_binary_sha256": binary_sha, "native_inference_executed": False,
+    }
+    # The future protected sanitizer must validate this exact envelope and
+    # closed nested vocabulary independently, before any generic projection.
+    result = {
+        "status": "BLOCKED" if state == "SOURCE_PRESENT" else "HOLD",
+        "code": "A10_PROTECTED_WORKFLOW_REQUIRED" if state == "SOURCE_PRESENT" else state,
+        "operation": _A10_READINESS, "a10_readiness": readiness, "issue_number": issue_number,
+        "source_sha": source_sha, "approval_channel": "CHATGPT_TO_AI_COMMERCE_ISSUE",
+        "remote_shell_enabled": False,
+    }
+    digest = None
+    if observations is not None:
+        # Canonical sorted-key JSON binds the observed binary bytes by SHA-256
+        # to this public projection, Issue and source. No private bytes are hashed.
+        canonical = json.dumps(result, sort_keys=True, separators=(",", ":")).encode("ascii")
+        digest = hashlib.sha256(canonical).hexdigest()
+    readiness["public_observation_sha256"] = digest
+    return result
+
+
+def _a10_local_path(raw):
+    """Recognize ordinary drive-letter paths without accessing the filesystem."""
+    if (type(raw) is not str or len(raw) > 512
+            or re.fullmatch(r'[a-zA-Z]:[\\/][^<>:"|?*\x00-\x1f]*', raw) is None):
+        return None
+    parts = re.split(r"[\\/]", raw[3:].rstrip("\\/"))
+    if any(part.endswith((".", " ")) or re.fullmatch(
+        r"(?i:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[1-9¹²³])", part.split(".")[0].rstrip()
+    ) for part in parts):
+        return None
+    return PureWindowsPath(raw)
+
+
+def _a10_install_candidates(env):
+    # One native filename per bounded PATH entry, plus fixed layouts from the
+    # npm distribution. Never use cwd, PATHEXT, an alias, or recursive search.
+    search = env.get("PATH", "")
+    if len(search) > 16384 or search.count(";") >= 64:
+        raise ValueError("A10_INSTALL_SEARCH_UNBOUNDED")
+    local_data = _a10_local_path(env.get("LOCALAPPDATA"))
+    aliases = () if local_data is None else (
+        local_data / "Microsoft/WindowsApps", local_data / "Microsoft/WinGet/Links",
+    )
+    candidates = {}
+    for entry in search.split(";"):
+        if len(entry) >= 2 and entry[0] == entry[-1] == '"':
+            entry = entry[1:-1]
+        path = _a10_local_path(entry)
+        if path is not None and not any(path == alias or alias in path.parents for alias in aliases):
+            candidates[path / "codex.exe"] = None
+    app_data = _a10_local_path(env.get("APPDATA"))
+    if app_data is not None:
+        packages = app_data / "npm/node_modules/@openai"
+        for arch, target in (("x64", "x86_64"), ("arm64", "aarch64")):
+            platform_package = f"codex-win32-{arch}"
+            for package in (packages / "codex", packages / platform_package,
+                            packages / "codex/node_modules/@openai" / platform_package):
+                for layout in ("codex", "bin"):
+                    candidates[package / "vendor" / f"{target}-pc-windows-msvc" / layout / "codex.exe"] = None
+    return tuple(candidates)
+
+
+@contextmanager
+def _a10_pin_local_path(path, *, directory=False, read=False):
+    """Hold the directory chain and deny executable writes or rename during observation."""
+    import ctypes
+    from ctypes import wintypes
+
+    class FileInfo(ctypes.Structure):
+        _fields_ = [
+            ("attributes", wintypes.DWORD),
+            ("created", wintypes.FILETIME), ("accessed", wintypes.FILETIME), ("written", wintypes.FILETIME),
+            ("volume_serial", wintypes.DWORD), ("size_high", wintypes.DWORD), ("size_low", wintypes.DWORD),
+            ("links", wintypes.DWORD), ("index_high", wintypes.DWORD), ("index_low", wintypes.DWORD),
+        ]
+
+    if path is None or _a10_local_path(str(path)) != path:
+        raise OSError("A10_PATH_UNSAFE")
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    drive_type = kernel.GetDriveTypeW
+    drive_type.argtypes, drive_type.restype = (wintypes.LPCWSTR,), wintypes.UINT
+    if drive_type(path.anchor) != 3:  # DRIVE_FIXED
+        raise OSError("A10_PATH_UNSAFE")
+    create = kernel.CreateFileW
+    create.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                       wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+    create.restype = wintypes.HANDLE
+    close = kernel.CloseHandle
+    close.argtypes, close.restype = (wintypes.HANDLE,), wintypes.BOOL
+    handle_info = kernel.GetFileInformationByHandle
+    handle_info.argtypes = (wintypes.HANDLE, ctypes.POINTER(FileInfo))
+    handle_info.restype = wintypes.BOOL
+    with ExitStack() as handles:
+        for item in reversed((path, *path.parents)):
+            is_directory = directory or item != path
+            if is_directory:
+                # Attribute-only opens do not enforce a Windows share lock.
+                access = 0x81  # FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES
+            else:
+                access = 0x80000000 if read else 0x80  # GENERIC_READ or FILE_READ_ATTRIBUTES
+            share = 1  # FILE_SHARE_READ only. Deny replacement and reparse mutation.
+            # OPEN_EXISTING, OPEN_REPARSE_POINT | BACKUP_SEMANTICS.
+            handle = create(str(item), access, share, None, 3, 0x02200000, None)
+            if handle in (None, ctypes.c_void_p(-1).value):
+                if ctypes.get_last_error() in (2, 3):
+                    raise FileNotFoundError("A10_PATH_ABSENT")
+                raise OSError("A10_PATH_UNSAFE")
+            handles.callback(close, handle)
+            info = FileInfo()
+            if (not handle_info(handle, ctypes.pointer(info))
+                    or info.attributes & (stat.FILE_ATTRIBUTE_REPARSE_POINT | stat.FILE_ATTRIBUTE_DEVICE)
+                    or bool(info.attributes & stat.FILE_ATTRIBUTE_DIRECTORY) != is_directory
+                    or (not is_directory and info.links != 1)):
+                raise OSError("A10_PATH_UNSAFE")
+        yield Path(path)
+
+
+@contextmanager
+def _a10_find_executable(candidates):
+    with ExitStack() as holds:
+        executable = None
+        for candidate in candidates:
+            try:
+                present = holds.enter_context(_a10_pin_local_path(candidate, read=True))
+            except FileNotFoundError:
+                continue
+            except OSError:
+                yield "UNSAFE", None
+                return
+            if executable is not None:
+                yield "AMBIGUOUS", None
+                return
+            executable = present
+        yield ("NOT_FOUND_IN_SCOPE", None) if executable is None else ("UNKNOWN", executable)
+
+
+def _a10_is_native_executable(path):
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    binary_type = kernel.GetBinaryTypeW
+    binary_type.argtypes = (wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD))
+    binary_type.restype = wintypes.BOOL
+    kind = wintypes.DWORD()
+    # Win32 metadata classification only. SCS_32BIT_BINARY / SCS_64BIT_BINARY.
+    return bool(binary_type(str(path), ctypes.byref(kind))) and kind.value in (0, 6)
+
+
+def _a10_default_catalog_state():
+    # Probe attributes of this one conventional cache on the runner account.
+    # Effective CODEX_HOME, cache bytes, config and auth are all out of scope.
+    profile = _a10_local_path(os.environ.get("USERPROFILE"))
+    if profile is not None:
+        try:
+            with _a10_pin_local_path(profile / ".codex/models_cache.json"):
+                return "DEFAULT_CACHE_PRESENT"
+        except FileNotFoundError:
+            return "DEFAULT_CACHE_ABSENT"
+        except OSError:
+            pass
+    return "UNKNOWN"
+
+
+def _a10_probe_text(probe, args):
+    from ai_commerce.opportunity.core.models import OpportunityError
+
+    try:
+        result = probe(args)
+        if (type(result.returncode) is int and result.returncode == 0
+                and type(result.stderr) is bytes and not result.stderr
+                and type(result.stdout) is bytes and 0 < len(result.stdout) <= _A10_PROBE_MAX_BYTES):
+            text = result.stdout.decode("utf-8").replace("\r\n", "\n")
+            if not re.search(r"[\x00-\x08\x0b-\x1f\x7f]", text):
+                return text
+    except (OpportunityError, OSError, subprocess.SubprocessError, UnicodeError, AttributeError):
+        pass
+    return ""
+
+
+def _a10_help_options(text, *, exec_help):
+    command = r"codex(?:\.exe)?" + (" exec" if exec_help else "")
+    intro, options_header, options = text.partition("\nOptions:\n")
+    if options_header and re.search(rf"(?m)^Usage: {command} \[OPTIONS\](?: [^\n]*)?$", intro):
+        declarations = set(_A10_HELP_OPTION.findall(re.split(r"\n(?=\S)", options, maxsplit=1)[0]))
+        if "--help" in declarations:
+            return declarations
+    return None
+
+
+def _a10_observe_cli(probe, observations):
+    from ai_commerce.opportunity.core import models
+
+    version = _a10_probe_text(probe, ("--version",)).strip()
+    if not re.fullmatch("codex-cli " + _HEALTH_VERSION, version, flags=re.ASCII):
+        return
+    if version != "codex-cli " + models._NATIVE_CODEX_VERSION:
+        observations["version"] = "DIFFERS_FROM_SOURCE_VERSION"
+        return
+    observations["version"] = "MATCHES_SOURCE_VERSION"
+    root_options = _a10_help_options(_a10_probe_text(probe, ("--help",)), exec_help=False)
+    exec_options = _a10_help_options(_a10_probe_text(probe, ("exec", "--help")), exec_help=True)
+    if root_options is not None:
+        observations["root_help"] = "USAGE_OBSERVED"
+        observations["root_flags"] = "DECLARED" if {"--config", "--disable"} <= root_options else "NOT_DECLARED"
+    if exec_options is not None:
+        selector = models.ai_provider_profile("codex-cli")
+        # The source argv places every one of these flags after exec. A
+        # declaration on root help alone gives no evidence for that placement.
+        argv = models.codex_research_argv("codex.exe", model=selector["model"], effort=selector["effort"])
+        required = {arg for arg in argv[2:] if arg.startswith("--")}
+        observations["exec_help"] = "USAGE_OBSERVED"
+        observations["exec_flags"] = "DECLARED" if required <= exec_options else "NOT_DECLARED"
+        observations["config_override_flags"] = "DECLARED" if _A10_CONFIG_FLAGS <= exec_options else "NOT_DECLARED"
+        observations["feature_disable_flag"] = "DECLARED" if "--disable" in exec_options else "NOT_DECLARED"
+
+
+@contextmanager
+def _a10_isolated_cli(executable):
+    from ai_commerce.opportunity.core.models import _bounded_native_codex
+
+    runner_temp = _a10_local_path(os.environ.get("RUNNER_TEMP"))
+    with _a10_pin_local_path(runner_temp, directory=True) as temp_root:
+        with tempfile.TemporaryDirectory(prefix="a10-readiness-", dir=temp_root) as directory:
+            def probe(args):
+                if args not in _A10_PROBE_ARGS:
+                    deny("A10_PROBE_DENIED")
+                return _bounded_native_codex(
+                    [str(executable), *args], input=b"", cwd=directory, codex_home=directory,
+                    shell=False, timeout=_A10_PROBE_TIMEOUT, max_bytes=_A10_PROBE_MAX_BYTES,
+                )
+
+            yield probe
+
+
+def _a10_collect_readiness():
+    observations = {}
+    try:
+        from ai_commerce.opportunity.core.models import OpportunityError, _native_binary_digest
+    except ImportError:
+        return observations
+    try:
+        with _a10_find_executable(_a10_install_candidates(os.environ)) as (kind, executable):
+            if executable is None:
+                return {"binary": kind}
+            if not _a10_is_native_executable(executable):
+                return {"binary": "UNSAFE"}
+            observed_sha = _native_binary_digest(executable)
+            observations = {
+                "binary": "OBSERVED", "observed_binary_sha256": observed_sha,
+                "catalog": _a10_default_catalog_state(),
+            }
+            if observed_sha in _A10_REVIEWED_BINARY_PINS:
+                with _a10_isolated_cli(executable) as probe:
+                    _a10_observe_cli(probe, observations)
+    except (OpportunityError, OSError, ValueError):
+        pass  # Preserve only the observations completed before the failure.
+    return observations
+
+
+def _protected_a10_readiness(issue_number):
+    try:
+        _require_protected_clean_runner("issues")
+        sha = _protected_clean_workflow_sha()
+    except Denied:
+        return _a10_readiness_receipt(issue_number)
+    if ("PYTEST_CURRENT_TEST" in os.environ
+            or os.environ.get("HOSTOPS_A10_READINESS_DISPATCH") != _A10_READINESS_SCHEMA):
+        return _a10_readiness_receipt(issue_number, sha)
+    return _a10_readiness_receipt(issue_number, sha, observations=_a10_collect_readiness())
+
+
 def perform(request):
     op = request["operation"]
     params = request["parameters"]
+    if op == _A10_READINESS:
+        if type(params) is not dict or params:
+            deny("INVALID_PARAMETERS")
+        return _a10_readiness_receipt(request.get("issue_number"))
     if op == _CLEAN_AUTOSTART:
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
@@ -4544,7 +4885,9 @@ def main():
             event = json.load(stream)
         request = parse_event(event, args.mode)
         # The runtime probe emits its own closed receipt with a validated SHA.
-        if request["operation"] == _CLEAN_RUNTIME_PROBE:
+        if request["operation"] == _A10_READINESS:
+            result = _protected_a10_readiness(request["issue_number"])
+        elif request["operation"] == _CLEAN_RUNTIME_PROBE:
             result = _probe_protected_clean_runtime()
         else:
             outcome = (_install_protected_clean_autostart(event) if request["operation"] == _CLEAN_AUTOSTART
