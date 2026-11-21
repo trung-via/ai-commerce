@@ -3580,6 +3580,68 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.inventory.assert_not_called()
         self.probe.assert_not_called()
 
+    def test_runtime_probe_distinguishes_conflict_and_d5_unverified_leaf_reasons(self):
+        self.assertEqual(set(hostops._CLEAN_RECONCILE_TASK_MAP), set(self.acq._CLEAN_RECONCILE_TASK_VALUES))
+        self.assertEqual(set(hostops._CLEAN_RECONCILE_TASK_MAP.values()), set(hostops._CLEAN_RUNTIME_TASK_CODES))
+        self.assertEqual(set(hostops._CLEAN_RECONCILE_JOURNAL_MAP), set(self.acq._CLEAN_RECONCILE_JOURNAL_VALUES))
+        self.assertEqual(set(hostops._CLEAN_RECONCILE_JOURNAL_MAP.values()), set(hostops._CLEAN_RUNTIME_JOURNAL_CODES))
+        self.assertEqual(set(hostops._CLEAN_RECONCILE_D5_MAP), set(self.acq._CLEAN_RECONCILE_D5_VALUES))
+        self.assertEqual(set(hostops._CLEAN_RECONCILE_D5_MAP.values()), set(hostops._CLEAN_RUNTIME_D5_CODES))
+        for code in hostops._CLEAN_RUNTIME_PROBE_CODES:
+            self.assertRegex(code, r"^[A-Z0-9_]{2,96}$")
+        for forbidden in ("TASK_CONFLICT", "TASK_FOREIGN", "D5_ABSENT", "D5_UNVERIFIED"):
+            self.assertFalse(any(forbidden in code for code in hostops._CLEAN_RUNTIME_PROBE_OBSERVED_CODES))
+
+        expected_keys = {
+            "status", "code", "operation", "cdp_port", "source_sha",
+            "exact_chat_verified", "wake_sent", "arbitrary_shell_enabled", "remote_shell_enabled",
+        }
+        cases = (
+            (set(), {"task": "CONFLICT_LEGACY_ARGS", "journal": "FRESH", "d5": "UNVERIFIED_EXE"},
+             "TASK_CONFLICT_PT1M_ARGS_JOURNAL_FRESH_D5_UNVERIFIED_EXE"),
+            ({"AutostartPending"}, {"task": "CONFLICT_LEGACY_ARGS", "journal": "FRESH", "d5": "UNVERIFIED_EXE"},
+             "AUTOSTART_PENDING_TASK_CONFLICT_PT1M_ARGS_JOURNAL_FRESH_D5_UNVERIFIED_EXE"),
+            ({"AutostartPending"}, {"task": "CONFLICT_DEMAND_PWSH_PATH", "journal": "COMPLETE", "d5": "UNVERIFIED_SCRIPT"},
+             "AUTOSTART_PENDING_TASK_CONFLICT_DEMAND_PWSH_PATH_JOURNAL_MISMATCH_D5_UNVERIFIED_SCRIPT"),
+            (set(), {"task": "CONFLICT_BASE_OWNER", "journal": "FRESH", "d5": "UNVERIFIED_ACL"},
+             "TASK_CONFLICT_OWNER_JOURNAL_FRESH_D5_UNVERIFIED_ACL"),
+            (set(), {"task": "CONFLICT_BASE_SETTINGS", "journal": "ROLLBACK_ONLY", "d5": "UNVERIFIED_CUSTODY"},
+             "TASK_CONFLICT_SETTINGS_ROLLBACK_ONLY_D5_UNVERIFIED_CUSTODY"),
+            (set(), {"task": "CONFLICT_LEGACY_PATH", "journal": "FRESH", "d5": "UNVERIFIED_PRINCIPAL"},
+             "TASK_CONFLICT_PT1M_PATH_JOURNAL_FRESH_D5_UNVERIFIED_PRINCIPAL"),
+            (set(), {"task": "CONFLICT_LEGACY_WORKDIR", "journal": "FRESH", "d5": "UNVERIFIED_ACTION"},
+             "TASK_CONFLICT_PT1M_WORKDIR_JOURNAL_FRESH_D5_UNVERIFIED_ACTION"),
+            (set(), {"task": "FOREIGN_CANDIDATE", "journal": "FRESH", "d5": "UNVERIFIED_MOVED"},
+             "TASK_FOREIGN_JOURNAL_FRESH_D5_UNVERIFIED_MOVED"),
+            (set(), {"task": "CONFLICT_TRIGGER_COUNT", "journal": "FRESH", "d5": "UNVERIFIED_MULTIPLE"},
+             "TASK_CONFLICT_TRIGGERS_JOURNAL_FRESH_D5_UNVERIFIED_MULTIPLE"),
+            (set(), {"task": "DEMAND_READY", "journal": "COMPLETE", "d5": "UNVERIFIED_TRIGGER"},
+             "DEMAND_READY_JOURNAL_COMPLETE_D5_UNVERIFIED_TRIGGER"),
+            (set(), {"task": "DEMAND_READY", "journal": "COMPLETE", "d5": "UNVERIFIED_STATE"},
+             "DEMAND_READY_JOURNAL_COMPLETE_D5_UNVERIFIED_STATE"),
+            (set(), {"task": "DEMAND_READY", "journal": "COMPLETE", "d5": "UNVERIFIED_BASE"},
+             "DEMAND_READY_JOURNAL_COMPLETE_D5_UNVERIFIED_BASE"),
+        )
+        for pending_set, reply, expected_code in cases:
+            with self.subTest(pending=sorted(pending_set), reply=reply):
+                self.pending.clear()
+                self.pending.update(pending_set)
+                self.launch_pending.return_value = False
+                self.reconcile.reset_mock()
+                self.reconcile.return_value = reply
+                receipt = self.invoke_probe()
+                self.assertEqual(set(receipt), expected_keys)
+                self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", expected_code))
+                self.assertIn(receipt["code"], hostops._CLEAN_RUNTIME_PROBE_CODES)
+                self.assertRegex(receipt["code"], r"^[A-Z0-9_]{2,96}$")
+                self.assertEqual(self.pending, pending_set)
+                self.reconcile.assert_called_once_with(self.owner, self.target, self.candidates)
+        self.pending.clear()
+        self.task.assert_not_called()
+        self.record.assert_not_called()
+        self.inventory.assert_not_called()
+        self.probe.assert_not_called()
+
     def test_runtime_probe_separates_pending_markers_and_reconciled_states_read_only(self):
         expected_keys = {
             "status", "code", "operation", "cdp_port", "source_sha",
