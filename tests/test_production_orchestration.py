@@ -855,6 +855,28 @@ def test_r4_a03_to_a04_verified_package_handoff_receipt_and_idempotent_replay(a0
         reopened.record_receipt(actual.event.receipt)
 
 
+def test_r4_incomplete_native_attestation_creates_no_completion_or_dispatch(a03_r3_case, monkeypatch):
+    from ai_commerce.media import generation as mg
+
+    monkeypatch.setattr(mg, "accept_creative_production_package", lambda **_: pytest.fail("A04 invoked"))
+    result, sidecars = a03_r3_case["result"], a03_r3_case["sidecars"]
+    owner = a03_r3_case["make_owner"]()
+    for field in ("cli_schema_json", "cli_stdout_base64"):
+        wire = result.to_dict()
+        reasoning = wire["stage"]["reasoning"]
+        response = json.loads(reasoning["response_json"])
+        del response[field]
+        reasoning["response_json"] = json.dumps(response)
+        with pytest.raises(OrchestrationError, match="PRODUCER_CONTRACT_INVALID"):
+            owner.complete_a03(wire, store=sidecars)
+
+    wire = result.to_dict()
+    wire["authorization"]["authorization_ref"] = "fixture:rebound-grant"
+    with pytest.raises(OrchestrationError, match="PRODUCER_CONTRACT_INVALID"):
+        owner.complete_a03(wire, store=sidecars)
+    assert not owner._state_dir.exists()
+
+
 def test_r4_run_creative_production_opt_in_seam_and_no_reinference_replay(a03_r3_case, tmp_path, monkeypatch):
     from ai_commerce.creative import CreativeValidationError, run_creative_cycle, run_creative_production
     from ai_commerce.media import generation as mg

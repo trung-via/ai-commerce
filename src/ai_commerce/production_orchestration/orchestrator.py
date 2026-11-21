@@ -16,7 +16,7 @@ import time
 from typing import Literal
 
 from ai_commerce.creative.briefs import brief_digest, intake_brief
-from ai_commerce.creative import briefs as creative_briefs
+from ai_commerce.creative import briefs as creative_briefs, verified_model_transport
 from ai_commerce.creative._validation import read_json as read_strict_json
 from ai_commerce.creative.sidecars import CreativeSidecarStore
 from ai_commerce.creative.store import CreativeStore
@@ -415,14 +415,8 @@ class ProductionPipelineOrchestrator:
         )
         require(origin == prod and verified_pkg == target_pkg, "PRODUCER_RESULT_MISMATCH")
         for checked in (origin.package, verified_pkg):
-            exec_obs = checked.execution
-            require(checked.observation.mode == "MODEL" and checked.observation.model != "UNKNOWN"
-                    and checked.configuration is not None and exec_obs is not None
-                    and exec_obs.kind == "AUTHENTICATED_CLI_PROBE"
-                    and exec_obs.effect == "PROCESS_INVOKED"
-                    and exec_obs.authorization_ref == origin.authorization.authorization_ref
-                    and (exec_obs.observed_model, exec_obs.observed_effort)
-                    == (checked.configuration.model, checked.configuration.effort)
+            require(verified_model_transport(checked.configuration, checked.observation, checked.execution,
+                                             authorization=origin.authorization) is not None
                     and checked.lineage.cycle_status == "CREATIVE_COMPLETE",
                     "PRODUCER_NOT_COMPLETE")
         cycle = sidecars.load_cycle_by_digest(
@@ -431,11 +425,10 @@ class ProductionPipelineOrchestrator:
         require(cycle.status == "CREATIVE_COMPLETE" and cycle.job.seed.purpose == "PRODUCTION",
                 "PRODUCER_NOT_COMPLETE")
         for step in cycle.steps:
-            step_exec = step.reasoning.execution
-            require(step.status == "CREATIVE_COMPLETE" and step.reasoning.observation.mode == "MODEL"
-                    and step.reasoning.observation.model != "UNKNOWN"
-                    and step_exec is not None and step_exec.kind == "AUTHENTICATED_CLI_PROBE"
-                    and step_exec.effect == "PROCESS_INVOKED",
+            result = step.reasoning
+            require(step.status == "CREATIVE_COMPLETE"
+                    and verified_model_transport(result.configuration, result.observation, result.execution,
+                                                 authorization=cycle.authorization) is not None,
                     "PRODUCER_NOT_COMPLETE")
         require(verified_pkg.factual_status == "UNVERIFIED"
                 and verified_pkg.rights_status in ("UNKNOWN", "EVIDENCE_BOUND")

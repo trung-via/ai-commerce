@@ -42,7 +42,7 @@ from .v2 import (
 from .live import (
     CodexCliCapability, CodexCliCreativeClient, InvocationAuthorization, LiveCreativeReasoner, ModelConfiguration,
     StructuredCreativeClient, StructuredModelRequest, StructuredModelResponse,
-    codex_creative_argv,
+    codex_creative_argv, verified_model_transport,
 )
 from .sidecars import CreativeSidecarStore
 
@@ -54,6 +54,7 @@ __all__ += [
     "StructuredModelRequest", "StructuredModelResponse", "UsageObservation", "capture_intent", "reason_v2",
     "run_creative_stage",
     "CLIExecutionObservation", "CodexCliCapability", "CodexCliCreativeClient", "codex_creative_argv",
+    "verified_model_transport",
     "A03CreativeCycleJob", "A03CreativeCycleResult", "CreativeCycleContext",
     "CreativeCriticEvidence", "CreativeEvidenceSource", "CreativeModelSelection", "run_creative_cycle",
     "A03CreativeProductionJob", "A03CreativeProductionPackage", "A03CreativeProductionResult",
