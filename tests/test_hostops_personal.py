@@ -4,10 +4,12 @@ import base64
 import builtins
 import importlib.util
 import copy
-from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
+import ctypes
+from contextlib import ExitStack, contextmanager, nullcontext, redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 import hashlib
 import io
+from io import BytesIO
 import json
 from pathlib import Path, PureWindowsPath
 import re
@@ -54,6 +56,308 @@ def event(mode, operation, parameters, *, comment=None):
             "user": {"login": hostops.OWNER},
         }
     return result
+
+
+class A10HostReadinessTests(unittest.TestCase):
+    OP = "a10_codex_native_readiness"
+    SCHEMA = "A10CodexHostReadiness.v1"
+    SHA = "a" * 40
+    ROOT_HELP = b"""Codex CLI
+
+Usage: codex [OPTIONS] [PROMPT]
+       codex [OPTIONS] <COMMAND> [ARGS]
+
+Commands:
+  exec  Run Codex non-interactively
+
+Options:
+  -c, --config <key=value>
+          Override a configuration value
+      --disable <FEATURE>
+          Disable a feature
+  -h, --help
+"""
+    EXEC_HELP = b"""Run Codex non-interactively
+
+Usage: codex exec [OPTIONS] [PROMPT] [COMMAND]
+
+Options:
+  -c, --config <key=value>
+          Private example: --ignore-user-config user@example.test
+      --disable <FEATURE>
+          Disable a feature
+  -m, --model <MODEL>
+  -s, --sandbox <SANDBOX_MODE>
+      --json
+      --output-schema <FILE>
+      --skip-git-repo-check
+  -h, --help
+"""
+
+    def _protected_env(self):
+        return {
+            "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "issues", "GITHUB_REPOSITORY": hostops.REPO,
+            "GITHUB_REPOSITORY_OWNER": hostops.OWNER, "GITHUB_ACTOR": hostops.OWNER,
+            "GITHUB_TRIGGERING_ACTOR": hostops.OWNER, "GITHUB_REF": "refs/heads/main", "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_WORKFLOW_REF": hostops.REPO + "/.github/workflows/issue-ingress.yml@refs/heads/main",
+            "RUNNER_ENVIRONMENT": "self-hosted", "RUNNER_NAME": "AI-COMMERCE-HOSTOPS-01",
+            "GITHUB_SHA": self.SHA, "GITHUB_WORKFLOW_SHA": self.SHA,
+            "HOSTOPS_A10_READINESS_DISPATCH": self.SCHEMA,
+        }
+
+    def _main(self, value, env, mode="read"):
+        raw = value if isinstance(value, str) else json.dumps(value)
+        with (patch.object(hostops, "os", SimpleNamespace(name="nt", environ={
+                  **env, "GITHUB_EVENT_PATH": "fake-event.json"})),
+              patch.object(hostops.sys, "argv", ["personal", "--mode", mode, "--output", "fake-result.json"]),
+              patch.object(hostops, "open", mock_open(read_data=raw), create=True),
+              patch.object(hostops.Path, "mkdir"), patch.object(hostops.Path, "write_text") as write,
+              patch.object(hostops.subprocess, "Popen", side_effect=AssertionError("offline")) as spawn,
+              patch.object(hostops.subprocess, "run", side_effect=AssertionError("offline")) as run):
+            code = hostops.main()
+        spawn.assert_not_called()
+        run.assert_not_called()
+        return code, json.loads(write.call_args.args[0])
+
+    def test_malformed_owner_and_parameter_checks_precede_host_collection(self):
+        wrong_sender = event("read", self.OP, {})
+        wrong_sender["sender"]["login"] = "other"
+        wrong_owner = event("read", self.OP, {})
+        wrong_owner["issue"]["user"]["login"] = "other"
+        bad_body = event("read", self.OP, {})
+        bad_body["issue"]["body"] = '{"parameters":{},"parameters":{}}'
+        cases = ["{", bad_body, wrong_owner, wrong_sender, event("read", self.OP, [])]
+        cases.extend(event("read", self.OP, {key: "private"}) for key in (
+            "executable", "path", "command", "model", "effort", "home", "url", "args", "shell", "output",
+        ))
+        with patch.object(hostops, "_a10_collect_readiness") as collect:
+            for value in cases:
+                with self.subTest(value=value):
+                    code, result = self._main(value, self._protected_env())
+                    self.assertEqual((code, result["status"]), (2, "BLOCKED"))
+                    self.assertNotIn("a10_readiness", result)
+            code, result = self._main(event("write", self.OP, {}), self._protected_env(), mode="write")
+            self.assertEqual(result["code"], "WRITE_SCOPE_DENIED")
+        collect.assert_not_called()
+
+    def test_guard_and_direct_perform_keep_source_only(self):
+        value = event("read", self.OP, {})
+        with patch.object(hostops, "_a10_collect_readiness") as collect:
+            result = hostops.perform(hostops.parse_event(value, "read"))
+            self.assertEqual(result["a10_readiness"]["state"], "SOURCE_PRESENT")
+            self.assertIsNone(result["a10_readiness"]["public_observation_sha256"])
+            for key, update in (
+                ("HOSTOPS_A10_READINESS_DISPATCH", ""), ("GITHUB_WORKFLOW_SHA", "b" * 40),
+                ("GITHUB_REF", "refs/heads/feature"), ("GITHUB_RUN_ATTEMPT", "2"),
+                ("RUNNER_NAME", "AI-COMMERCE-EF02-02"), ("PYTEST_CURRENT_TEST", "offline"),
+                ("AI_COMMERCE_GIT_GUARD_ACTIVE", "1"),
+            ):
+                with self.subTest(key=key):
+                    code, record = self._main(value, {**self._protected_env(), key: update})
+                    self.assertEqual((code, record["code"]), (2, "A10_PROTECTED_WORKFLOW_REQUIRED"))
+                    self.assertEqual(record["a10_readiness"]["state"], "SOURCE_PRESENT")
+        collect.assert_not_called()
+        self.assertNotIn("a10_readiness", hostops.PERSONAL_PUBLIC_FIELDS)
+        self.assertEqual(len(hostops.STANDING_READ_CATEGORIES), 16)
+
+    def test_discovery_addresses_only_bounded_local_native_candidates(self):
+        candidates = hostops._a10_install_candidates({
+            "PATH": r'.;\\server\share;\\?\C:\private;C:\x\..\private;C:\private:stream;'
+                    r'C:\Tools;"c:\TOOLS";C:\Users\operator\AppData\Local\Microsoft\WindowsApps',
+            "APPDATA": r"C:\Users\operator\AppData\Roaming",
+            "LOCALAPPDATA": r"C:\Users\operator\AppData\Local",
+        })
+        self.assertEqual(len(candidates), 13)
+        self.assertEqual(candidates[0], PureWindowsPath("C:/Tools/codex.exe"))
+        self.assertIn(PureWindowsPath(
+            "C:/Users/operator/AppData/Roaming/npm/node_modules/@openai/codex-win32-x64/"
+            "vendor/x86_64-pc-windows-msvc/codex/codex.exe"
+        ), candidates)
+        with self.assertRaises(ValueError):
+            hostops._a10_install_candidates({"PATH": "C:/Tools;" * 65})
+
+    def test_missing_ambiguous_and_unsafe_install_never_hash_or_launch(self):
+        from ai_commerce.opportunity.core import models
+
+        candidates = tuple(map(PureWindowsPath, ("C:/one/codex.exe", "C:/two/codex.exe")))
+        for outcomes, expected in (
+            ([FileNotFoundError, FileNotFoundError], "NOT_FOUND_IN_SCOPE"),
+            ([nullcontext(candidates[0]), nullcontext(candidates[1])], "AMBIGUOUS"),
+            ([nullcontext(candidates[0]), OSError("private unsafe path")], "UNSAFE"),
+        ):
+            with (self.subTest(expected=expected),
+                  patch.object(hostops, "_a10_install_candidates", return_value=candidates),
+                  patch.object(hostops, "_a10_pin_local_path", side_effect=outcomes),
+                  patch.object(models, "_native_binary_digest") as digest,
+                  patch.object(hostops, "_a10_isolated_cli") as launch):
+                self.assertEqual(hostops._a10_collect_readiness(), {"binary": expected})
+                digest.assert_not_called()
+                launch.assert_not_called()
+
+    def test_native_pin_checks_fixed_drive_reparse_and_link_count(self):
+        candidate = PureWindowsPath("C:/Tools/codex.exe")
+        directory = (stat.FILE_ATTRIBUTE_DIRECTORY, 1)
+        reparse = (stat.FILE_ATTRIBUTE_DIRECTORY | stat.FILE_ATTRIBUTE_REPARSE_POINT, 1)
+        for drive, metadata, expected_opens in (
+            (4, [], 0),
+            (3, [directory, reparse], 2),
+            (3, [directory, directory, (0, 2)], 3),
+        ):
+            def file_information(handle, pointer):
+                pointer.contents.attributes, pointer.contents.links = metadata[handle - 1]
+                return True
+
+            kernel = Mock()
+            kernel.GetDriveTypeW.return_value = drive
+            kernel.CreateFileW.side_effect = [1, 2, 3]
+            kernel.GetFileInformationByHandle.side_effect = file_information
+            with (self.subTest(drive=drive, expected_opens=expected_opens),
+                  patch.object(ctypes, "WinDLL", return_value=kernel, create=True),
+                  self.assertRaises(OSError), hostops._a10_pin_local_path(candidate, read=True)):
+                self.fail("unsafe path was opened for observation")
+            self.assertEqual(kernel.CreateFileW.call_count, expected_opens)
+            self.assertEqual(kernel.CloseHandle.call_count, expected_opens)
+            for opened in kernel.CreateFileW.call_args_list:
+                self.assertEqual(opened.args[2], 1)  # FILE_SHARE_READ
+
+    def test_unpinned_binary_bytes_are_hashed_without_process_or_auth_access(self):
+        raw = b"fake executable bytes"
+        executable = Mock()
+        executable.is_file.return_value = True
+        executable.open.return_value = BytesIO(raw)
+        profile = PureWindowsPath("C:/Users/operator")
+        with (patch.object(hostops, "os", SimpleNamespace(environ={"USERPROFILE": str(profile)})),
+              patch.object(hostops, "_a10_find_executable", return_value=nullcontext(("UNKNOWN", executable))),
+              patch.object(hostops, "_a10_is_native_executable", return_value=True),
+              patch.object(hostops, "_a10_pin_local_path", return_value=nullcontext()) as metadata,
+              patch.object(hostops, "_a10_isolated_cli") as launch):
+            observed = hostops._a10_collect_readiness()
+        self.assertEqual(observed, {
+            "binary": "OBSERVED", "observed_binary_sha256": hashlib.sha256(raw).hexdigest(),
+            "catalog": "DEFAULT_CACHE_PRESENT",
+        })
+        executable.open.assert_called_once_with("rb")
+        metadata.assert_called_once_with(profile / ".codex/models_cache.json")
+        launch.assert_not_called()
+
+    @staticmethod
+    def _output(stdout, *, returncode=0, stderr=b""):
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+
+    def test_version_root_and_exec_help_have_distinct_observation_surfaces(self):
+        from ai_commerce.opportunity.core import models
+
+        version = self._output(f"codex-cli {models._NATIVE_CODEX_VERSION}\r\n".encode())
+        root_help = self._output(self.ROOT_HELP)
+        exec_help = self._output(self.EXEC_HELP)
+        actual = {}
+        run = Mock(side_effect=[version, root_help, exec_help])
+        hostops._a10_observe_cli(run, actual)
+        self.assertEqual(run.call_args_list, [call(("--version",)), call(("--help",)), call(("exec", "--help"))])
+        self.assertEqual(actual, {
+            "version": "MATCHES_SOURCE_VERSION", "root_help": "USAGE_OBSERVED", "root_flags": "DECLARED",
+            "exec_help": "USAGE_OBSERVED", "exec_flags": "NOT_DECLARED",
+            "config_override_flags": "NOT_DECLARED", "feature_disable_flag": "DECLARED",
+        })
+        self.assertNotIn("user@example.test", json.dumps(actual))
+        absent_from_exec = self.EXEC_HELP.replace(b"      --disable <FEATURE>", b"          --disable <FEATURE>")
+        actual = {}
+        hostops._a10_observe_cli(Mock(side_effect=[version, root_help, self._output(absent_from_exec)]), actual)
+        self.assertEqual(actual["feature_disable_flag"], "NOT_DECLARED")
+        actual = {}
+        hostops._a10_observe_cli(Mock(side_effect=[version, exec_help, root_help]), actual)
+        self.assertEqual(actual, {"version": "MATCHES_SOURCE_VERSION"})
+        actual = {}
+        hostops._a10_observe_cli(Mock(side_effect=[
+            version, subprocess.TimeoutExpired("root help", 5), exec_help,
+        ]), actual)
+        self.assertNotIn("root_help", actual)
+        self.assertEqual(actual["exec_help"], "USAGE_OBSERVED")
+
+    def test_failed_cli_output_is_discarded_and_version_mismatch_stops(self):
+        for response in (
+            subprocess.TimeoutExpired("private command", 5), self._output(b"\xffsecret"),
+            self._output(b"codex-cli 0.1.0", returncode=3),
+            self._output(b"codex-cli 0.1.0", stderr=b"private error"),
+            self._output(b"x" * (hostops._A10_PROBE_MAX_BYTES + 1)),
+        ):
+            with self.subTest(response=type(response)):
+                actual = {}
+                run = Mock(side_effect=[response])
+                hostops._a10_observe_cli(run, actual)
+                self.assertEqual(actual, {})
+                run.assert_called_once_with(("--version",))
+        actual = {}
+        run = Mock(return_value=self._output(b"codex-cli 0.1.0"))
+        hostops._a10_observe_cli(run, actual)
+        self.assertEqual(actual, {"version": "DIFFERS_FROM_SOURCE_VERSION"})
+        run.assert_called_once_with(("--version",))
+
+    def test_reviewed_pin_only_launches_fixed_bounded_help_argv(self):
+        from ai_commerce.opportunity.core import models
+
+        digest = hashlib.sha256(b"independently reviewed fixture").hexdigest()
+        executable = PureWindowsPath("C:/Tools/codex.exe")
+        temp_root = PureWindowsPath("C:/RunnerTemp")
+        temp_home = r"C:\RunnerTemp\empty"
+        with (patch.object(hostops, "os", SimpleNamespace(environ={"RUNNER_TEMP": str(temp_root)})),
+              patch.object(hostops, "_A10_REVIEWED_BINARY_PINS", frozenset({digest})),
+              patch.object(hostops, "_a10_find_executable", return_value=nullcontext(("UNKNOWN", executable))),
+              patch.object(hostops, "_a10_is_native_executable", return_value=True),
+              patch.object(hostops, "_a10_pin_local_path", return_value=nullcontext(temp_root)) as pin,
+              patch.object(hostops.tempfile, "TemporaryDirectory", return_value=nullcontext(temp_home)),
+              patch.object(models, "_native_binary_digest", return_value=digest),
+              patch.object(models, "_bounded_native_codex", side_effect=[
+                  self._output(f"codex-cli {models._NATIVE_CODEX_VERSION}".encode()),
+                  self._output(self.ROOT_HELP), self._output(self.EXEC_HELP),
+              ]) as runner):
+            observed = hostops._a10_collect_readiness()
+            pin.assert_called_once_with(temp_root, directory=True)
+            with hostops._a10_isolated_cli(executable) as probe:
+                for args in (("exec",), ("exec", "--help", "prompt"), ("login", "status"), ("features", "list")):
+                    with self.assertRaisesRegex(hostops.Denied, "A10_PROBE_DENIED"):
+                        probe(args)
+        self.assertEqual(observed["observed_binary_sha256"], digest)
+        options = {"input": b"", "cwd": temp_home, "codex_home": temp_home, "shell": False,
+                   "timeout": 5, "max_bytes": 32768}
+        self.assertEqual(runner.call_args_list, [call([str(executable), *args], **options) for args in (
+            ("--version",), ("--help",), ("exec", "--help"),
+        )])
+
+    def test_public_receipt_is_closed_and_digest_binds_observed_binary_issue_and_source(self):
+        binary_sha = hashlib.sha256(b"observed executable").hexdigest()
+        observed = {"binary": "OBSERVED", "observed_binary_sha256": binary_sha, "account_config": "secret",
+                    "stdout": "private", "host_verification_sha256": "b" * 64}
+        with patch.object(hostops, "_a10_collect_readiness", return_value=observed) as collect:
+            code, result = self._main(event("read", self.OP, {}), self._protected_env())
+        collect.assert_called_once_with()
+        self.assertEqual(code, 2)
+        self.assertEqual(result, {
+            "status": "HOLD", "code": "HOST_UNVERIFIED", "operation": self.OP,
+            "issue_number": 17, "source_sha": self.SHA, "approval_channel": "CHATGPT_TO_AI_COMMERCE_ISSUE",
+            "remote_shell_enabled": False, "a10_readiness": result["a10_readiness"],
+        })
+        readiness = result["a10_readiness"]
+        digest = readiness.pop("public_observation_sha256")
+        self.assertEqual(readiness, {
+            "schema_version": self.SCHEMA, "state": "HOST_UNVERIFIED", "binary": "OBSERVED",
+            "observed_binary_sha256": binary_sha, "native_inference_executed": False,
+            **dict.fromkeys(("version", "root_help", "exec_help", "root_flags", "exec_flags",
+                             "config_override_flags", "feature_disable_flag", "catalog", "system_config",
+                             "account_config", "disabled_features", "read_only_policy"), "UNKNOWN"),
+        })
+        canonical = json.dumps(result, sort_keys=True, separators=(",", ":")).encode("ascii")
+        self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
+        for issue, sha, bytes_sha in ((18, self.SHA, binary_sha), (17, "b" * 40, binary_sha),
+                                      (17, self.SHA, "c" * 64)):
+            changed = hostops._a10_readiness_receipt(
+                issue, sha, observations={**observed, "observed_binary_sha256": bytes_sha}
+            )
+            self.assertNotEqual(changed["a10_readiness"]["public_observation_sha256"], digest)
+        hold = hostops._a10_readiness_receipt(
+            17, self.SHA, observations={**observed, "version": "DIFFERS_FROM_SOURCE_VERSION"}
+        )
+        self.assertEqual((hold["status"], hold["code"]), ("HOLD", "HOST_UNSUPPORTED"))
 
 
 class PersonalHostOpsContractTests(unittest.TestCase):
