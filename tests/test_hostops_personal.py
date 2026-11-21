@@ -21,7 +21,10 @@ import tempfile
 import unittest
 from urllib.parse import parse_qs, urlsplit
 
+from ai_commerce.remote import chrome_acquisition as acquisition
+
 MODULE = Path(__file__).resolve().parents[1] / "src" / "ai_commerce" / "hostops_v3" / "personal.py"
+TEST_PWSH = r"C:\Program Files\PowerShell\7\pwsh.exe"
 spec = importlib.util.spec_from_file_location("hostops_personal", MODULE)
 hostops = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(hostops)
@@ -873,7 +876,7 @@ const script = fs.readFileSync(process.argv[2],'utf8');
         req = hostops.parse_event(event("read", "runner_runtime_inventory", {}), "read")
         with patch.object(hostops.os, "name", "nt"), patch.object(
             hostops.subprocess, "run"
-        ) as fake:
+        ) as fake, patch.object(acquisition, "_powershell", return_value=TEST_PWSH):
             fake.return_value.returncode = 0
             fake.return_value.stdout = json.dumps(payload)
             result = hostops.perform(req)
@@ -885,8 +888,10 @@ const script = fs.readFileSync(process.argv[2],'utf8');
         self.assertEqual([x["name"] for x in result["runners"]], names)
         self.assertFalse(result["arbitrary_shell_enabled"])
         self.assertEqual(args[0][:4],
-                         ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"])
+                         [TEST_PWSH, "-NoProfile", "-NonInteractive", "-Command"])
         self.assertNotIn("shell", kwargs)
+        self.assertEqual(kwargs["encoding"], "utf-8")
+        self.assertEqual(kwargs["creationflags"], getattr(subprocess, "CREATE_NO_WINDOW", 0))
         self.assertEqual(kwargs["timeout"], 25)
         self.assertEqual(kwargs["check"], False)
         self.assertNotIn("COMMANDLINE", json.dumps(result).upper())
@@ -915,7 +920,7 @@ const script = fs.readFileSync(process.argv[2],'utf8');
         ]
         with patch.object(hostops.os, "name", "nt"), patch.object(
             hostops.subprocess, "run"
-        ) as fake:
+        ) as fake, patch.object(acquisition, "_powershell", return_value=TEST_PWSH):
             fake.return_value.returncode = 0
             for payload in samples:
                 fake.return_value.stdout = json.dumps(payload)
@@ -950,14 +955,18 @@ const script = fs.readFileSync(process.argv[2],'utf8');
                   "same_session_chrome_count": 0}
         with patch.object(hostops.os, "name", "nt"), patch.object(
             hostops.subprocess, "run"
-        ) as native, patch.object(hostops, "build_opener") as opener:
+        ) as native, patch.object(hostops, "build_opener") as opener, patch.object(
+            acquisition, "_powershell", return_value=TEST_PWSH
+        ):
             native.return_value.returncode = 0
             native.return_value.stdout = json.dumps(record)
             answer = hostops.perform(req)
             opener.assert_not_called()
             self.assertEqual(native.call_args.args[0][:4],
-                             ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"])
+                             [TEST_PWSH, "-NoProfile", "-NonInteractive", "-Command"])
             self.assertEqual(native.call_args.kwargs["timeout"], 18)
+            self.assertEqual(native.call_args.kwargs["creationflags"],
+                             getattr(subprocess, "CREATE_NO_WINDOW", 0))
             self.assertNotIn("shell", native.call_args.kwargs)
         self.assertEqual(answer["status"], "OBSERVED")
         self.assertEqual(answer["cdp_port"], 9333)
@@ -974,7 +983,9 @@ const script = fs.readFileSync(process.argv[2],'utf8');
                   "same_session_chrome_count": 1}
         with patch.object(hostops.os, "name", "nt"), patch.object(
             hostops.subprocess, "run"
-        ) as native, patch.object(hostops, "build_opener") as opener:
+        ) as native, patch.object(hostops, "build_opener") as opener, patch.object(
+            acquisition, "_powershell", return_value=TEST_PWSH
+        ):
             native.return_value.returncode = 0
             native.return_value.stdout = json.dumps(record)
             response = opener.return_value.open.return_value.__enter__.return_value
@@ -1009,7 +1020,9 @@ const script = fs.readFileSync(process.argv[2],'utf8');
         ]
         with patch.object(hostops.os, "name", "nt"), patch.object(
             hostops.subprocess, "run"
-        ) as native, patch.object(hostops, "build_opener") as opener:
+        ) as native, patch.object(hostops, "build_opener") as opener, patch.object(
+            acquisition, "_powershell", return_value=TEST_PWSH
+        ):
             native.return_value.returncode = 0
             for obj in invalid:
                 native.return_value.stdout = json.dumps(obj)
@@ -1019,6 +1032,20 @@ const script = fs.readFileSync(process.argv[2],'utf8');
             native.return_value.returncode = 1
             with self.assertRaisesRegex(hostops.Denied, "CDP_NATIVE_READ_FAILED"):
                 hostops.perform(req)
+
+    def test_fixed_native_reads_deny_when_powershell_is_unavailable(self):
+        cases = (
+            ("runner_runtime_inventory", "RUNNER_RUNTIME_READ_UNAVAILABLE"),
+            ("cdp_9333_status", "CDP_NATIVE_READ_UNAVAILABLE"),
+        )
+        with patch.object(hostops.os, "name", "nt"), patch.object(
+            acquisition, "_powershell", side_effect=acquisition.AcquisitionBlocked("PRIVATE_BINARY")
+        ), patch.object(subprocess, "run") as native, patch.object(hostops, "build_opener") as opener:
+            for operation, code in cases:
+                with self.subTest(operation=operation), self.assertRaisesRegex(hostops.Denied, f"^{code}$"):
+                    hostops.perform(hostops.parse_event(event("read", operation, {}), "read"))
+            native.assert_not_called()
+            opener.assert_not_called()
 
     def test_no_read_approval_comment_required(self):
         value = event("read", "inventory", {})
@@ -3330,7 +3357,7 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
                 self.task.assert_not_called()
 
     def test_start_requests_only_the_exact_powershell_task_in_owner_session(self):
-        powershell = self.local / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        powershell = self.local / "PowerShell" / "7" / "pwsh.exe"
         with patch.object(self.acq, "_powershell", return_value=powershell):
             self.native_run.side_effect = None
             self.native_run.return_value = SimpleNamespace(returncode=0, stdout=b"START_REQUESTED")
@@ -4689,6 +4716,35 @@ class HostOpsExecV1Tests(unittest.TestCase):
         legacy_job = re.search(r"(?ms)^  hostops-personal:\n(.*?)(?=^  [a-z0-9-]+:\n|\Z)", workflow).group(1)
         for marker in ("[HOSTOPS EXEC]", "HOSTOPS_EXEC_V1", "--hostops-exec-v1", "hostops_exec_v1_cli"):
             self.assertNotIn(marker, legacy_job)
+
+    def test_exec_v1_selects_verified_powershell_with_utf8_after_runtime_gates(self):
+        env = {"RUNNER_NAME": hostops.HOSTOPS_EXEC_V1_RUNNER_NAME, "GITHUB_TOKEN": "PRIVATE"}
+        result = hostops.HostOpsExecV1ProcessResult(0, b"", b"", False)
+        script = "Write-Output 'Việt'"
+        with patch.object(hostops, "os", SimpleNamespace(name="nt", environ=env)), patch.object(
+            hostops, "_exec_v1_source_ci", return_value=False
+        ), patch.object(hostops, "_default_hostops_exec_v1_runtime") as runtime, patch.object(
+            hostops, "_verify_hostops_exec_v1_runtime"
+        ) as verify, patch.object(acquisition, "_powershell", return_value=TEST_PWSH) as resolve, patch.object(
+            hostops.asyncio, "Runner", create=True
+        ) as runner, patch.object(hostops.asyncio, "ProactorEventLoop", create=True), patch.object(
+            hostops, "_capture_hostops_exec_v1", new=Mock(return_value=result)
+        ) as capture:
+            runner.return_value.__enter__.return_value.run.return_value = result
+            self.assertIs(hostops._default_hostops_exec_v1_runner(script, 5, 1024), result)
+            verify.assert_called_once_with(runtime.return_value, require_protected_workflow=True)
+            argv, stdin, timeout, limit = capture.call_args.args
+            self.assertEqual(argv[:4], (TEST_PWSH, "-NoProfile", "-NonInteractive", "-Command"))
+            self.assertIn("[Console]::InputEncoding", argv[4])
+            self.assertIn("[Console]::OutputEncoding", argv[4])
+            self.assertEqual((stdin, timeout, limit), (script.encode("utf-8"), 5, 1024))
+            self.assertEqual(capture.call_args.kwargs["child_env"], {})
+            resolve.side_effect = acquisition.AcquisitionBlocked("PRIVATE_BINARY")
+            runner.reset_mock()
+            with self.assertRaisesRegex(hostops.Denied, "^PROTECTED_HOSTOPS_ONLY$"):
+                hostops._default_hostops_exec_v1_runner(script, 5, 1024)
+            runner.assert_not_called()
+            capture.assert_called_once()
 
     def test_source_ci_no_native_effect_and_future_cli_interface_contract(self):
         # Exercise each guard without modifying the executor's real environment.

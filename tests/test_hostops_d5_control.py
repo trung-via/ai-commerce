@@ -411,7 +411,8 @@ def test_native_adapter_no_raw_stdout_stderr_or_private_values(rig, monkeypatch)
     native = d5.WindowsNative()
     native.request_id = "1"*32
     monkeypatch.setattr(native, "preflight", lambda _: None)
-    monkeypatch.setattr(ca, "_powershell", lambda: Path("powershell.exe"))
+    executable = policy.release_root / "pwsh.exe"
+    monkeypatch.setattr(ca, "_powershell", lambda: executable)
     class Reply:
         stdout = b'{"code":"PRIVATE_SECRET_PATH"}'
         returncode = 1
@@ -422,9 +423,29 @@ def test_native_adapter_no_raw_stdout_stderr_or_private_values(rig, monkeypatch)
     monkeypatch.setattr(subprocess, "run", run)
     with pytest.raises(d5.D5Blocked, match="UNKNOWN_EFFECT_HOLD"):
         native.call(policy, "MIGRATION_PREFLIGHT")
-    _, kwargs = calls[0]
+    args, kwargs = calls[0]
+    assert args[0][:4] == [str(executable), "-NoProfile", "-NonInteractive", "-File"]
+    assert kwargs["creationflags"] == getattr(subprocess, "CREATE_NO_WINDOW", 0)
     assert kwargs["stderr"] == subprocess.DEVNULL and kwargs["timeout"] == 45
     assert "PRIVATE_SECRET_PATH" not in str(kwargs)
+
+
+def test_native_adapter_denies_unavailable_powershell_before_spawning(rig, monkeypatch):
+    policy, _, _, _ = rig
+    native = d5.WindowsNative()
+    native.request_id = "1"*32
+    monkeypatch.setattr(native, "preflight", lambda _: None)
+
+    def unavailable():
+        raise ca.AcquisitionBlocked("PRIVATE_BINARY")
+
+    def unexpected_spawn(*args, **kwargs):
+        pytest.fail("unexpected native subprocess")
+
+    monkeypatch.setattr(ca, "_powershell", unavailable)
+    monkeypatch.setattr(subprocess, "run", unexpected_spawn)
+    with pytest.raises(d5.D5Blocked, match="^UNKNOWN_EFFECT_HOLD$"):
+        native.call(policy, "MIGRATION_PREFLIGHT")
 
 
 def test_powershell_native_adapter_parses_without_invoking_windows_effects():
@@ -433,7 +454,8 @@ def test_powershell_native_adapter_parses_without_invoking_windows_effects():
     script = ROOT / "scripts/AI-Commerce-D5-Operator-Bridge.ps1"
     command = "$e=$null;[System.Management.Automation.Language.Parser]::ParseFile('" + str(script).replace("'", "''") + "',[ref]$null,[ref]$e)|Out-Null;if(@($e).Count){$e|Out-String|Write-Output;exit 1}"
     result = subprocess.run([str(ca._powershell()), "-NoProfile", "-NonInteractive", "-Command", command],
-                            capture_output=True, text=True, timeout=20)
+                            capture_output=True, text=True, timeout=20,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     assert result.returncode == 0, result.stdout + result.stderr
 
 
@@ -1011,7 +1033,7 @@ def test_no_cdp_stop_identity_counts_every_profile_claim_not_only_matching_argv(
     assert native.effects == []
 
 
-@pytest.mark.parametrize("damage", [None, "wrong-command", "wrong-script", "source-drift"])
+@pytest.mark.parametrize("damage", [None, "wrong-image", "wrong-argv0", "wrong-command", "wrong-script", "source-drift"])
 def test_kernel_logon_peer_must_run_exact_pinned_launcher(rig, monkeypatch, damage):
     import types
     policy, native, _, _ = rig
@@ -1021,13 +1043,15 @@ def test_kernel_logon_peer_must_run_exact_pinned_launcher(rig, monkeypatch, dama
     policy = replace(policy, files={d5.RELEASE_FILES[2]: d5.digest(launcher.read_bytes())})
     if damage == "source-drift":
         launcher.write_bytes(b"UNVERIFIED_LAUNCHER")
-    exe = policy.state_root / "powershell.exe"
+    exe = policy.state_root / "PowerShell" / "7" / "pwsh.exe"
+    legacy = policy.state_root / "powershell.exe"
     monkeypatch.setattr(d5, "SignedPolicy", lambda: types.SimpleNamespace(path=policy.state_root / "enrollment.json"))
     monkeypatch.setattr(d5, "load_enrollment", lambda *args, **kwargs: policy)
     monkeypatch.setattr(d5, "private_path", lambda path, **kwargs: path)
-    monkeypatch.setattr(d5, "protected_path", lambda path: path)
     monkeypatch.setattr(ca, "_powershell", lambda: exe)
     argv = [str(exe), "-NoProfile", "-NonInteractive", "-File", str(launcher), "-Logon"]
+    if damage == "wrong-argv0":
+        argv[0] = str(legacy)
     if damage == "wrong-command":
         argv[3] = "-Command"
     if damage == "wrong-script":
@@ -1036,7 +1060,9 @@ def test_kernel_logon_peer_must_run_exact_pinned_launcher(rig, monkeypatch, dama
     calls = []
     def probe(args, **kwargs):
         calls.append((args, kwargs))
-        return types.SimpleNamespace(returncode=0, stdout=d5.canonical({"image": str(exe), "argv": "SYNTHETIC_OS_REPLY"}))
+        image = legacy if damage == "wrong-image" else exe
+        return types.SimpleNamespace(
+            returncode=0, stdout=d5.canonical({"image": str(image), "argv": "SYNTHETIC_OS_REPLY"}))
     monkeypatch.setattr(subprocess, "run", probe)
     api = object.__new__(d5.Win32)
     if damage:
@@ -1044,6 +1070,8 @@ def test_kernel_logon_peer_must_run_exact_pinned_launcher(rig, monkeypatch, dama
             api.logon_launcher(321)
     else:
         api.logon_launcher(321)
+        assert calls[0][0][0] == str(exe)
         assert calls[0][1]["env"]["AI_COMMERCE_D5_PEER_PID"] == "321"
         assert calls[0][1]["timeout"] == 5
+        assert calls[0][1]["creationflags"] == getattr(subprocess, "CREATE_NO_WINDOW", 0)
     assert native.effects == []

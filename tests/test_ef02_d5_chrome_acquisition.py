@@ -12,6 +12,48 @@ import pytest
 from ai_commerce.remote import chrome_acquisition as ca
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows paths")
+@pytest.mark.parametrize("channel, failure", [
+    ("7", None), ("7-preview", None), ("7", "missing"), ("7", "ambiguous"),
+    ("7", "reparse"), ("7", "foreign-owner"), ("7", "unsigned"), ("7", "old-major"),
+])
+def test_powershell_resolver_fails_closed_on_machine_install_evidence(tmp_path, monkeypatch, channel, failure):
+    root = tmp_path.resolve() / "Program Files"
+    installed = root / "PowerShell" / channel / "pwsh.exe"
+    installed.parent.mkdir(parents=True)
+    if failure != "missing":
+        installed.touch()
+    if failure == "ambiguous":
+        preview = root / "PowerShell" / "7-preview" / "pwsh.exe"
+        preview.parent.mkdir()
+        preview.touch()
+    shadow = tmp_path / "PRIVATE_CALLER_BIN"
+    shadow.mkdir()
+    (shadow / "pwsh.exe").touch()
+    (shadow / "powershell.exe").touch()
+    monkeypatch.setenv("PATH", str(shadow))
+    monkeypatch.setenv("ProgramFiles", str(shadow))
+    monkeypatch.setattr(ca, "_native_program_files", lambda: root)
+    if failure == "reparse":
+        monkeypatch.setattr(ca, "_no_links", lambda _: False)
+    checked = []
+
+    def custody(path):
+        checked.append(path)
+        if failure == "foreign-owner":
+            raise OSError("PRIVATE_ACL_DETAILS")
+
+    monkeypatch.setattr(ca, "_verify_powershell_custody", custody)
+    monkeypatch.setattr(ca, "_microsoft_signed_powershell", lambda _: failure != "unsigned")
+    monkeypatch.setattr(ca, "_powershell_file_major", lambda _: 5 if failure == "old-major" else 7)
+    if failure:
+        with pytest.raises(ca.AcquisitionBlocked, match="^POWERSHELL_UNAVAILABLE$"):
+            ca._powershell()
+    else:
+        assert ca._powershell() == installed
+    assert checked == ([] if failure in {"missing", "ambiguous", "reparse"} else [installed])
+
+
 def fixture(tmp_path):
     home = tmp_path / "local"
     base = home / "AI-Commerce"
@@ -357,7 +399,7 @@ def test_child_environment_is_allowlist_not_blacklist(monkeypatch):
 def test_google_signature_fails_closed(monkeypatch, tmp_path):
     import types
     env = read(*fixture(tmp_path)[:3])
-    monkeypatch.setattr(ca, "_powershell", lambda: tmp_path / "powershell.exe")
+    monkeypatch.setattr(ca, "_powershell", lambda: tmp_path / "pwsh.exe")
     monkeypatch.setattr(ca.subprocess, "run",
                         lambda *a, **k: types.SimpleNamespace(returncode=1, stdout=b""))
     with pytest.raises(ca.AcquisitionBlocked, match="CHROME_EXECUTABLE_UNTRUSTED"):
@@ -489,9 +531,7 @@ def test_repair_preflight_diagnostic_decoder_native_powershell(tmp_path):
     """Execute only the isolated read-only enum filter on actual Windows PS."""
     if os.name != "nt":
         pytest.skip("Windows PowerShell native-only filter verification")
-    from shutil import which
-    shell = which("powershell.exe")
-    assert shell, "Native Windows PowerShell 5.1 is required"
+    shell = str(ca._powershell())
     script = (Path(__file__).resolve().parents[1] /
               "scripts" / "AI-Commerce-D5-Attended-CDP.ps1").read_text(encoding="utf-8")
     isolated = "function Get-Repair-Preflight-Code" + script.split(
@@ -539,12 +579,10 @@ def test_d5_repair_config_parent_path_is_valid_and_bounded():
 
 
 def test_d5_repair_config_parent_path_native_windows(tmp_path):
-    """PowerShell 5.1: actual path selection on synthetic input, no private IO."""
+    """PowerShell 7 path selection on synthetic input."""
     if os.name != "nt":
         pytest.skip("Windows-only PowerShell path acceptance")
-    from shutil import which
-    shell = which("powershell.exe")
-    assert shell
+    shell = str(ca._powershell())
     source = (Path(__file__).resolve().parents[1] /
               "scripts" / "AI-Commerce-D5-Attended-CDP.ps1").read_text(encoding="utf-8")
     repair = source.split("if ($Mode -eq 'RepairConfig')", 1)[1].split(
@@ -570,9 +608,7 @@ def test_d5_repair_config_parent_path_native_windows(tmp_path):
 def test_attended_d5_cdp_wrapper_powershell_parser_on_hosted_windows():
     if os.name != "nt":
         pytest.skip("PowerShell AST parser acceptance only on Windows")
-    from shutil import which
-    shell = which("powershell.exe")
-    assert shell, "Windows PowerShell 5.1 is required"
+    shell = str(ca._powershell())
     source = (Path(__file__).resolve().parents[1] /
               "scripts" / "AI-Commerce-D5-Attended-CDP.ps1")
     # Parse only. Do not invoke the script, process Chrome or read private paths.
@@ -2216,7 +2252,7 @@ def test_clean_9444_task_uses_the_same_inline_launcher_without_cpython(clean_944
     owner = clean_9444
     local = owner[0]
     target, candidates = ca._clean_target(owner)
-    powershell = local / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    powershell = local / "PowerShell" / "7" / "pwsh.exe"
     monkeypatch.setattr(ca, "_powershell", lambda: powershell)
     calls = []
     replies = iter(("ENROLLED", "ALREADY_ENROLLED", "STARTED", "AUTOSTART_NOT_ENROLLED",
@@ -2256,7 +2292,7 @@ def test_clean_9444_task_uses_the_same_inline_launcher_without_cpython(clean_944
 @pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell launcher")
 def test_clean_9444_launcher_profile_check_offline():
     checks = ca._CLEAN_9444_LAUNCHER.split("\nfunction Get-OwnerSid", 1)[0]
-    command = checks + r"""
+    command = "if ($PSVersionTable.PSVersion.Major -lt 7) { exit 7 }\n" + checks + r"""
 $local = [Environment]::GetFolderPath('LocalApplicationData')
 $root = Join-Path $local 'AI-Commerce'
 $profileDir = Join-Path $root 'WakeHub-9444-Clean'

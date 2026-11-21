@@ -542,7 +542,8 @@ class WindowsNative:
                 [str(ca._powershell()), "-NoProfile", "-NonInteractive", "-File",
                  str(policy.release_root / RELEASE_FILES[2])], input=canonical(envelope),
                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=45,
-                env=ca._child_environment(), check=False)
+                env=ca._child_environment(), check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             value = decode(response.stdout)
             if set(value) not in ({"code"}, {"code", "pid", "created"}) or value["code"] not in {"OK", *PUBLIC_CODES}:
                 raise ValueError()
@@ -1341,7 +1342,7 @@ class Win32:
             launcher = private_path(policy.state_root / "launcher.ps1")
             if digest(launcher.read_bytes()) != policy.files[RELEASE_FILES[2]]:
                 raise ValueError()
-            executable = protected_path(ca._powershell())
+            executable = ca._powershell()
             child = ca._child_environment()
             child["AI_COMMERCE_D5_PEER_PID"] = str(pid)
             script = ("$p=Get-CimInstance Win32_Process -Filter ('ProcessId='+[int]$env:AI_COMMERCE_D5_PEER_PID);"
@@ -1349,15 +1350,16 @@ class Win32:
                       "[Console]::OutputEncoding=[Text.UTF8Encoding]::new();"
                       "@{image=$p.ExecutablePath;argv=$p.CommandLine}|ConvertTo-Json -Compress")
             result = subprocess.run([str(executable), "-NoProfile", "-NonInteractive", "-Command", script],
-                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=child, timeout=5, check=False)
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=child, timeout=5, check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if result.returncode or len(result.stdout) > 8192:
                 raise ValueError()
             proc = decode(result.stdout)
-            if set(proc) != {"image", "argv"} or Path(proc["image"]).resolve() != executable:
+            if set(proc) != {"image", "argv"} or Path(proc["image"]) != executable:
                 raise ValueError()
             argv = ca._commandline_argv(proc["argv"])
             expected = ["-noprofile", "-noninteractive", "-file", str(launcher).casefold(), "-logon"]
-            if len(argv) != 6 or Path(argv[0]).resolve() != executable or [a.casefold() for a in argv[1:]] != expected:
+            if len(argv) != 6 or Path(argv[0]) != executable or [a.casefold() for a in argv[1:]] != expected:
                 raise ValueError()
         except Exception:
             raise D5Blocked("UNTRUSTED_PEER_ATTESTATION") from None

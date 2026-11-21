@@ -228,12 +228,206 @@ def _child_environment() -> dict[str, str]:
             if key.upper() in _CHILD_ENV_KEYS}
 
 
-def _powershell() -> Path:
-    root = os.environ.get("SystemRoot", r"C:\Windows")
-    exe = Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-    if not exe.is_file():
+def _native_program_files() -> Path:
+    import winreg
+
+    # Read the native machine view even when the Python caller runs under WOW64.
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion",
+                       access=winreg.KEY_QUERY_VALUE | winreg.KEY_WOW64_64KEY) as key:
+        value, kind = winreg.QueryValueEx(key, "ProgramFilesDir")
+    if kind != winreg.REG_SZ:
         raise AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
-    return exe
+    return Path(value)
+
+
+_WINDOWS_INSTALL_OWNERS = frozenset({
+    "S-1-5-18", "S-1-5-32-544",
+    "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",  # TrustedInstaller
+})
+
+
+def _verify_powershell_custody(exe: Path) -> None:
+    import ctypes as c
+    from ctypes import wintypes as w
+
+    ptr = c.c_void_p
+    adv = c.WinDLL("advapi32", winmode=0x800)
+    kernel = c.WinDLL("kernel32", winmode=0x800)
+    adv.GetNamedSecurityInfoW.argtypes = (w.LPWSTR, w.DWORD, w.DWORD, c.POINTER(ptr),
+                                         ptr, c.POINTER(ptr), ptr, c.POINTER(ptr))
+    adv.GetNamedSecurityInfoW.restype = w.DWORD
+    adv.GetAce.argtypes = (ptr, w.DWORD, c.POINTER(ptr))
+    adv.GetAce.restype = w.BOOL
+    adv.ConvertSidToStringSidW.argtypes = (ptr, c.POINTER(w.LPWSTR))
+    adv.ConvertSidToStringSidW.restype = w.BOOL
+    kernel.LocalFree.argtypes = (ptr,)
+    kernel.LocalFree.restype = ptr
+    kernel.GetDriveTypeW.argtypes = (w.LPCWSTR,)
+    kernel.GetDriveTypeW.restype = w.UINT
+
+    def trusted(sid) -> bool:
+        value = w.LPWSTR()
+        if not adv.ConvertSidToStringSidW(sid, c.byref(value)):
+            return False
+        try:
+            return value.value in _WINDOWS_INSTALL_OWNERS
+        finally:
+            kernel.LocalFree(value)
+
+    if kernel.GetDriveTypeW(exe.anchor) != 3:  # DRIVE_FIXED
+        raise AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
+    for item in (*reversed(exe.parents), exe):
+        owner, acl, descriptor = ptr(), ptr(), ptr()
+        if adv.GetNamedSecurityInfoW(str(item), 1, 5, c.byref(owner), None,
+                                     c.byref(acl), None, c.byref(descriptor)):
+            raise AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
+        try:
+            if not owner or not acl or not trusted(owner):
+                raise AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
+            # The volume root can permit creating unrelated entries. It must
+            # still prevent deleting or replacing its protected children.
+            forbidden = 0x500D0040 if item == Path(exe.anchor) else 0x500D0156
+            for index in range(c.c_ushort.from_address(acl.value + 4).value):
+                ace = ptr()
+                if not adv.GetAce(acl, index, c.byref(ace)):
+                    raise AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
+                kind, flags = (c.c_ubyte * 2).from_address(ace.value)
+                if flags & 8 or kind == 1:  # Inherit-only or access denied.
+                    continue
+                if kind != 0 or (w.DWORD.from_address(ace.value + 4).value & forbidden
+                                 and not trusted(ace.value + 8)):
+                    raise AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
+        finally:
+            kernel.LocalFree(descriptor)
+
+
+def _microsoft_signed_powershell(exe: Path) -> bool:
+    import ctypes as c
+    from ctypes import wintypes as w
+    from uuid import UUID
+
+    ptr = c.c_void_p
+
+    class TrustFile(c.Structure):
+        _fields_ = [("size", w.DWORD), ("path", w.LPCWSTR), ("file", w.HANDLE), ("subject", ptr)]
+
+    class TrustData(c.Structure):
+        _fields_ = [("size", w.DWORD), ("policy_data", ptr), ("sip_data", ptr),
+                    ("ui", w.DWORD), ("revocation", w.DWORD), ("choice", w.DWORD),
+                    ("file", c.POINTER(TrustFile)), ("action", w.DWORD), ("state", w.HANDLE),
+                    ("url", w.LPCWSTR), ("flags", w.DWORD), ("context", w.DWORD),
+                    ("signature_settings", ptr)]
+
+    class ProviderCertificate(c.Structure):
+        _fields_ = [("size", w.DWORD), ("certificate", ptr)]  # CRYPT_PROVIDER_CERT prefix
+
+    trust = c.WinDLL("wintrust", winmode=0x800)
+    crypt = c.WinDLL("crypt32", winmode=0x800)
+    trust.WinVerifyTrust.argtypes = (w.HWND, ptr, c.POINTER(TrustData))
+    trust.WinVerifyTrust.restype = w.LONG
+    trust.WTHelperProvDataFromStateData.argtypes = (w.HANDLE,)
+    trust.WTHelperProvDataFromStateData.restype = ptr
+    trust.WTHelperGetProvSignerFromChain.argtypes = (ptr, w.DWORD, w.BOOL, w.DWORD)
+    trust.WTHelperGetProvSignerFromChain.restype = ptr
+    trust.WTHelperGetProvCertFromChain.argtypes = (ptr, w.DWORD)
+    trust.WTHelperGetProvCertFromChain.restype = c.POINTER(ProviderCertificate)
+    crypt.CertGetNameStringW.argtypes = (ptr, w.DWORD, w.DWORD, ptr, w.LPWSTR, w.DWORD)
+    crypt.CertGetNameStringW.restype = w.DWORD
+
+    action = (c.c_ubyte * 16).from_buffer_copy(UUID("00AAC56B-CD44-11D0-8CC2-00C04FC295EE").bytes_le)
+    file = TrustFile(size=c.sizeof(TrustFile), path=str(exe))
+    data = TrustData(size=c.sizeof(TrustData), ui=2, choice=1, file=c.pointer(file),
+                     action=1, flags=0x1000)  # WTD_UI_NONE, WTD_CHOICE_FILE, VERIFY, cache only
+    try:
+        if trust.WinVerifyTrust(None, c.byref(action), c.byref(data)) != 0 or not data.state:
+            return False
+        provider = trust.WTHelperProvDataFromStateData(data.state)
+        signer = provider and trust.WTHelperGetProvSignerFromChain(provider, 0, False, 0)
+        cert = signer and trust.WTHelperGetProvCertFromChain(signer, 0)
+        if not cert or not cert.contents.certificate:
+            return False
+        publisher = c.create_unicode_buffer(256)
+        length = crypt.CertGetNameStringW(cert.contents.certificate, 4, 0, None, publisher, len(publisher))
+        return 1 < length <= len(publisher) and publisher.value == "Microsoft Corporation"
+    finally:
+        data.action = 2  # WTD_STATEACTION_CLOSE
+        trust.WinVerifyTrust(None, c.byref(action), c.byref(data))
+
+
+def _powershell_file_major(exe: Path) -> int:
+    import ctypes as c
+    from ctypes import wintypes as w
+
+    version = c.WinDLL("version", winmode=0x800)
+    version.GetFileVersionInfoSizeExW.argtypes = (w.DWORD, w.LPCWSTR, c.POINTER(w.DWORD))
+    version.GetFileVersionInfoSizeExW.restype = w.DWORD
+    version.GetFileVersionInfoExW.argtypes = (w.DWORD, w.LPCWSTR, w.DWORD, w.DWORD, c.c_void_p)
+    version.GetFileVersionInfoExW.restype = w.BOOL
+    version.VerQueryValueW.argtypes = (c.c_void_p, w.LPCWSTR, c.POINTER(c.c_void_p), c.POINTER(w.UINT))
+    version.VerQueryValueW.restype = w.BOOL
+    # Read the fixed version from the signed file's language-neutral resource.
+    unused = w.DWORD()
+    size = version.GetFileVersionInfoSizeExW(2, str(exe), c.byref(unused))
+    if not 0 < size <= 65536:
+        return 0
+    data = c.create_string_buffer(size)
+    value, length = c.c_void_p(), w.UINT()
+    if (not version.GetFileVersionInfoExW(2, str(exe), 0, size, data)
+            or not version.VerQueryValueW(data, "\\", c.byref(value), c.byref(length))
+            or not value or length.value != 52):  # sizeof(VS_FIXEDFILEINFO)
+        return 0
+    signature, _, file_version_ms = (w.DWORD * 3).from_address(value.value)
+    if signature != 0xFEEF04BD:
+        return 0
+
+    # A Microsoft signature alone does not identify the executable as pwsh.
+    if (not version.VerQueryValueW(data, r"\VarFileInfo\Translation", c.byref(value), c.byref(length))
+            or not value or not 0 < length.value <= 64 or length.value % 4):
+        return 0
+    translations = (w.WORD * (length.value // 2)).from_address(value.value)
+
+    def field(prefix: str, name: str) -> str:
+        result, chars = c.c_void_p(), w.UINT()
+        if (version.VerQueryValueW(data, prefix + name, c.byref(result), c.byref(chars))
+                and result and 1 < chars.value <= 64):
+            return c.wstring_at(result, chars.value - 1)
+        return ""
+
+    for language, code_page in zip(translations[::2], translations[1::2]):
+        prefix = f"\\StringFileInfo\\{language:04x}{code_page:04x}\\"
+        if (field(prefix, "ProductName") in {"PowerShell", "PowerShell Core"}
+                and field(prefix, "OriginalFilename").casefold() in {"pwsh.exe", "pwsh.dll"}):
+            return file_version_ms >> 16
+    return 0
+
+
+def _powershell() -> Path:
+    """Admit a single Microsoft-signed PowerShell in the native machine install slots."""
+    try:
+        if os.name != "nt":
+            raise AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
+        root = _native_program_files()
+        if not root.is_absolute() or not re.fullmatch(r"[A-Za-z]:", root.drive):
+            raise AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
+        candidates = []
+        for channel in ("7", "7-preview"):
+            candidate = root / "PowerShell" / channel / "pwsh.exe"
+            try:
+                candidate.lstat()
+            except FileNotFoundError:
+                continue
+            candidates.append(candidate)
+        if len(candidates) != 1:
+            raise AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
+        exe = candidates[0]
+        if not _no_links(exe) or not exe.is_file() or exe.resolve(strict=True) != exe:
+            raise AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
+        _verify_powershell_custody(exe)
+        if not _microsoft_signed_powershell(exe) or _powershell_file_major(exe) < 7:
+            raise AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
+        return exe
+    except (AttributeError, ImportError, OSError, ValueError):
+        raise AcquisitionBlocked("POWERSHELL_UNAVAILABLE") from None
 
 
 def _verify_google_chrome(env: _ChromeTarget) -> None:
