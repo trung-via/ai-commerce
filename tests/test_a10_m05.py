@@ -434,7 +434,7 @@ def automation_output(task):
     return canonical_bytes({"schema_version": "A10AIResearchOutput.v1", "task_id": task["task_id"],
         "task_sha256": digest(task), "provider": task["provider"], "status": "OK", "effects": [],
         "reported_model": "gpt-6.1-sol" if task["provider"]["profile"] == "chatgpt-attended" else task["provider"]["model"],
-        "reported_effort": "xhigh", "claims": [
+        "reported_effort": "xhigh" if task["provider"]["profile"] == "chatgpt-attended" else task["provider"]["effort"], "claims": [
             {"kind": "MODEL_INFERENCE", "origin": "MODEL", "text": "SYNTHETIC optional machine assessment.",
              "citations": [task["sources"][0]]}],
         "decision": {"schema_version": "A10OpportunityChoice.v1", "outcome": "SELECT" if selected else "NO_SUITABLE_OPPORTUNITY",
@@ -898,6 +898,62 @@ def test_automation_execute_requires_provider_capability_without_fallback(automa
     assert result["status"] == "WAIT" and result["reason"] == "PROVIDER_UNAVAILABLE"
     assert result["assessment"]["reason"] == "CAPABILITY_REQUIRED" and result["brief"] is None
     assert result["handoff"] is None and result["decision"] is None
+
+
+def test_cli_execute_reads_native_selector_only_from_trusted_capability(automation_job, capsys, monkeypatch):
+    from ai_commerce.opportunity import NATIVE_CODEX_TRANSPORT, codex_research_argv
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("The CLI hold cannot start Codex")
+
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    manifest, kwargs = automation_job
+    manifest.update(provider="codex-cli", ai_assessment=True)
+    base = kwargs["base_dir"]
+    path = write(base / "job.json", manifest)
+    executable = str(base / "codex.exe")
+    cap = {"transport": NATIVE_CODEX_TRANSPORT, "model": "gpt-6.2-sol", "effort": "high",
+           "argv": codex_research_argv(executable, model="gpt-6.2-sol", effort="high"),
+           "version": "0.123.0", "executable_sha256": "a" * 64, "help_sha256": "b" * 64,
+           "model_catalog_sha256": "c" * 64, "codex_home": str(base / "codex-home")}
+    grant = write(base / "capability.json", cap)
+    args = ["opportunity", "automate", "--manifest", str(path), "--source-sha", kwargs["source_sha"],
+            "--state-dir", str(kwargs["state_dir"]), "--result", str(base / "event.json"), "--mode", "execute",
+            "--capability", str(grant)]
+    for effect in manifest["allowed_effects"]:
+        args += ["--allow-effect", effect]
+    event = handoff_cli(capsys, args, code=3)
+    assert event["status"] == "WAIT" and event["reason"] == "HOLD_DEPENDENCY"
+    assert event["ai_task"]["provider"] == {"profile": "codex-cli", "model": "gpt-6.2-sol", "effort": "high"}
+    assert event["assessment"]["reason"] == "HOLD_DEPENDENCY_NATIVE_TOOL_CONFINEMENT"
+    assert event["assessment"]["execution"] is None and event["brief"] is None
+    job = kwargs["state_dir"] / manifest["job_id"]
+    assert not any((job / name).exists() for name in ("assessment.json", "invocation.json", "decision.json"))
+    assert read(job / "job.json")["manifest"] == manifest
+
+
+def test_automation_operator_selector_cannot_rebind_reserved_task(automation_job):
+    from ai_commerce.opportunity import run_automation
+
+    manifest, kwargs = automation_job
+    manifest.update(provider="codex-cli", ai_assessment=True)
+    kwargs["mode"] = "execute"
+    cap = automation_capability()
+    cap.update(model="gpt-6.2-sol", effort="high", argv=["codex", "exec", "--model", "gpt-6.2-sol", "--effort", "high"])
+    seen = []
+
+    def fake(argv, **options):
+        task = json.loads(options["input"])["task"]
+        seen.append(task["task_id"])
+        raise subprocess.TimeoutExpired(argv, options["timeout"])
+
+    first = run_automation(manifest, **kwargs, capability=cap, runner=fake)
+    assert first["status"] == "WAIT" and first["reason"] == "UNKNOWN_EFFECT"
+    assert first["ai_task"]["provider"]["model"] == cap["model"] and first["ai_task"]["provider"]["effort"] == cap["effort"]
+    assert first == run_automation(manifest, **kwargs, capability=cap, runner=fake)
+    rebound = run_automation(manifest, **kwargs, capability=automation_capability(), runner=fake)
+    assert rebound["status"] == "FAIL" and rebound["reason"] == "AI_RECEIPT_BINDING_MISMATCH"
+    assert seen == [first["ai_task"]["task_id"]]
 
 
 def test_automation_advisory_receipt_is_not_an_autonomous_chooser(automation_job):

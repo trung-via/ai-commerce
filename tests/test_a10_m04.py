@@ -26,10 +26,10 @@ from ai_commerce.opportunity.trends import TrendRule, build_series, evaluate_tre
 AS_OF = "2026-10-29T12:00:00Z"
 
 
-def research_task(profile="codex-cli", stage="OPPORTUNITY_ASSESSMENT"):
+def research_task(profile="codex-cli", stage="OPPORTUNITY_ASSESSMENT", **selector):
     from ai_commerce.opportunity import make_ai_research_task
     return make_ai_research_task(stage=stage, sources=[{"ref": "sha256:" + "a" * 64, "sha256": "a" * 64}],
-                                source_sha="b" * 40, provider=profile, context={"synthetic": True})
+                                source_sha="b" * 40, provider=profile, context={"synthetic": True}, **selector)
 
 
 def research_capability(task):
@@ -181,45 +181,203 @@ def test_real_ai_process_requires_exact_installed_authentication_probe(monkeypat
     assert receipt["effect"] == "NOT_ATTEMPTED" and receipt["execution"] is None
 
 
-@pytest.mark.parametrize("failure", [None, "binary", "capability", "authentication"])
-def test_installed_probe_matches_exact_bytes_before_model_process(tmp_path, monkeypatch, failure):
-    from types import SimpleNamespace
+def test_legacy_arbitrary_probe_capability_is_inert(monkeypatch):
     from ai_commerce.opportunity import run_ai_research
-    from ai_commerce.opportunity.core import models
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Legacy capability cannot run probes or inference")
+
+    monkeypatch.setattr(subprocess, "run", forbidden)
     task = research_task()
-    executable = tmp_path / "synthetic-codex.exe"
-    executable.write_bytes(b"SYNTHETIC binary, never executed")
     capability = research_capability(task)
     capability["installed_probe"] = {
-        "executable_sha256": sha256_bytes(executable.read_bytes()),
-        "capability": {"argv": ["codex", "--synthetic-capabilities"], "stdout_sha256": sha256_bytes(b"exact-capability")},
-        "authentication": {"argv": ["codex", "--synthetic-auth-status"], "stdout_sha256": sha256_bytes(b"authenticated")}}
-    if failure == "binary":
-        capability["installed_probe"]["executable_sha256"] = "f" * 64
-    monkeypatch.setattr(models.shutil, "which", lambda _: str(executable))
-    calls = []
-    def fake(argv, **kwargs):
-        calls.append(argv)
-        assert argv[0] == str(executable) and kwargs["shell"] is False
-        if "--synthetic-capabilities" in argv:
-            raw = b"changed-version" if failure == "capability" else b"exact-capability"
-        elif "--synthetic-auth-status" in argv:
-            raw = b"signed-out" if failure == "authentication" else b"authenticated"
-        else:
-            assert json.loads(kwargs["input"])["task"] == task
-            raw = research_output(task)
-        return SimpleNamespace(returncode=0, stdout=raw)
-    monkeypatch.setattr(subprocess, "run", fake)
-    reserved = []
-    receipt = run_ai_research(task, permissions=["AI_RESEARCH"], capability=capability, before_invoke=reserved.append)
-    if failure is None:
-        assert receipt["status"] == "OK" and len(calls) == 3
-        assert reserved == [receipt["execution"]]
-        assert receipt["execution"]["kind"] == "AUTHENTICATED_CLI_PROBE"
-        assert receipt["execution"]["capability_sha256"] == digest(capability)
+        "executable_sha256": "a" * 64,
+        "capability": {"argv": ["codex", "exec", "injected"], "stdout_sha256": "b" * 64},
+        "authentication": {"argv": ["codex", "login", "status"], "stdout_sha256": "c" * 64},
+    }
+    receipt = run_ai_research(task, permissions=["AI_RESEARCH"], capability=capability, before_invoke=forbidden)
+    assert receipt["status"] == "UNSUPPORTED" and receipt["effect"] == "NOT_ATTEMPTED"
+    assert receipt["execution"] is None
+
+
+@pytest.mark.parametrize("profile,model", [("codex-cli", "gpt-6.2-sol"), ("antigravity-cli", "gemini-4-hydrogen")])
+def test_ai_operator_selector_is_explicit_and_content_addressed(profile, model):
+    from ai_commerce.opportunity import SignalValidationError, ai_provider_profile, validate_ai_research_task
+
+    historical = research_task(profile)
+    explicit = research_task(profile, model=model, effort="high")
+    assert historical["provider"] == ai_provider_profile(profile)
+    assert historical == research_task(profile, model=historical["provider"]["model"], effort="xhigh")
+    assert explicit["provider"] == {"profile": profile, "model": model, "effort": "high"}
+    assert historical["task_id"] != explicit["task_id"]
+    changed = deepcopy(explicit)
+    changed["provider"]["effort"] = "low"
+    with pytest.raises(SignalValidationError, match="AI_TASK_ID_MISMATCH"):
+        validate_ai_research_task(changed)
+    for invalid in ({"model": "--config", "effort": "high"}, {"model": model, "effort": "high\nfoo"},
+                    {"model": model}, {"effort": "high"}):
+        with pytest.raises(SignalValidationError, match="AI_SELECTOR_INVALID"):
+            research_task(profile, **invalid)
+
+
+@pytest.fixture
+def native_codex(tmp_path):
+    from ai_commerce.opportunity import NATIVE_CODEX_TRANSPORT, codex_research_argv
+
+    executable = tmp_path / "codex.exe"
+    executable.write_bytes(b"SYNTHETIC, never an executable")
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    task = research_task(model="gpt-6.2-sol", effort="high")
+    argv = codex_research_argv(str(executable), model="gpt-6.2-sol", effort="high")
+    help_bytes = " ".join(argv[1:]).encode()
+    catalog = {"client_version": "0.123.0", "models": [{"slug": "gpt-6.2-sol",
+               "supported_reasoning_levels": [{"effort": "high"}]}]}
+    catalog_path = home / "models_cache.json"
+    catalog_path.write_bytes(canonical_bytes(catalog))
+    cap = {"transport": NATIVE_CODEX_TRANSPORT, "argv": argv, "model": "gpt-6.2-sol", "effort": "high",
+           "executable_sha256": sha256_bytes(executable.read_bytes()), "version": "0.123.0",
+           "help_sha256": sha256_bytes(help_bytes), "model_catalog_sha256": sha256_bytes(catalog_path.read_bytes()),
+           "codex_home": str(home)}
+    return task, cap, help_bytes, catalog_path
+
+
+@pytest.mark.parametrize("fault,reason", [("wrong-provider", "NATIVE_PROVIDER_UNSUPPORTED"),
+                                         ("selector-mismatch", "AI_CAPABILITY_SELECTOR")])
+def test_native_codex_grant_cannot_attach_to_another_task(native_codex, fault, reason):
+    from ai_commerce.opportunity import run_ai_research
+
+    task, cap, _, _ = native_codex
+    if fault == "wrong-provider":
+        task = research_task("antigravity-cli", model=cap["model"], effort=cap["effort"])
     else:
-        assert receipt["status"] == "UNSUPPORTED" and receipt["effect"] == "NOT_ATTEMPTED"
-        assert not reserved and len(calls) == {"binary": 0, "capability": 1, "authentication": 2}[failure]
+        task = research_task(model=cap["model"], effort="low")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Mismatched capability cannot reach the runner or journal")
+
+    receipt = run_ai_research(task, permissions=["AI_RESEARCH"], capability=cap, runner=forbidden,
+                              before_invoke=forbidden)
+    assert (receipt["status"], receipt["reason"], receipt["effect"]) == ("UNSUPPORTED", reason, "NOT_ATTEMPTED")
+
+
+@pytest.mark.parametrize("fault,probe_count", [
+    (None, 3), ("quota", 3), ("flag", 0), ("binary", 0), ("catalog-hash", 0), ("catalog-effort", 0),
+    ("version", 1), ("help", 2), ("login", 3), ("jsonl", 3), ("duplicate-key", 3),
+    ("duplicate-message", 3), ("tool", 3), ("session-tool", 3), ("no-session", 3),
+    ("session-prompt", 3), ("session-model", 3), ("session-effort", 3), ("task-sha", 3),
+    ("reported-model", 3), ("rights", 3), ("nonzero", 3), ("timeout", 3), ("stderr-limit", 3),
+])
+def test_native_codex_probes_and_session_are_bound_before_output_is_accepted(native_codex, fault, probe_count):
+    from ai_commerce.opportunity import run_ai_research, validate_ai_research_receipt
+
+    task, cap, help_bytes, catalog_path = native_codex
+    if fault == "flag":
+        cap["argv"].insert(-1, "--dangerously-bypass-approvals-and-sandbox")
+    if fault == "binary":
+        cap["executable_sha256"] = "f" * 64
+    if fault == "catalog-hash":
+        cap["model_catalog_sha256"] = "f" * 64
+    if fault == "catalog-effort":
+        raw = catalog_path.read_bytes().replace(b'"high"', b'"low"')
+        catalog_path.write_bytes(raw)
+        cap["model_catalog_sha256"] = sha256_bytes(raw)
+
+    probes, invocations, reserved = [], [], []
+    thread = "1a2b3c4d-0000-0000-0000-0123456789ab"
+
+    def fake(argv, *, input, cwd, codex_home, shell, timeout, max_bytes):
+        assert not shell and argv[0] == cap["argv"][0]
+        assert codex_home == cap["codex_home"] and cwd != codex_home
+        assert max_bytes == 1024 * 1024 and Path(cwd).is_dir()
+        args = argv[1:]
+        if args in (["--version"], ["exec", "--help"], ["login", "status"]):
+            assert input == b"" and timeout == 15 and not reserved
+            probes.append(args)
+            if args == ["--version"]:
+                value = b"codex-cli 0.0.0" if fault == "version" else b"codex-cli 0.123.0"
+            elif args == ["exec", "--help"]:
+                value = b"changed help" if fault == "help" else help_bytes
+            else:
+                auth = b"Logged in using API key" if fault == "login" else b"Logged in using ChatGPT"
+                return subprocess.CompletedProcess(argv, 0, b"", auth)
+            return subprocess.CompletedProcess(argv, 0, value, b"")
+
+        assert timeout == 60 and len(reserved) == 1
+        packet = json.loads(input)
+        assert packet["task"] == task and packet["task_sha256"] == digest(task)
+        expected = [str(Path(cwd) / "output-schema.json") if arg == "{schema}" else arg for arg in cap["argv"]]
+        assert argv == expected
+        schema = json.loads(Path(expected[-3]).read_bytes())
+        Draft202012Validator.check_schema(schema)
+        assert schema["properties"]["task_sha256"]["enum"] == [digest(task)]
+        assert schema["additionalProperties"] is False
+        invocations.append(None)
+        if fault == "timeout":
+            raise subprocess.TimeoutExpired(argv, timeout)
+        value = json.loads(research_output(task))
+        if fault == "task-sha":
+            value["task_sha256"] = "c" * 64
+        elif fault == "reported-model":
+            value["reported_model"] = "self-reported-fallback"
+        elif fault == "rights":
+            value["rights_status"] = "VERIFIED"
+        elif fault == "quota":
+            value.update(status="QUOTA", claims=[])
+        output = canonical_bytes(value).decode()
+        records = [
+            {"type": "session_meta", "payload": {"id": thread, "cli_version": cap["version"], "model_provider": "openai"}},
+            {"type": "turn_context", "payload": {"model": "fallback" if fault == "session-model" else cap["model"],
+                                                "effort": "low" if fault == "session-effort" else cap["effort"]}},
+            {"type": "response_item", "payload": {"type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "different prompt" if fault == "session-prompt" else input.decode()}]}},
+        ]
+        if fault == "session-tool":
+            records.append({"type": "response_item", "payload": {"type": "function_call"}})
+        if fault != "no-session":
+            directory = Path(codex_home) / "sessions" / datetime.now(timezone.utc).strftime("%Y/%m/%d")
+            directory.mkdir(parents=True)
+            path = directory / ("rollout-fixture-" + thread + ".jsonl")
+            path.write_bytes(b"\n".join(canonical_bytes(record) for record in records) + b"\n")
+
+        item = {"id": "item_0", "type": "agent_message", "text": output}
+        events = [{"type": "thread.started", "thread_id": thread}, {"type": "turn.started"},
+                  {"type": "item.completed", "item": item}]
+        if fault == "duplicate-message":
+            events.append({"type": "item.completed", "item": {**item, "id": "item_1"}})
+        elif fault == "tool":
+            events.append({"type": "item.completed", "item": {"id": "tool", "type": "command_execution", "text": "fixture"}})
+        events.append({"type": "turn.completed"})
+        stdout = b"\n".join(canonical_bytes(event) for event in events) + b"\n"
+        if fault == "jsonl":
+            stdout = canonical_bytes(value)
+        elif fault == "duplicate-key":
+            stdout = stdout.replace(b'"type":"turn.started"', b'"type":"turn.started","type":"turn.started"')
+        invocations[-1] = stdout
+        return subprocess.CompletedProcess(argv, int(fault == "nonzero"), stdout,
+                                           b"x" * (max_bytes + 1) if fault == "stderr-limit" else b"")
+
+    receipt = run_ai_research(task, permissions=["AI_RESEARCH"], capability=cap, runner=fake,
+                              before_invoke=reserved.append)
+    assert len(probes) == probe_count
+    assert validate_ai_research_receipt(receipt, task) == receipt
+    if fault in (None, "quota"):
+        assert len(invocations) == 1 and reserved == [receipt["execution"]]
+        assert receipt["status"] == ("OK" if fault is None else "QUOTA")
+        assert receipt["reason"] == "NATIVE_CODEX_MOCK_VERIFIED"
+        assert receipt["reported_model"] == "gpt-6.2-sol" and receipt["reported_effort"] == "high"
+        assert receipt["execution"]["kind"] == "MOCK_AUTHENTICATED_RUNNER"
+        assert receipt["execution"]["capability_sha256"] == digest(cap)
+        assert receipt["raw_output_sha256"] == sha256_bytes(invocations[0])
+    else:
+        assert receipt["execution"] is None and receipt["decision"] is None
+        assert all(claim["origin"] == "LOCAL_SNAPSHOT" for claim in receipt["claims"])
+        if fault in ("flag", "binary", "catalog-hash", "catalog-effort", "version", "help", "login"):
+            assert not reserved and not invocations
+            assert (receipt["status"], receipt["effect"]) == ("UNSUPPORTED", "NOT_ATTEMPTED")
+        else:
+            assert len(reserved) == len(invocations) == 1
+            assert (receipt["status"], receipt["effect"]) == ("UNKNOWN_EFFECT", "UNKNOWN")
 
 
 def test_model_identity_text_cannot_authenticate_an_attended_or_parsed_receipt():
@@ -234,6 +392,9 @@ def test_model_identity_text_cannot_authenticate_an_attended_or_parsed_receipt()
     from ai_commerce.opportunity.core.models import OpportunityError
     with pytest.raises(OpportunityError, match="AI_EXECUTION_INVALID"):
         validate_ai_research_receipt(forged, task)
+    legacy_probe = {**forged["execution"], "kind": "AUTHENTICATED_CLI_PROBE"}
+    rejected = parse_ai_research_output(task, research_output(task), effect="PROCESS_INVOKED", execution=legacy_probe)
+    assert rejected["status"] == "UNKNOWN_EFFECT" and rejected["execution"] is None
 
 
 @pytest.fixture(autouse=True)

@@ -10,13 +10,17 @@ provider discovery, model fallback, retry, scheduling or automated UI Send exist
 """
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
-import shutil
 import subprocess
+import tempfile
+import time
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal, TypedDict
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -217,8 +221,9 @@ class A10AIResearchReceipt(TypedDict):
     execution: dict | None
 
 
-def ai_provider_profile(name: str) -> AIProviderSelector:
-    """Explicit A10 selectors only; never changes engineering model defaults.
+def ai_provider_profile(name: str, *, model: str | None = None,
+                        effort: str | None = None) -> AIProviderSelector:
+    """Historical defaults or an explicit pair supplied by the operator.
 
     Attended ChatGPT has no programmatically attested model/effort. HUMAN_SELECTED
     is a selector, not a claim that any particular model ran. No UI/CDP is used.
@@ -229,7 +234,14 @@ def ai_provider_profile(name: str) -> AIProviderSelector:
         "antigravity-cli": ("gemini-4-hydrogen-xhigh", "xhigh"),
     }
     require(isinstance(name, str) and name in profiles, "AI_PROVIDER_UNSUPPORTED")
-    model, effort = profiles[name]
+    if model is None and effort is None:
+        model, effort = profiles[name]
+    elif name == "chatgpt-attended":
+        require((model, effort) == profiles[name], "AI_SELECTOR_MISMATCH")
+    else:
+        require(isinstance(model, str) and isinstance(effort, str)
+                and re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", model) is not None
+                and effort in ("minimal", "low", "medium", "high", "xhigh"), "AI_SELECTOR_INVALID")
     return {"profile": name, "model": model, "effort": effort}
 
 
@@ -268,16 +280,19 @@ def validate_ai_research_task(task: dict) -> A10AIResearchTask:
             and re.fullmatch(r"[a-f0-9]{40}(?:[a-f0-9]{24})?", task["source_sha"]) is not None, "AI_SOURCE_SHA_INVALID")
     _ai_sources(task["sources"])
     _ai_object(task["provider"], {"profile", "model", "effort"}, "AI_SELECTOR_INVALID")
-    require(task["provider"] == ai_provider_profile(task["provider"]["profile"]), "AI_SELECTOR_MISMATCH")
+    selector = task["provider"]
+    require(selector == ai_provider_profile(selector["profile"], model=selector["model"],
+                                            effort=selector["effort"]), "AI_SELECTOR_MISMATCH")
     require(task["allowed_effects"] == ["RETURN_RESEARCH"] and isinstance(task["context"], dict), "AI_EFFECT_NOT_ALLOWED")
     require(task["task_id"] == "aitask-" + digest({k: v for k, v in task.items() if k != "task_id"}), "AI_TASK_ID_MISMATCH")
     return task
 
 
 def make_ai_research_task(*, stage: AIStage, sources: list[AISourceRef], source_sha: str,
-                          provider: str, context: dict) -> A10AIResearchTask:
+                          provider: str, context: dict, model: str | None = None,
+                          effort: str | None = None) -> A10AIResearchTask:
     body = {"schema_version": "A10AIResearchTask.v1", "stage": stage, "sources": deepcopy(sources),
-            "source_sha": source_sha, "provider": ai_provider_profile(provider),
+            "source_sha": source_sha, "provider": ai_provider_profile(provider, model=model, effort=effort),
             "allowed_effects": ["RETURN_RESEARCH"], "context": deepcopy(context)}
     return validate_ai_research_task({"task_id": "aitask-" + digest(body), **body})
 
@@ -371,8 +386,14 @@ def parse_ai_research_output(task: dict, raw: bytes, *, effect: str,
     Provider reports are self-reported selectors, not provider attestation. Any
     malformed/unauthorized output is discarded and ends in UNKNOWN_EFFECT.
     """
+    return _parse_ai_research_output(task, raw, effect=effect, execution=execution)
+
+
+def _parse_ai_research_output(task, raw, *, effect, execution, native_stdout=None):
     validate_ai_research_task(task)
+    retained = raw if native_stdout is None else native_stdout
     try:
+        require(execution is None or execution.get("kind") == "MOCK_AUTHENTICATED_RUNNER", "AI_NATIVE_PROOF_REQUIRED")
         require(isinstance(raw, bytes) and 0 < len(raw) <= AI_MAX_BYTES, "AI_OUTPUT_SIZE")
         value = parse_json(raw)
         keys = {"schema_version", "task_id", "task_sha256", "provider", "status",
@@ -384,13 +405,14 @@ def parse_ai_research_output(task: dict, raw: bytes, *, effect: str,
                 and value["task_sha256"] == digest(task) and value["provider"] == task["provider"], "AI_OUTPUT_BINDING")
         require(value["effects"] == [], "AI_UNAUTHORIZED_EFFECT")
         _ai_model_claims(value["claims"], task)
-        return ai_research_receipt(task, status=value["status"], reason="STRUCTURED_OUTPUT",
-                                  effect=effect, claims=value["claims"], raw=raw,
+        reason = "STRUCTURED_OUTPUT" if native_stdout is None else "NATIVE_CODEX_MOCK_VERIFIED"
+        return ai_research_receipt(task, status=value["status"], reason=reason,
+                                  effect=effect, claims=value["claims"], raw=retained,
                                   reported_model=value["reported_model"], reported_effort=value["reported_effort"],
                                   decision=value.get("decision"), execution=execution)
-    except (OpportunityError, ValueError, TypeError, KeyError, RecursionError):
+    except (OpportunityError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         return ai_research_receipt(task, status="UNKNOWN_EFFECT", reason="OUTPUT_REJECTED",
-                                  effect="UNKNOWN", raw=raw if isinstance(raw, bytes) else None)
+                                  effect="UNKNOWN", raw=retained if isinstance(retained, bytes) else None)
 
 
 def ai_handoff_packet(task: dict) -> dict:
@@ -422,22 +444,289 @@ def ai_handoff_packet(task: dict) -> dict:
     return packet
 
 
+NATIVE_CODEX_TRANSPORT = "A10CodexExecJsonl.v1"
+
+
+def codex_research_argv(executable: str, *, model: str, effort: str) -> list[str]:
+    """Exact Codex exec template; A10 alone resolves the schema placeholder."""
+    require(model is not None and effort is not None, "AI_SELECTOR_INVALID")
+    ai_provider_profile("codex-cli", model=model, effort=effort)
+    return [executable, "exec", "--ignore-user-config", "--strict-config", "--sandbox", "read-only",
+            "--json", "--model", model, "--config", "model_reasoning_effort=" + json.dumps(effort),
+            "--config", 'model_provider="openai"', "--config", 'forced_login_method="chatgpt"',
+            "--output-schema", "{schema}", "--skip-git-repo-check", "-"]
+
+
+def _native_codex_capability(task, capability):
+    _ai_object(capability, {"transport", "argv", "model", "effort", "executable_sha256", "version",
+                            "help_sha256", "model_catalog_sha256", "codex_home"}, "NATIVE_CODEX_CAPABILITY_INVALID")
+    selector = task["provider"]
+    require(all(capability[k] == selector[k] for k in ("model", "effort")), "AI_CAPABILITY_SELECTOR")
+    for key in ("executable_sha256", "help_sha256", "model_catalog_sha256"):
+        require(isinstance(capability[key], str) and re.fullmatch(r"[a-f0-9]{64}", capability[key]) is not None,
+                "NATIVE_CODEX_CAPABILITY_INVALID")
+    version = capability["version"]
+    require(isinstance(version, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[a-z0-9.-]+)?", version)
+            is not None and len(version) <= 64, "NATIVE_CODEX_VERSION_INVALID")
+    argv = capability["argv"]
+    require(isinstance(argv, list) and bool(argv), "AI_ARGV_INVALID")
+    for value in (argv[0], capability["codex_home"]):
+        require(isinstance(value, str) and 0 < len(value) <= 1024 and "\x00" not in value
+                and Path(value).is_absolute() and not value.startswith(("//", "\\\\")), "NATIVE_CODEX_PATH_INVALID")
+    executable = Path(argv[0])
+    require(executable.name.lower() in ("codex", "codex.exe")
+            and argv == codex_research_argv(argv[0], model=selector["model"], effort=selector["effort"]),
+            "AI_ARGV_INVALID")
+    return executable, Path(capability["codex_home"])
+
+
+def _native_file(path, limit):
+    require(path.is_file(), "NATIVE_CODEX_FILE_UNAVAILABLE")
+    with path.open("rb") as stream:
+        raw = stream.read(limit + 1)
+    require(len(raw) <= limit, "NATIVE_CODEX_FILE_LIMIT")
+    return raw
+
+
+def _native_binary_digest(path):
+    require(path.is_file(), "NATIVE_CODEX_BINARY_UNAVAILABLE")
+    sha, size = hashlib.sha256(), 0
+    with path.open("rb") as stream:
+        while chunk := stream.read(65536):
+            size += len(chunk)
+            require(size <= 512 * AI_MAX_BYTES, "NATIVE_CODEX_FILE_LIMIT")
+            sha.update(chunk)
+    return sha.hexdigest()
+
+
+def _native_codex_process(runner, argv, packet, directory, home, timeout):
+    require(len(packet) <= AI_MAX_BYTES, "AI_OUTPUT_SIZE")
+    result = runner(argv, input=packet, cwd=str(directory), codex_home=str(home), shell=False,
+                    timeout=timeout, max_bytes=AI_MAX_BYTES)
+    require(type(result.returncode) is int and all(isinstance(raw, bytes) and len(raw) <= AI_MAX_BYTES
+            for raw in (result.stdout, result.stderr)), "NATIVE_CODEX_PROCESS_LIMIT")
+    return result
+
+
+def _native_codex_probe(task, cap, runner, executable, home, directory):
+    require(_native_binary_digest(executable) == cap["executable_sha256"], "NATIVE_CODEX_BINARY_MISMATCH")
+    catalog_path = home / "models_cache.json"
+    require(catalog_path.resolve().parent == home.resolve(), "NATIVE_CODEX_PATH_INVALID")
+    raw = _native_file(catalog_path, AI_MAX_BYTES)
+    require(sha256_bytes(raw) == cap["model_catalog_sha256"], "NATIVE_CODEX_CATALOG_MISMATCH")
+    catalog = parse_json(raw)
+    require(catalog.get("client_version") == cap["version"] and isinstance(catalog.get("models"), list),
+            "NATIVE_CODEX_CATALOG_MISMATCH")
+    matches = [m for m in catalog["models"] if isinstance(m, dict) and m.get("slug") == cap["model"]]
+    require(len(matches) == 1 and isinstance(matches[0].get("supported_reasoning_levels"), list)
+            and sum(isinstance(level, dict) and level.get("effort") == cap["effort"]
+                    for level in matches[0]["supported_reasoning_levels"]) == 1, "NATIVE_CODEX_SELECTOR_UNSUPPORTED")
+    observations = {"executable_sha256": cap["executable_sha256"],
+                    "model_catalog_sha256": cap["model_catalog_sha256"], "provider": task["provider"]}
+    for name, arguments in (("version", ["--version"]), ("help", ["exec", "--help"]),
+                            ("login", ["login", "status"])):
+        result = _native_codex_process(runner, [cap["argv"][0], *arguments], b"", directory, home, 15)
+        require(result.returncode == 0, "NATIVE_CODEX_PROBE_FAILED")
+        if name == "version":
+            require(result.stdout.decode("utf-8").strip() == "codex-cli " + cap["version"],
+                    "NATIVE_CODEX_VERSION_MISMATCH")
+        elif name == "help":
+            help_text = result.stdout.decode("utf-8")
+            require(sha256_bytes(result.stdout) == cap["help_sha256"]
+                    and all(re.search(r"(?<![\w-])" + flag + r"(?![\w-])", help_text)
+                            for flag in cap["argv"][1:] if flag.startswith("--")), "NATIVE_CODEX_HELP_MISMATCH")
+        else:
+            lines = (result.stdout + b"\n" + result.stderr).decode("utf-8").splitlines()
+            require([line.strip() for line in lines if line.strip()] == ["Logged in using ChatGPT"],
+                    "NATIVE_CODEX_LOGIN_UNVERIFIED")
+        observations[name] = {"stdout_sha256": sha256_bytes(result.stdout),
+                              "stderr_sha256": sha256_bytes(result.stderr)}
+    return observations
+
+
+def _native_output_schema(task):
+    def obj(**props):
+        return {"type": "object", "additionalProperties": False, "required": list(props), "properties": props}
+
+    def array(items):
+        return {"type": "array", "items": items}
+
+    def fixed(value):
+        return {"type": "string", "enum": [value]}
+
+    text = {"type": "string"}
+    optional_text = {"type": ["string", "null"]}
+    sources = array(obj(ref=text, sha256=text))
+    selector = task["provider"]
+    props = {
+        "schema_version": fixed("A10AIResearchOutput.v1"), "task_id": fixed(task["task_id"]),
+        "task_sha256": fixed(digest(task)), "provider": obj(**{key: fixed(value) for key, value in selector.items()}),
+        "status": {"type": "string", "enum": ["OK", "UNSUPPORTED", "NEEDS_HUMAN", "QUOTA", "FAILED", "UNKNOWN_EFFECT"]},
+        "reported_model": {"enum": [selector["model"], None], **optional_text},
+        "reported_effort": {"enum": [selector["effort"], None], **optional_text},
+        "claims": array(obj(kind={"type": "string", "enum": ["MODEL_INFERENCE", "UNKNOWN"]},
+                            origin=fixed("MODEL"), text=text, citations=sources)),
+        "effects": array(text),
+    }
+    if task["context"].get("decision_schema") == "A10OpportunityChoice.v1":
+        score = obj(proposal_id=text, proposal_sha256=text, eligible={"type": "boolean"},
+                    score={"type": "integer"}, rationale=text, citations=sources, counterevidence=sources)
+        choice = obj(schema_version=fixed("A10OpportunityChoice.v1"),
+                     outcome={"type": "string", "enum": ["SELECT", "NO_SUITABLE_OPPORTUNITY"]},
+                     selected_proposal_id=optional_text, selected_proposal_sha256=optional_text, scores=array(score))
+        props["decision"] = {"anyOf": [choice, {"type": "null"}]}
+    return obj(**props)
+
+
+def _native_jsonl(raw, *, min_lines, max_lines):
+    lines = raw.split(b"\n", max_lines + 1)
+    if lines[-1] == b"":
+        lines.pop()
+    require(min_lines <= len(lines) <= max_lines and all(not line.startswith(b"\xef\xbb\xbf") for line in lines),
+            "NATIVE_CODEX_JSONL_INVALID")
+    return [parse_json(line) for line in lines]
+
+
+def _native_codex_events(stdout):
+    first, turn, *body, final = _native_jsonl(stdout, min_lines=4, max_lines=256)
+    _ai_object(first, {"type", "thread_id"}, "NATIVE_CODEX_EVENTS_INVALID")
+    thread = first["thread_id"]
+    require(first["type"] == "thread.started" and isinstance(thread, str)
+            and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", thread) is not None
+            and turn == {"type": "turn.started"} and final.get("type") == "turn.completed"
+            and set(final) <= {"type", "usage"}, "NATIVE_CODEX_EVENTS_INVALID")
+    if "usage" in final:
+        usage = final["usage"]
+        require(isinstance(usage, dict) and set(usage) <= {"input_tokens", "cached_input_tokens", "output_tokens"}
+                and all(type(count) is int and count >= 0 for count in usage.values()), "NATIVE_CODEX_EVENTS_INVALID")
+    ids, messages = set(), []
+    for event in body:
+        _ai_object(event, {"type", "item"}, "NATIVE_CODEX_EVENT_UNEXPECTED")
+        item = event["item"]
+        require(event["type"] == "item.completed" and isinstance(item, dict)
+                and {"id", "type", "text"} <= set(item) <= {"id", "type", "text", "phase"}
+                and isinstance(item["id"], str) and bool(item["id"]) and item["id"] not in ids
+                and isinstance(item["text"], str)
+                and item["type"] in ("reasoning", "agent_message"), "NATIVE_CODEX_EVENT_UNEXPECTED")
+        ids.add(item["id"])
+        if item["type"] == "agent_message":
+            require(item.get("phase", "final_answer") == "final_answer", "NATIVE_CODEX_EVENT_UNEXPECTED")
+            messages.append(item["text"])
+    require(len(messages) == 1, "NATIVE_CODEX_MESSAGE_REQUIRED")
+    return thread, messages[0]
+
+
+def _native_codex_session(home, thread, started_ns, packet, cap):
+    root = home / "sessions"
+    require(root.resolve().parent == home.resolve(), "NATIVE_CODEX_PATH_INVALID")
+    start, end = (datetime.fromtimestamp(ns / 1_000_000_000, tz=timezone.utc).date()
+                  for ns in (started_ns, time.time_ns()))
+    dates = {day + timedelta(days=offset) for day in (start, end) for offset in (-1, 0, 1)}
+    candidates, scanned = [], 0
+    for day in sorted(dates):
+        folder = root / day.strftime("%Y/%m/%d")
+        if not folder.is_dir():
+            continue
+        require(folder.resolve().is_relative_to(root.resolve()), "NATIVE_CODEX_PATH_INVALID")
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                scanned += 1
+                require(scanned <= 4096, "NATIVE_CODEX_SESSION_LIMIT")
+                if entry.name.startswith("rollout-") and entry.name.endswith("-" + thread + ".jsonl"):
+                    candidates.append(Path(entry.path))
+    require(len(candidates) == 1, "NATIVE_CODEX_SESSION_UNVERIFIED")
+    path = candidates[0]
+    require(path.resolve().parent == path.parent.resolve()
+            and path.stat().st_mtime_ns >= started_ns, "NATIVE_CODEX_SESSION_UNVERIFIED")
+    records = _native_jsonl(_native_file(path, 4 * AI_MAX_BYTES), min_lines=3, max_lines=4096)
+    metadata, contexts, users = [], [], []
+    for record in records:
+        payload = record.get("payload")
+        require(isinstance(payload, dict), "NATIVE_CODEX_SESSION_UNVERIFIED")
+        kind = record.get("type")
+        if kind == "session_meta":
+            metadata.append(payload)
+        elif kind == "turn_context":
+            contexts.append(payload)
+        elif kind == "response_item":
+            require(payload.get("type") in ("message", "reasoning"), "NATIVE_CODEX_SESSION_EVENT_UNEXPECTED")
+            if payload.get("type") == "message":
+                require(payload.get("role") in ("system", "developer", "assistant", "user"),
+                        "NATIVE_CODEX_SESSION_EVENT_UNEXPECTED")
+                if payload["role"] == "user":
+                    users.append(payload.get("content"))
+        else:
+            require(kind == "event_msg" and payload.get("type") in (
+                "task_started", "user_message", "agent_message", "agent_reasoning", "token_count", "task_complete"),
+                "NATIVE_CODEX_SESSION_EVENT_UNEXPECTED")
+    require(len(metadata) == len(contexts) == 1 and metadata[0].get("id") == thread
+            and metadata[0].get("cli_version") == cap["version"] and metadata[0].get("model_provider") == "openai"
+            and users == [[{"type": "input_text", "text": packet.decode("utf-8")}]], "NATIVE_CODEX_SESSION_UNVERIFIED")
+    require(all(contexts[0].get(key) == cap[key] for key in ("model", "effort")), "NATIVE_CODEX_SESSION_SELECTOR")
+
+
+def _run_native_codex(task, capability, runner, before_invoke):
+    if task["provider"]["profile"] != "codex-cli":
+        return ai_research_receipt(task, status="UNSUPPORTED", reason="NATIVE_PROVIDER_UNSUPPORTED")
+    try:
+        executable, home = _native_codex_capability(task, capability)
+    except OpportunityError as exc:
+        return ai_research_receipt(task, status="UNSUPPORTED", reason=exc.code)
+    if runner is None:
+        # Read-only exec and a clean transcript let us reject observed tool calls
+        # after the fact. Neither establishes a tool-free boundary before launch.
+        return ai_research_receipt(task, status="UNSUPPORTED", reason="HOLD_DEPENDENCY_NATIVE_TOOL_CONFINEMENT")
+
+    stdout, invoked, reserving = None, False, False
+    try:
+        with tempfile.TemporaryDirectory(prefix="a10-codex-") as directory:
+            observations = _native_codex_probe(task, capability, runner, executable, home, directory)
+            packet = canonical_bytes(ai_handoff_packet(task))
+            output_schema = _native_output_schema(task)
+            schema_bytes = canonical_bytes(output_schema)
+            schema_path = Path(directory) / "output-schema.json"
+            schema_path.write_bytes(schema_bytes)
+            argv = [str(schema_path) if arg == "{schema}" else arg for arg in capability["argv"]]
+            require(_native_binary_digest(executable) == capability["executable_sha256"], "NATIVE_CODEX_BINARY_MISMATCH")
+            execution = {"kind": "MOCK_AUTHENTICATED_RUNNER", "capability_sha256": digest(capability),
+                         "probe_sha256": digest({**observations, "prompt_sha256": sha256_bytes(packet),
+                                                "schema_sha256": sha256_bytes(schema_bytes)})}
+            if before_invoke is not None:
+                reserving = True
+                before_invoke(deepcopy(execution))
+                reserving = False
+            invoked = True
+            started_ns = time.time_ns()
+            result = _native_codex_process(runner, argv, packet, directory, home, 60)
+            stdout = result.stdout
+            require(result.returncode == 0, "PROCESS_EXIT_UNCERTAIN")
+            thread, output = _native_codex_events(stdout)
+            _native_codex_session(home, thread, started_ns, packet, capability)
+            raw = output.encode("utf-8")
+            require(Draft202012Validator(output_schema).is_valid(parse_json(raw)), "NATIVE_CODEX_SCHEMA_MISMATCH")
+            return _parse_ai_research_output(task, raw, effect="PROCESS_INVOKED", execution=execution,
+                                             native_stdout=stdout)
+    except OpportunityError as exc:
+        if reserving:
+            raise  # Reservation/storage failures belong to the job owner.
+        reason = exc.code
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError, AttributeError, RecursionError):
+        if reserving:
+            raise
+        reason = "INVOCATION_UNCERTAIN" if invoked else "NATIVE_CODEX_PROBE_FAILED"
+    return ai_research_receipt(task, status="UNKNOWN_EFFECT" if invoked else "UNSUPPORTED", reason=reason,
+                               effect="UNKNOWN" if invoked else "NOT_ATTEMPTED", raw=stdout)
+
+
 def run_ai_research(task: dict, *, permissions=(), capability: dict | None = None,
                     runner=None, attended_output: bytes | None = None, before_invoke=None) -> A10AIResearchReceipt:
-    """A10-only process seam. No discovery, fallback or retry, including UNKNOWN.
+    """Dispatch by an operator-issued transport capability; runner is test-only.
 
-    A trusted operator supplies a locally verified CLI capability: exact argv,
-    model, effort, structured_json_stdio, read_only and no_tools (all true).
-    argv starts with codex[.exe] or antigravity[.exe], uses the selected model and
-    effort explicitly, and must accept the handoff JSON on stdin and emit ONLY
-    A10AIResearchOutput.v1 on stdout. Unsupported local CLI versions must not be
-    granted this capability. This is an explicit permission attestation, not a
-    sandbox inferred from model text. Fake runners implement subprocess.run.
-    before_invoke(execution) durably reserves the exact runtime proof before the
-    model process can start. Real capabilities additionally pin installed_probe:
-    executable_sha256 plus capability/authentication entries, each {argv,
-    stdout_sha256}. Trusted operators must supply read-only probes for the exact
-    installed CLI and an authenticated session, with independent expected hashes.
+    A10CodexExecJsonl.v1 pins the argv template, selector, native binary,
+    version, help and model cache bytes, and a dedicated Codex home. Its
+    injected runner handles the bounded probe and exec requests and writes
+    synthetic sessions. Legacy JSON stdio remains available to injected runners.
+    before_invoke durably reserves an invocation before crossing the effect seam.
     """
     validate_ai_research_task(task)
     def stopped(status, reason):
@@ -451,6 +740,10 @@ def run_ai_research(task: dict, *, permissions=(), capability: dict | None = Non
         return stopped("FAILED", "ATTENDED_OUTPUT_WRONG_PROVIDER")
     if capability is None:
         return stopped("UNSUPPORTED", "CAPABILITY_REQUIRED")
+    if isinstance(capability, dict) and "transport" in capability:
+        if capability["transport"] != NATIVE_CODEX_TRANSPORT:
+            return stopped("UNSUPPORTED", "AI_TRANSPORT_UNSUPPORTED")
+        return _run_native_codex(task, deepcopy(capability), runner, before_invoke)
     try:
         keys = {"argv", "model", "effort", "structured_json_stdio", "read_only", "no_tools"}
         require(isinstance(capability, dict) and keys <= set(capability) <= keys | {"installed_probe"}, "AI_CAPABILITY_INVALID")
@@ -461,46 +754,21 @@ def run_ai_research(task: dict, *, permissions=(), capability: dict | None = Non
                 and all(isinstance(a, str) and 0 < len(a) <= 1024 and "\x00" not in a for a in argv), "AI_ARGV_INVALID")
         expected = "codex" if task["provider"]["profile"] == "codex-cli" else "antigravity"
         require(argv[0] in (expected, expected + ".exe") and task["provider"]["model"] in argv, "AI_ARGV_SELECTOR")
-        require(task["provider"]["effort"] in argv or 'model_reasoning_effort="xhigh"' in argv, "AI_ARGV_EFFORT")
+        effort = task["provider"]["effort"]
+        require(effort in argv or "model_reasoning_effort=" + json.dumps(effort) in argv, "AI_ARGV_EFFORT")
     except OpportunityError:
         return stopped("UNSUPPORTED", "CAPABILITY_REJECTED")
     if runner is None:
-        # A real process needs an independently pinned installed binary and exact
-        # read-only capability/authentication probes. Model text cannot attest login.
-        try:
-            probe = capability.get("installed_probe")
-            _ai_object(probe, {"executable_sha256", "capability", "authentication"}, "AI_PROBE_REQUIRED")
-            executable = shutil.which(argv[0])
-            require(executable is not None, "AI_PROBE_EXECUTABLE_MISSING")
-            with open(executable, "rb") as stream:
-                require(sha256_bytes(stream.read()) == probe["executable_sha256"], "AI_PROBE_BINARY_MISMATCH")
-            for name in ("capability", "authentication"):
-                item = probe[name]
-                _ai_object(item, {"argv", "stdout_sha256"}, "AI_PROBE_INVALID")
-                require(isinstance(item["argv"], list) and 1 < len(item["argv"]) <= 64
-                        and item["argv"][0] == argv[0]
-                        and all(isinstance(a, str) and 0 < len(a) <= 1024 and "\x00" not in a for a in item["argv"])
-                        and isinstance(item["stdout_sha256"], str)
-                        and re.fullmatch(r"[a-f0-9]{64}", item["stdout_sha256"]), "AI_PROBE_INVALID")
-                checked = subprocess.run([executable, *item["argv"][1:]], capture_output=True,
-                                         shell=False, timeout=15, check=False)
-                require(checked.returncode == 0 and bool(checked.stdout)
-                        and sha256_bytes(checked.stdout) == item["stdout_sha256"], "AI_PROBE_FAILED")
-            execution = {"kind": "AUTHENTICATED_CLI_PROBE", "capability_sha256": digest(capability),
-                         "probe_sha256": digest(probe)}
-            argv = [executable, *argv[1:]]
-        except (OpportunityError, OSError, subprocess.SubprocessError, TypeError, ValueError):
-            return stopped("UNSUPPORTED", "INSTALLED_CAPABILITY_OR_AUTHENTICATION_UNAVAILABLE")
-    else:
-        # An injected runner is a trusted test/adapter seam, explicitly labelled
-        # mock. It never serves as evidence that a real provider ran.
-        execution = {"kind": "MOCK_AUTHENTICATED_RUNNER", "capability_sha256": digest(capability),
-                     "probe_sha256": digest({"runner": "INJECTED_MOCK"})}
+        if task["provider"]["profile"] != "codex-cli":
+            return stopped("UNSUPPORTED", "NATIVE_PROVIDER_UNSUPPORTED")
+        return stopped("UNSUPPORTED", "INSTALLED_CAPABILITY_OR_AUTHENTICATION_UNAVAILABLE")
+    execution = {"kind": "MOCK_AUTHENTICATED_RUNNER", "capability_sha256": digest(capability),
+                 "probe_sha256": digest({"runner": "INJECTED_MOCK"})}
     packet = canonical_bytes(ai_handoff_packet(task))
     if before_invoke is not None:
         before_invoke(deepcopy(execution))
     try:
-        result = (runner or subprocess.run)(list(argv), input=packet, capture_output=True, shell=False, timeout=60, check=False)
+        result = runner(list(argv), input=packet, capture_output=True, shell=False, timeout=60, check=False)
         # A nonzero exit (including quota without structured output) cannot prove
         # absence of an effect. Only a valid typed response resolves its status.
         receipt = parse_ai_research_output(task, result.stdout, effect="PROCESS_INVOKED", execution=execution)
