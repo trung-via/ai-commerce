@@ -2258,7 +2258,7 @@ def test_clean_9444_install_holds_before_registration(clean_9444, monkeypatch, c
     assert ca.install_clean_9444_autostart(opt_in=True) == {"status": "HOLD", "code": code}
 
 
-def test_clean_9444_task_uses_the_same_inline_launcher_without_cpython(clean_9444, monkeypatch):
+def test_clean_9444_task_is_triggerless_and_uses_a_no_console_launcher(clean_9444, monkeypatch):
     owner = clean_9444
     local = owner[0]
     target, candidates = ca._clean_target(owner)
@@ -2274,7 +2274,6 @@ def test_clean_9444_task_uses_the_same_inline_launcher_without_cpython(clean_944
         return SimpleNamespace(returncode=0, stdout=next(replies).encode("ascii"))
 
     monkeypatch.setattr(subprocess, "run", run)
-    assert not (local / "Programs" / "Python").exists()
     assert ca.install_clean_9444_autostart(opt_in=True) == {"status": "ENROLLED", "code": "ENROLLED"}
     assert ca._clean_task(owner, target, candidates, install=False) == "ALREADY_ENROLLED"
     assert ca.ensure_clean_9444(opt_in=True) == {"status": "STARTED", "code": "CDP_VERIFIED"}
@@ -2286,10 +2285,15 @@ def test_clean_9444_task_uses_the_same_inline_launcher_without_cpython(clean_944
     for env in (install_env, read_env):
         assert env["AI_COMMERCE_TASK_POWERSHELL"] == str(powershell)
         assert env["AI_COMMERCE_TASK_SESSION"] == "7"
-        assert env["AI_COMMERCE_TASK_ARGUMENTS"] == subprocess.list2cmdline(launcher_args[1:])
-        assert not re.search(r"pythonw|cpython|runpy|site-packages", env["AI_COMMERCE_TASK_ARGUMENTS"], re.I)
+        arguments = env["AI_COMMERCE_TASK_ARGUMENTS"]
+        assert arguments.startswith("-I -B -S -c ")
+        assert "creationflags=subprocess.CREATE_NO_WINDOW" in arguments
+        if os.name == "nt":
+            assert repr(launcher_args) in ca._commandline_argv("pythonw.exe " + arguments)[5]
+        assert Path(env["AI_COMMERCE_TASK_GUI"]).name == "pythonw.exe"
     install_script = install_args[-1]
-    assert "$trigger.Repetition.Interval = 'PT1M'" in install_script
+    assert "Triggers.Create" not in install_script and "PT1M" not in install_script
+    assert "$registered.Definition.Triggers.Count -ne 0" in install_script
     assert "$expected.Settings.MultipleInstances = 2" in install_script
     assert "$expected.Principal.LogonType = 3" in install_script
     assert "$expected, 34, $sid, $null, 3, $sddl" in install_script
@@ -2297,9 +2301,10 @@ def test_clean_9444_task_uses_the_same_inline_launcher_without_cpython(clean_944
     assert ".RegisterTaskDefinition(" not in read_args[-1] and ".RunEx(" not in read_args[-1]
     assert "Get-Acl" not in launcher_args[-1]
     assert "Stop-Process" not in launcher_args[-1] and "/json/list" not in launcher_args[-1]
+    assert "Test-PowerShell77" not in ca._CLEAN_9444_TASK_MIGRATION
 
 
-@pytest.mark.parametrize("action", ["versioned", "unverified", "owner-mismatch"])
+@pytest.mark.parametrize("action", ["versioned-legacy", "versioned-demand", "unverified", "owner-mismatch"])
 def test_clean_9444_mixed_install_uses_attested_action(clean_9444, monkeypatch, action):
     owner = clean_9444
     target, candidates = ca._clean_target(owner)
@@ -2314,17 +2319,20 @@ def test_clean_9444_mixed_install_uses_attested_action(clean_9444, monkeypatch, 
         calls.append((args, kwargs))
         if len(calls) == 1:
             assert args[0] == str(stable)
-            assert "Test-Registration $registered" in args[-1]
-            assert "GetSecurityDescriptor(4)" in args[-1]
+            assert "Test-LegacyRegistration $registered" in args[-1]
+            assert "GetSecurityDescriptor(7)" in args[-1]
             assert ".RegisterTaskDefinition(" not in args[-1] and ".RunEx(" not in args[-1]
+            specs = json.loads(kwargs["env"]["AI_COMMERCE_TASK_TRUSTED_POWERSHELLS"])
+            assert [s["path"] for s in specs] == [str(stable), str(versioned)]
+            assert all(len(s["demand_sha256"]) == 64 for s in specs)
             if action == "owner-mismatch":
                 return SimpleNamespace(returncode=2, stdout=b"PRIVATE_OWNER_DETAIL")
-            path = versioned if action == "versioned" else shadow
+            path = versioned if action.startswith("versioned-") else shadow
             return SimpleNamespace(returncode=0, stdout=(str(path) + "\r\n").encode("utf-8"))
         return SimpleNamespace(returncode=0, stdout=b"ALREADY_ENROLLED")
 
     monkeypatch.setattr(subprocess, "run", run)
-    if action != "versioned":
+    if not action.startswith("versioned-"):
         with pytest.raises(ca.AcquisitionBlocked, match="^POWERSHELL_UNAVAILABLE$"):
             ca._clean_task(owner, target, candidates, install=False)
         assert len(calls) == 1
@@ -2334,9 +2342,360 @@ def test_clean_9444_mixed_install_uses_attested_action(clean_9444, monkeypatch, 
     (probe, probe_kwargs), (read, read_kwargs) = calls
     assert read[0] == str(versioned)
     assert read_kwargs["env"]["AI_COMMERCE_TASK_POWERSHELL"] == str(versioned)
-    assert read_kwargs["env"]["AI_COMMERCE_TASK_DIRECTORY"] == str(versioned.parent)
-    assert read_kwargs["env"]["AI_COMMERCE_TASK_ARGUMENTS"] == probe_kwargs["env"]["AI_COMMERCE_TASK_ARGUMENTS"]
+    assert Path(read_kwargs["env"]["AI_COMMERCE_TASK_GUI"]).name == "pythonw.exe"
+    assert repr(str(versioned)) in read_kwargs["env"]["AI_COMMERCE_TASK_ARGUMENTS"]
     assert ".RegisterTaskDefinition(" not in read[-1] and ".RunEx(" not in read[-1]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Native Windows PowerShell 7 attestation")
+def test_clean_9444_task_image_and_trusted_powershell_native(tmp_path):
+    real_pwsh = ca._powershell()
+    real_dir = real_pwsh.parent
+    fake_77 = tmp_path / "PowerShell" / "7.7" / "pwsh.exe"
+    fake_77.parent.mkdir(parents=True)
+    fake_77.write_bytes(b"unsigned placeholder")
+    ps51 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    cmd_exe = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "cmd.exe"
+    # Verify real Test-TrustedPowerShell + _CLEAN_9444_TASK_IMAGE_SCRIPT without mocking signature/version checks.
+    funcs = ca._CLEAN_9444_TASK_IMAGE_SCRIPT.split("\nfunction Read-Registration", 1)[1]
+    seam = "\n$registered = Read-Registration"
+    import hashlib
+    demand_args = "demand-args-real-pwsh"
+    demand_sha = hashlib.sha256(demand_args.encode("utf-8")).hexdigest()
+    specs = json.dumps([
+        {"path": str(real_pwsh), "dir": str(real_dir), "demand_sha256": demand_sha},
+        {"path": str(fake_77), "dir": str(fake_77.parent), "demand_sha256": "0" * 64},
+    ])
+    fixture = r"""
+$ErrorActionPreference = 'Stop'
+$sid = 'S-1-5-21-1-2-3-1001'
+$sddl = 'O:' + $sid + 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;' + $sid + ')'
+$action = [pscustomobject]@{
+    Type = 0; Path = 'C:\Owner\pythonw.exe'; Arguments = 'demand-args-real-pwsh'; WorkingDirectory = 'C:\Owner'
+}
+$expected = [pscustomobject]@{
+    Principal = [pscustomobject]@{ Id = 'WakeHubOwner'; UserId = $sid; LogonType = 3; RunLevel = 0 }
+    Settings = [pscustomobject]@{ AllowDemandStart = $true; RestartCount = 0 }
+    Actions = [pscustomobject]@{ Context = 'WakeHubOwner'; Entry = $action }
+    Triggers = [pscustomobject]@{ Count = 0 }
+}
+$trustedPowerShellSpecs = @($env:AI_COMMERCE_TASK_TRUSTED_POWERSHELLS | ConvertFrom-Json)
+$trustedPowerShellPaths = @($trustedPowerShellSpecs | ForEach-Object { [string]$_.path })
+$trustedPowerShellDirs = @($trustedPowerShellSpecs | ForEach-Object { [string]$_.dir })
+$name = 'AI-Commerce-WakeHub-9444-Clean-' + $sid
+function New-FakeTask($demand, $path, $dir, $argsText) {
+    $t = [pscustomobject]@{ Type = 9; Enabled = $true; UserId = $sid
+        Repetition = [pscustomobject]@{ Interval = 'PT1M' } }
+    $a = [pscustomobject]@{ Type = 0; Path = $path; Arguments = $argsText; WorkingDirectory = $dir }
+    $actions = [pscustomobject]@{ Count = 1; Context = 'WakeHubOwner'; Entry = $a }
+    $actions | Add-Member ScriptMethod Item { $this.Entry }
+    $triggers = [pscustomobject]@{ Count = [int](!$demand); Entry = $t }
+    $triggers | Add-Member ScriptMethod Item { $this.Entry }
+    $task = [pscustomobject]@{ Enabled = $true; State = 3; Instances = 0; Xml = 'xml'; Sddl = $sddl
+        Definition = [pscustomobject]@{ Principal = $expected.Principal.PSObject.Copy()
+            Settings = $expected.Settings.PSObject.Copy(); Actions = $actions; Triggers = $triggers } }
+    $task | Add-Member ScriptMethod GetSecurityDescriptor { $this.Sddl }
+    return $task
+}
+$folder = [pscustomobject]@{}
+$folder | Add-Member ScriptMethod GetTask { param($n) $script:current }
+"""
+    body = funcs.replace(seam, "\nfunction Test-DemandRuntime { return $true }\n" + seam, 1)
+    env = ca._child_environment()
+    env.update(
+        AI_COMMERCE_TASK_TRUSTED_POWERSHELLS=specs,
+        AI_COMMERCE_TASK_LEGACY_ARGUMENTS="legacy-args",
+    )
+    cases = [
+        ("legacy_real", False, str(real_pwsh), str(real_dir), "legacy-args", str(real_pwsh)),
+        ("legacy_mixed_dir", False, str(real_pwsh), str(fake_77.parent), "legacy-args", str(real_pwsh)),
+        ("demand_real", True, r"C:\Owner\pythonw.exe", r"C:\Owner", demand_args, str(real_pwsh)),
+        ("legacy_unsigned", False, str(fake_77), str(fake_77.parent), "legacy-args", None),
+        ("legacy_ps51", False, str(ps51), str(ps51.parent), "legacy-args", None),
+        ("legacy_cmd", False, str(cmd_exe), str(cmd_exe.parent), "legacy-args", None),
+        ("legacy_bad_dir", False, str(real_pwsh), str(tmp_path), "legacy-args", None),
+        ("demand_bad_args", True, r"C:\Owner\pythonw.exe", r"C:\Owner", "tampered", None),
+    ]
+    for label, demand, path, workdir, args_text, expected_out in cases:
+        script = (
+            fixture
+            + f"$script:current = New-FakeTask ${str(demand).lower()} '{path}' '{workdir}' '{args_text}'\n"
+            + "function Read-Registration" + body
+        )
+        res = subprocess.run([str(real_pwsh), *ca._CLEAN_POWERSHELL_FLAGS, script],
+                             capture_output=True, text=True, encoding="utf-8", env=env, timeout=15)
+        if expected_out is None:
+            assert res.returncode == 2, f"{label}: expected exit 2, got {res.returncode} / {res.stdout!r}"
+        else:
+            assert res.returncode == 0 and not res.stderr, f"{label}: {res.stderr}"
+            assert res.stdout.strip() == expected_out
+
+
+_CLEAN_TASK_MIGRATION_FIXTURE = r"""
+$ErrorActionPreference = 'Stop'
+$sid = 'S-1-5-21-1-2-3-1001'
+$sddl = 'O:' + $sid + 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;' + $sid + ')'
+$action = [pscustomobject]@{
+    Type = 0; Path = 'C:\Owner\pythonw.exe'; Arguments = 'demand'; WorkingDirectory = 'C:\Owner'
+}
+$expected = [pscustomobject]@{
+    Principal = [pscustomobject]@{ Id = 'WakeHubOwner'; UserId = $sid; LogonType = 3; RunLevel = 0 }
+    Settings = [pscustomobject]@{ AllowDemandStart = $true; RestartCount = 0 }
+    Actions = [pscustomobject]@{ Context = 'WakeHubOwner'; Entry = $action }
+    Triggers = [pscustomobject]@{ Count = 0 }
+}
+$localRoot = [Environment]::GetFolderPath('LocalApplicationData')
+$aiRoot = Join-Path $localRoot 'AI-Commerce'
+$cleanProfile = Join-Path $aiRoot 'WakeHub-9444-Clean'
+$d5Profile = Join-Path $aiRoot 'D5-Chrome-9333'
+$chromePath = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
+$env:AI_COMMERCE_TASK_PROFILE_DIR = $cleanProfile
+$env:AI_COMMERCE_TASK_CHROME_EXECUTABLES = (@($chromePath) | ConvertTo-Json -Compress)
+$env:AI_COMMERCE_TASK_LEGACY_ARGUMENTS = 'legacy'
+$trustedPowerShellSpecs = @($env:AI_COMMERCE_TASK_TRUSTED_POWERSHELLS | ConvertFrom-Json)
+$trustedPowerShellPaths = @($trustedPowerShellSpecs | ForEach-Object { [string]$_.path })
+$trustedPowerShellDirs = @($trustedPowerShellSpecs | ForEach-Object { [string]$_.dir })
+$name = 'AI-Commerce-WakeHub-9444-Clean-' + $sid
+function New-FakeTask($demand, $legacyPath = $trustedPowerShellPaths[0], $legacyDir = $trustedPowerShellDirs[0]) {
+    $t = [pscustomobject]@{ Type = 9; Enabled = $true; UserId = $sid
+        Repetition = [pscustomobject]@{ Interval = 'PT1M' } }
+    $a = if ($demand) { $action.PSObject.Copy() } else {
+        [pscustomobject]@{ Type = 0; Path = $legacyPath; Arguments = 'legacy'
+            WorkingDirectory = $legacyDir }
+    }
+    $actions = [pscustomobject]@{ Count = 1; Context = 'WakeHubOwner'; Entry = $a }
+    $actions | Add-Member ScriptMethod Item { $this.Entry }
+    $triggers = [pscustomobject]@{ Count = [int](!$demand); Entry = $t }
+    $triggers | Add-Member ScriptMethod Item { $this.Entry }
+    $task = [pscustomobject]@{ Name = $name; Enabled = $true; State = 3; Instances = 0; Xml = 'prior xml'
+        Sddl = $sddl; Definition = [pscustomobject]@{ Principal = $expected.Principal.PSObject.Copy()
+            Settings = $expected.Settings.PSObject.Copy(); Actions = $actions; Triggers = $triggers } }
+    $task | Add-Member ScriptMethod GetSecurityDescriptor { $this.Sddl }
+    $task | Add-Member ScriptMethod GetInstances { [pscustomobject]@{ Count = $this.Instances } }
+    return $task
+}
+function New-FakeD5Task($enabled = $true, $state = 3, $port = '9333', $dir = $d5Profile,
+                        $exePath = $chromePath, $interval = $null, $d5Sddl = $sddl,
+                        $userId = $sid, $instances = 0) {
+    $t = [pscustomobject]@{ Type = 9; Enabled = $true; UserId = $userId
+        Repetition = [pscustomobject]@{ Interval = $interval; Duration = $null } }
+    $argsText = '--remote-debugging-port=' + $port + ' --remote-debugging-address=127.0.0.1 ' +
+        '--user-data-dir="' + $dir + '" --profile-directory=Default --no-first-run'
+    $a = [pscustomobject]@{ Type = 0; Path = $exePath; Arguments = $argsText; WorkingDirectory = $null }
+    $actions = [pscustomobject]@{ Count = 1; Context = 'D5Owner'; Entry = $a }
+    $actions | Add-Member ScriptMethod Item { $this.Entry }
+    $triggers = [pscustomobject]@{ Count = 1; Entry = $t }
+    $triggers | Add-Member ScriptMethod Item { $this.Entry }
+    $principal = [pscustomobject]@{ Id = 'D5Owner'; UserId = $userId; LogonType = 3; RunLevel = 0; GroupId = $null }
+    $task = [pscustomobject]@{ Name = 'AI-Commerce-D5-CDP-AtLogon'; Enabled = $enabled; State = $state
+        Instances = $instances; Xml = '<Task><RegistrationInfo><URI>\AI-Commerce-D5-CDP-AtLogon</URI></RegistrationInfo></Task>'
+        Sddl = $d5Sddl; Definition = [pscustomobject]@{ Principal = $principal
+            Settings = [pscustomobject]@{}; Actions = $actions; Triggers = $triggers } }
+    $task | Add-Member ScriptMethod GetSecurityDescriptor { $this.Sddl }
+    $task | Add-Member ScriptMethod GetInstances { [pscustomobject]@{ Count = $this.Instances } }
+    return $task
+}
+$script:current = New-FakeTask ($case -eq 'already')
+$script:d5 = $null
+$script:writes = 0
+$script:d5Writes = 0
+$script:values = @{}
+switch ($case) {
+    'mixed_7_77_same_dir' {
+        $script:current = New-FakeTask $false $trustedPowerShellPaths[1] $trustedPowerShellDirs[1]
+    }
+    'mixed_7_77_cross_dir' {
+        $script:current = New-FakeTask $false $trustedPowerShellPaths[1] $trustedPowerShellDirs[0]
+    }
+    'legacy_51' {
+        $script:current = New-FakeTask $false 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' 'C:\Windows\System32\WindowsPowerShell\v1.0'
+    }
+    'pwsh_unverified' {
+        $script:current = New-FakeTask $false 'C:\Caller\pwsh.exe' 'C:\Caller'
+    }
+    'pwsh_unsigned' {
+        $script:current = New-FakeTask $false $trustedPowerShellPaths[1] $trustedPowerShellDirs[1]
+    }
+    'pwsh_wrong_workdir' {
+        $script:current = New-FakeTask $false $trustedPowerShellPaths[0] 'C:\Windows\Temp'
+    }
+    'd5_disabled' {
+        $script:d5 = New-FakeD5Task -enabled $false -state 1
+    }
+    'd5_disabled_active' {
+        $script:d5 = New-FakeD5Task -enabled $false -state 1 -instances 1
+    }
+    'd5_enabled_9333_ready' {
+        $script:d5 = New-FakeD5Task -enabled $true -state 3
+    }
+    'd5_enabled_9333_running' {
+        $script:d5 = New-FakeD5Task -enabled $true -state 4 -instances 1
+    }
+    'd5_enabled_quoted_chrome' {
+        $script:d5 = New-FakeD5Task -enabled $true -state 3 -exePath ('"' + $chromePath + '"')
+    }
+    'd5_enabled_standard_acl' {
+        $stdAcl = 'O:SYD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;' + $sid + ')(A;;FR;;;AU)'
+        $script:d5 = New-FakeD5Task -enabled $true -state 3 -d5Sddl $stdAcl
+    }
+    'd5_ambiguous_9444' {
+        $script:d5 = New-FakeD5Task -enabled $true -state 3 -port '9444'
+    }
+    'd5_ambiguous_pt1m' {
+        $script:d5 = New-FakeD5Task -enabled $true -state 3 -interval 'PT1M'
+    }
+    'd5_ambiguous_same_profile' {
+        $script:d5 = New-FakeD5Task -enabled $true -state 3 -dir $cleanProfile
+    }
+    'd5_ambiguous_reparse' {
+        $script:d5 = New-FakeD5Task -enabled $true -state 3
+    }
+    'd5_ambiguous_script' {
+        $script:d5 = New-FakeD5Task -enabled $true -state 3 -exePath $trustedPowerShellPaths[0]
+    }
+    'd5_ambiguous_writable_acl' {
+        $badAcl = 'O:' + $sid + 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;' + $sid + ')(A;;GW;;;AU)'
+        $script:d5 = New-FakeD5Task -enabled $true -state 3 -d5Sddl $badAcl
+    }
+    'd5_ambiguous_foreign_owner' {
+        $script:d5 = New-FakeD5Task -enabled $true -state 3 -userId 'S-1-5-21-9-9-9-1002'
+    }
+    'd5_mutated_during_write' {
+        $script:d5 = New-FakeD5Task -enabled $true -state 3
+    }
+    'wrong_action' { $script:current.Definition.Actions.Entry.Arguments = 'private wrong action' }
+    'wrong_owner' { $script:current.Sddl = $sddl.Replace('O:' + $sid, 'O:SY') }
+    'wrong_principal' { $script:current.Definition.Principal.UserId = '' }
+    'running' { $script:current.State = 4 }
+    'queued' { $script:current.Instances = 1 }
+    'unresolved' { $script:values.DemandMigrationRollback = 'saved' }
+    'replay' {
+        $script:values.DemandMigrationRollback = 'saved'
+        $script:values.DemandMigrationComplete = 1
+    }
+}
+$script:d5InitialXml = if ($script:d5) { $script:d5.Xml } else { '' }
+$registry = [pscustomobject]@{}
+$registry | Add-Member ScriptMethod GetValueNames { $script:values.Keys }
+$registry | Add-Member ScriptMethod GetValue { param($name) $script:values[$name] }
+$registry | Add-Member ScriptMethod SetValue { param($name, $value) $script:values[$name] = $value }
+$registry | Add-Member ScriptMethod Flush {}
+$registry | Add-Member ScriptMethod Dispose {}
+$folder = [pscustomobject]@{}
+$folder | Add-Member ScriptMethod GetTask {
+    param($taskName)
+    if ($taskName -ceq 'AI-Commerce-D5-CDP-AtLogon') { return $script:d5 }
+    if ($taskName -cne $name) { throw 'Unexpected target' }
+    return $script:current
+}
+$folder | Add-Member ScriptMethod RegisterTaskDefinition {
+    param($taskName, $definition, $flags, $user, $password, $logon, $security)
+    if ($taskName -ceq 'AI-Commerce-D5-CDP-AtLogon') { $script:d5Writes++; throw 'Never mutate D5' }
+    if ($taskName -cne $name -or $flags -ne 52 -or $user -cne $sid -or $logon -ne 3 -or
+        $security -cne $sddl -or !$script:values.DemandMigrationRollback -or
+        $definition.Triggers.Count -ne 0 -or $definition.Actions.Entry.Arguments -cne 'demand') {
+        throw 'Unsafe migration'
+    }
+    $script:writes++
+    $script:current = New-FakeTask $true
+    if ($case -eq 'readback_fault') { $script:current.State = 4 }
+    if ($case -eq 'd5_mutated_during_write') { $script:d5.Xml = '<Task>changed</Task>' }
+}
+"""
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell task definition")
+@pytest.mark.parametrize("case, code, writes, complete", [
+    ("legacy", "DEMAND_MIGRATED", 1, True),
+    ("mixed_7_77_same_dir", "DEMAND_MIGRATED", 1, True),
+    ("mixed_7_77_cross_dir", "DEMAND_MIGRATED", 1, True),
+    ("legacy_51", "AUTOSTART_CONFLICT", 0, False),
+    ("pwsh_unverified", "AUTOSTART_CONFLICT", 0, False),
+    ("pwsh_unsigned", "AUTOSTART_CONFLICT", 0, False),
+    ("pwsh_wrong_workdir", "AUTOSTART_CONFLICT", 0, False),
+    ("d5_disabled", "DEMAND_MIGRATED", 1, True),
+    ("d5_disabled_active", "TASK_MIGRATION_AMBIGUOUS", 0, False),
+    ("d5_enabled_9333_ready", "DEMAND_MIGRATED", 1, True),
+    ("d5_enabled_9333_running", "DEMAND_MIGRATED", 1, True),
+    ("d5_enabled_quoted_chrome", "DEMAND_MIGRATED", 1, True),
+    ("d5_enabled_standard_acl", "DEMAND_MIGRATED", 1, True),
+    ("d5_ambiguous_9444", "TASK_MIGRATION_AMBIGUOUS", 0, False),
+    ("d5_ambiguous_pt1m", "TASK_MIGRATION_AMBIGUOUS", 0, False),
+    ("d5_ambiguous_same_profile", "TASK_MIGRATION_AMBIGUOUS", 0, False),
+    ("d5_ambiguous_reparse", "TASK_MIGRATION_AMBIGUOUS", 0, False),
+    ("d5_ambiguous_script", "TASK_MIGRATION_AMBIGUOUS", 0, False),
+    ("d5_ambiguous_writable_acl", "TASK_MIGRATION_AMBIGUOUS", 0, False),
+    ("d5_ambiguous_foreign_owner", "TASK_MIGRATION_AMBIGUOUS", 0, False),
+    ("d5_mutated_during_write", "UNKNOWN_EFFECT", 1, False),
+    ("already", "DEMAND_ALREADY_READY", 0, False),
+    ("wrong_action", "AUTOSTART_CONFLICT", 0, False),
+    ("wrong_owner", "AUTOSTART_CONFLICT", 0, False),
+    ("wrong_principal", "AUTOSTART_CONFLICT", 0, False),
+    ("running", "TASK_MIGRATION_NOT_READY", 0, False),
+    ("queued", "TASK_MIGRATION_NOT_READY", 0, False),
+    ("unresolved", "UNKNOWN_EFFECT", 0, False),
+    ("replay", "TASK_MIGRATION_REPLAY", 0, True),
+    ("readback_fault", "UNKNOWN_EFFECT", 1, False),
+])
+def test_clean_9444_migration_offline(case, code, writes, complete):
+    real_pwsh = ca._powershell()
+    alt_slot = "7" if real_pwsh.parent.name.casefold() == "7.7" else "7.7"
+    alt_pwsh = real_pwsh.parent.parent / alt_slot / "pwsh.exe"
+    specs = json.dumps([
+        {"path": str(real_pwsh), "dir": str(real_pwsh.parent), "demand_sha256": "0" * 64},
+        {"path": str(alt_pwsh), "dir": str(alt_pwsh.parent), "demand_sha256": "1" * 64},
+    ])
+    functions = ca._CLEAN_9444_TASK_MIGRATION.split("\nfunction Read-Registration", 1)[1]
+    seam = "\n$registered = Read-Registration"
+    migration_entry = "\n$key = $null"
+    # Keep real Test-TrustedPowerShell for the genuine installed binary; only simulate
+    # synthetic non-installed 7.7 / Chrome / reparse OS states unavailable in hosted CI.
+    overrides = r"""
+function Test-DemandRuntime { return $true }
+function Open-MigrationState($write) { return $registry }
+$realSigned = (Get-Item function:Test-SignedExecutable).ScriptBlock
+function Test-SignedExecutable($path, $publisher) {
+    if ($path -ieq $chromePath -and $publisher -match 'Google') { return $true }
+    if ($path -ieq $trustedPowerShellPaths[1] -and $publisher -match 'Microsoft') {
+        return $case -ne 'pwsh_unsigned'
+    }
+    return & $realSigned $path $publisher
+}
+$realTrusted = (Get-Item function:Test-TrustedPowerShell).ScriptBlock
+function Test-TrustedPowerShell($path) {
+    if ($path -ieq $trustedPowerShellPaths[1]) {
+        return ($case -ne 'pwsh_unsigned') -and ($path -in $trustedPowerShellPaths)
+    }
+    return & $realTrusted $path
+}
+"""
+    functions = functions.replace(seam, overrides + seam, 1)
+    if case == "d5_ambiguous_reparse":
+        functions = functions.replace(
+            migration_entry,
+            "\nfunction Test-PlainPathOrAncestors($path) { return $false }" + migration_entry,
+            1,
+        )
+    env = ca._child_environment()
+    env["AI_COMMERCE_TASK_TRUSTED_POWERSHELLS"] = specs
+    result = subprocess.run(
+        [str(real_pwsh), *ca._CLEAN_POWERSHELL_FLAGS,
+         f"$case = '{case}'\n" + _CLEAN_TASK_MIGRATION_FIXTURE
+         + "\n$result = & {\nfunction Read-Registration" + functions.replace("; exit", "; return")
+         + "\n}\n"
+         + "@{ code = $result; writes = $script:writes; d5Writes = $script:d5Writes;"
+           " triggersAfter = $script:current.Definition.Triggers.Count;"
+           " complete = [bool]$script:values.DemandMigrationComplete;"
+           " rollback = [bool]$script:values.DemandMigrationRollback } | ConvertTo-Json -Compress"],
+        capture_output=True, text=True, encoding="utf-8", env=env, timeout=15)
+    assert result.returncode == 0 and not result.stderr, result.stderr
+    observed = json.loads(result.stdout)
+    assert observed == {
+        "code": code, "writes": writes, "d5Writes": 0,
+        "triggersAfter": 0 if writes or case == "already" else 1,
+        "complete": complete,
+        "rollback": bool(writes) or case in {"unresolved", "replay"},
+    }
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell launcher")
