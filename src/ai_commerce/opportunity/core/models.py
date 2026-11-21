@@ -459,7 +459,6 @@ def ai_handoff_packet(task: dict) -> dict:
 
 
 NATIVE_CODEX_TRANSPORT = "A10CodexExecJsonl.v1"
-_NATIVE_CODEX_VERSION = "0.164.0"
 _NATIVE_CODEX_BOUNDARY = "WINDOWS_JOB_READ_ONLY_V1"
 _NATIVE_DISABLED_FEATURES = (
     "shell_tool", "shell_snapshot", "code_mode_host", "request_permissions_tool",
@@ -513,10 +512,10 @@ def _native_codex_capability(task, capability, *, native):
         require(isinstance(capability[key], str) and re.fullmatch(r"[a-f0-9]{64}", capability[key]) is not None,
                 "NATIVE_CODEX_CAPABILITY_INVALID")
     version = capability["version"]
-    require(isinstance(version, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[a-z0-9.-]+)?", version)
-            is not None and len(version) <= 64, "NATIVE_CODEX_VERSION_INVALID")
-    if native:
-        require(version == _NATIVE_CODEX_VERSION, "HOLD_DEPENDENCY_NATIVE_CODEX_REVIEWED_VERSION")
+    stable_version = r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}"
+    version_pattern = stable_version if native else r"[0-9]+\.[0-9]+\.[0-9]+(?:-[a-z0-9.-]+)?"
+    require(isinstance(version, str) and len(version) <= 64 and re.fullmatch(version_pattern, version) is not None,
+            "NATIVE_CODEX_VERSION_INVALID")
     argv = capability["argv"]
     require(isinstance(argv, list) and bool(argv), "AI_ARGV_INVALID")
     for value in (argv[0], capability["codex_home"]):
@@ -683,8 +682,10 @@ def _native_codex_probe(task, cap, runner, executable, home, directory, *, nativ
     raw = _native_file(catalog_path, AI_MAX_BYTES)
     require(sha256_bytes(raw) == cap["model_catalog_sha256"], "NATIVE_CODEX_CATALOG_MISMATCH")
     catalog = parse_json(raw)
-    require(catalog.get("client_version") == cap["version"] and isinstance(catalog.get("models"), list),
-            "NATIVE_CODEX_CATALOG_MISMATCH")
+    # Keep the automation hold code for a mismatch with the operator's grant.
+    require(catalog.get("client_version") == cap["version"],
+            "HOLD_DEPENDENCY_NATIVE_CODEX_REVIEWED_VERSION" if native else "NATIVE_CODEX_CATALOG_MISMATCH")
+    require(isinstance(catalog.get("models"), list), "NATIVE_CODEX_CATALOG_MISMATCH")
     matches = [m for m in catalog["models"] if isinstance(m, dict) and m.get("slug") == cap["model"]]
     require(len(matches) == 1 and isinstance(matches[0].get("supported_reasoning_levels"), list)
             and sum(isinstance(level, dict) and level.get("effort") == cap["effort"]

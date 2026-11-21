@@ -233,14 +233,15 @@ def native_codex(tmp_path):
     task = research_task(model="synthetic-research-model", effort="medium")
     argv = codex_research_argv(str(executable), model=task["provider"]["model"], effort=task["provider"]["effort"])
     help_bytes = " ".join(argv[1:]).encode()
-    catalog = {"client_version": "0.164.0", "models": [{"slug": task["provider"]["model"],
+    version = "0.170.0"
+    catalog = {"client_version": version, "models": [{"slug": task["provider"]["model"],
                "supported_reasoning_levels": [{"effort": task["provider"]["effort"]}]}]}
     catalog_path = home / "models_cache.json"
     catalog_path.write_bytes(canonical_bytes(catalog))
     cap = {"transport": NATIVE_CODEX_TRANSPORT, "argv": argv, "model": task["provider"]["model"],
            "effort": task["provider"]["effort"], "boundary": "WINDOWS_JOB_READ_ONLY_V1",
            "host_verification_sha256": sha256_bytes(b"SYNTHETIC host review"),
-           "executable_sha256": sha256_bytes(executable.read_bytes()), "version": "0.164.0",
+           "executable_sha256": sha256_bytes(executable.read_bytes()), "version": version,
            "help_sha256": sha256_bytes(help_bytes), "model_catalog_sha256": sha256_bytes(catalog_path.read_bytes()),
            "codex_home": str(home)}
     return task, cap, help_bytes, catalog_path
@@ -266,8 +267,11 @@ def test_native_codex_grant_cannot_attach_to_another_task(native_codex, fault, r
 
 
 @pytest.mark.parametrize("fault,probe_count", [
-    (None, 3), ("mock", 3), ("quota", 3), ("flag", 0), ("binary", 0), ("catalog-hash", 0), ("catalog-effort", 0),
-    ("version", 1), ("help", 2), ("login", 3), ("jsonl", 3), ("duplicate-key", 3),
+    (None, 3), ("mock", 3), ("quota", 3), ("flag", 0), ("binary", 0),
+    ("catalog-hash", 0), ("catalog-version", 0), ("catalog-effort", 0),
+    ("version", 1), ("version-malformed", 0), ("version-prerelease", 0), ("version-overlong", 0),
+    ("help", 2), ("help-flags", 2), ("host-verification", 0), ("private-config", 0), ("login", 3),
+    ("jsonl", 3), ("duplicate-key", 3),
     ("duplicate-message", 3), ("tool", 3), ("session-tool", 3), ("no-session", 3),
     ("session-prompt", 3), ("session-output", 3), ("session-model", 3), ("session-effort", 3),
     ("session-sandbox", 3), ("task-sha", 3), ("repin", 3),
@@ -278,16 +282,37 @@ def test_native_codex_probes_and_session_are_bound_before_output_is_accepted(nat
     from ai_commerce.opportunity.core import models
 
     task, cap, help_bytes, catalog_path = native_codex
+    installed_version = cap["version"]
     if fault == "flag":
         cap["argv"].insert(-1, "--dangerously-bypass-approvals-and-sandbox")
     if fault == "binary":
-        cap["executable_sha256"] = "f" * 64
+        Path(cap["argv"][0]).write_bytes(b"changed before probes")
     if fault == "catalog-hash":
         cap["model_catalog_sha256"] = "f" * 64
-    if fault == "catalog-effort":
-        raw = catalog_path.read_bytes().replace(b'"medium"', b'"low"')
+    if fault in ("catalog-effort", "catalog-version", "quota"):
+        catalog = json.loads(catalog_path.read_bytes())
+        if fault == "catalog-effort":
+            catalog["models"][0]["supported_reasoning_levels"][0]["effort"] = "low"
+        else:
+            catalog["client_version"] = "1.2.3"
+            if fault == "quota":
+                installed_version = cap["version"] = catalog["client_version"]
+        raw = canonical_bytes(catalog)
         catalog_path.write_bytes(raw)
         cap["model_catalog_sha256"] = sha256_bytes(raw)
+    if fault == "version-malformed":
+        cap["version"] = "0.170"
+    if fault == "version-prerelease":
+        cap["version"] += "-rc.1"
+    if fault == "version-overlong":
+        cap["version"] = "1" * 61 + ".2.3"
+    if fault == "help-flags":
+        help_bytes = help_bytes.replace(b" --strict-config", b"")
+        cap["help_sha256"] = sha256_bytes(help_bytes)
+    if fault == "host-verification":
+        del cap["host_verification_sha256"]
+    if fault == "private-config":
+        (catalog_path.parent / "config.toml").write_text("# unexpected configuration", encoding="utf-8")
 
     probes, invocations, reserved = [], [], []
     proof = {}
@@ -307,9 +332,9 @@ def test_native_codex_probes_and_session_are_bound_before_output_is_accepted(nat
             assert input == b"" and timeout == 15 and not reserved
             probes.append(args)
             if args == ["--version"]:
-                value = b"codex-cli 0.0.0" if fault == "version" else ("codex-cli " + cap["version"]).encode()
+                value = b"codex-cli 0.0.0" if fault == "version" else ("codex-cli " + installed_version).encode()
             elif args == ["exec", "--help"]:
-                value = b"changed help" if fault == "help" else help_bytes
+                value = help_bytes + b"\nchanged help" if fault == "help" else help_bytes
             else:
                 auth = b"Logged in using API key" if fault == "login" else b"Logged in using ChatGPT"
                 return subprocess.CompletedProcess(argv, 0, b"", auth)
@@ -340,7 +365,7 @@ def test_native_codex_probes_and_session_are_bound_before_output_is_accepted(nat
         output = canonical_bytes(value).decode()
         records = [
             {"type": "session_meta", "payload": {"id": thread, "session_id": thread, "source": "exec", "cwd": cwd,
-                "cli_version": cap["version"], "model_provider": "openai"}},
+                "cli_version": installed_version, "model_provider": "openai"}},
             {"type": "turn_context", "payload": {"model": "fallback" if fault == "session-model" else cap["model"],
                 "effort": "low" if fault == "session-effort" else cap["effort"], "cwd": cwd, "approval_policy": "never",
                 "sandbox_policy": {"type": "danger-full-access" if fault == "session-sandbox" else "read-only"}}},
@@ -407,12 +432,31 @@ def test_native_codex_probes_and_session_are_bound_before_output_is_accepted(nat
     else:
         assert receipt["execution"] is None and receipt["decision"] is None
         assert all(claim["origin"] == "LOCAL_SNAPSHOT" for claim in receipt["claims"])
-        if fault in ("flag", "binary", "catalog-hash", "catalog-effort", "version", "help", "login"):
+        preflight_failures = {
+            "flag": "AI_ARGV_INVALID",
+            "binary": "NATIVE_CODEX_BINARY_MISMATCH",
+            "catalog-hash": "NATIVE_CODEX_CATALOG_MISMATCH",
+            "catalog-version": "HOLD_DEPENDENCY_NATIVE_CODEX_REVIEWED_VERSION",
+            "catalog-effort": "NATIVE_CODEX_SELECTOR_UNSUPPORTED",
+            "version": "HOLD_DEPENDENCY_NATIVE_CODEX_REVIEWED_VERSION",
+            "version-malformed": "NATIVE_CODEX_VERSION_INVALID",
+            "version-prerelease": "NATIVE_CODEX_VERSION_INVALID",
+            "version-overlong": "NATIVE_CODEX_VERSION_INVALID",
+            "help": "NATIVE_CODEX_HELP_MISMATCH",
+            "help-flags": "HOLD_DEPENDENCY_NATIVE_CODEX_EXEC_FLAGS",
+            "host-verification": "HOLD_DEPENDENCY_NATIVE_CODEX_HOST_VERIFICATION",
+            "private-config": "HOLD_DEPENDENCY_NATIVE_CODEX_DEDICATED_HOME",
+            "login": "NATIVE_CODEX_LOGIN_UNVERIFIED",
+        }
+        if fault in preflight_failures:
             assert not reserved and not invocations
-            assert (receipt["status"], receipt["effect"]) == ("UNSUPPORTED", "NOT_ATTEMPTED")
+            assert (receipt["status"], receipt["reason"], receipt["effect"]) == (
+                "UNSUPPORTED", preflight_failures[fault], "NOT_ATTEMPTED")
         else:
             assert len(reserved) == 1 and len(invocations) == (0 if fault == "repin" else 1)
             assert (receipt["status"], receipt["effect"]) == ("UNKNOWN_EFFECT", "UNKNOWN")
+            if fault == "repin":
+                assert receipt["reason"] == "NATIVE_CODEX_BINARY_MISMATCH"
 
 
 def test_native_codex_requires_reservation_even_with_a_trusted_capability(native_codex, monkeypatch):
@@ -424,6 +468,9 @@ def test_native_codex_requires_reservation_even_with_a_trusted_capability(native
 
     monkeypatch.setattr(models, "_bounded_native_codex", forbidden)
     task, cap, _, _ = native_codex
+    receipt = run_ai_research(task, capability=cap, before_invoke=forbidden)
+    assert (receipt["status"], receipt["reason"], receipt["effect"]) == (
+        "NEEDS_HUMAN", "PERMISSION_DENIED", "NOT_ATTEMPTED")
     receipt = run_ai_research(task, permissions=["AI_RESEARCH"], capability=cap)
     assert (receipt["status"], receipt["reason"], receipt["effect"]) == (
         "UNSUPPORTED", "NATIVE_CODEX_RESERVATION_REQUIRED", "NOT_ATTEMPTED")

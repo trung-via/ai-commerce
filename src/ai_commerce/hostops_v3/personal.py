@@ -4417,6 +4417,8 @@ def hostops_exec_v1_cli(
 
 
 _A10ReadinessState = Literal["SOURCE_PRESENT", "HOST_UNVERIFIED", "HOST_UNSUPPORTED", "HOST_READINESS_VERIFIED"]
+# Historical comparison for the public receipt's version field.
+_A10_VERSION_DIAGNOSTIC_BASELINE = "0.164.0"
 _A10_CHECK_CODES = {
     "binary": ("OBSERVED", "NOT_FOUND_IN_SCOPE", "AMBIGUOUS", "UNSAFE"),
     "version": ("MATCHES_SOURCE_VERSION", "DIFFERS_FROM_SOURCE_VERSION"),
@@ -4463,8 +4465,6 @@ def _a10_readiness_receipt(issue_number, source_sha=None, *, observations=None):
     state: _A10ReadinessState
     if observations is None:
         state = "SOURCE_PRESENT"
-    elif binary_sha and checks["version"] == "DIFFERS_FROM_SOURCE_VERSION":
-        state = "HOST_UNSUPPORTED"
     else:
         # Help declarations cannot establish effective config, feature disable
         # behavior or sandbox enforcement. HOST_READINESS_VERIFIED is reserved.
@@ -4677,7 +4677,7 @@ def _a10_observe_cli(probe, observations):
     if not re.fullmatch("codex-cli " + _HEALTH_VERSION, version, flags=re.ASCII):
         return
     observations["version"] = (
-        "MATCHES_SOURCE_VERSION" if version == "codex-cli " + models._NATIVE_CODEX_VERSION
+        "MATCHES_SOURCE_VERSION" if version == "codex-cli " + _A10_VERSION_DIAGNOSTIC_BASELINE
         else "DIFFERS_FROM_SOURCE_VERSION"
     )
     root_options = _a10_help_options(_a10_probe_text(probe, ("--help",)), exec_help=False)
