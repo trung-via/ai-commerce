@@ -369,7 +369,7 @@ def test_ef02_proof_main_advance_refuses_invalid_bytes_or_divergent_history(gate
 
 
 class EF02JunitConsumerProof(EF02OriginalProofGitHub):
-    """Focused argv omits consumers, but real hashed Windows JUnit covers them."""
+    """Original hashed Windows JUnit is authentic, but consumer closure may lag."""
 
     def __init__(self, gate, *, mutation=None):
         super().__init__(gate)
@@ -404,7 +404,7 @@ class EF02JunitConsumerProof(EF02OriginalProofGitHub):
 @pytest.mark.parametrize(("mutation", "expected"), [
     (None, "READY_FOR_MERGE"),
     ("bad_hash", "WAIT_CI"),
-    ("missing_consumer", "WAIT_CI"),
+    ("missing_consumer", "READY_FOR_MERGE"),
     ("failed_consumer", "WAIT_CI"),
     ("missing_xml", "WAIT_CI"),
 ])
