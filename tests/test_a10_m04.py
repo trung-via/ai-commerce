@@ -540,6 +540,234 @@ def test_model_identity_text_cannot_authenticate_an_attended_or_parsed_receipt()
     assert rejected["status"] == "UNKNOWN_EFFECT" and rejected["execution"] is None
 
 
+def test_native_codex_post_reservation_catalog_drift_fails_closed(native_codex, monkeypatch):
+    from ai_commerce.opportunity import run_ai_research, validate_ai_research_receipt
+    from ai_commerce.opportunity.core import models
+
+    task, cap, help_bytes, catalog_path = native_codex
+    invocations, reserved = [], []
+
+    def reserve(execution):
+        reserved.append(execution)
+        catalog_path.write_bytes(b'{"client_version":"0.170.0","models":[]}')
+
+    def fake(argv, *, input, cwd, codex_home, shell, timeout, max_bytes):
+        args = argv[1:]
+        if args == ["--version"]:
+            return subprocess.CompletedProcess(argv, 0, ("codex-cli " + cap["version"]).encode(), b"")
+        if args == ["exec", "--help"]:
+            return subprocess.CompletedProcess(argv, 0, help_bytes, b"")
+        if args == ["login", "status"]:
+            return subprocess.CompletedProcess(argv, 0, b"", b"Logged in using ChatGPT")
+        invocations.append(argv)
+        raise AssertionError("codex exec must not run after catalog drift")
+
+    monkeypatch.setattr(models, "_bounded_native_codex", fake)
+    receipt = run_ai_research(task, permissions=["AI_RESEARCH"], capability=cap, before_invoke=reserve)
+    assert validate_ai_research_receipt(receipt, task) == receipt
+    assert len(reserved) == 1 and not invocations
+    assert (receipt["status"], receipt["reason"], receipt["effect"]) == (
+        "UNKNOWN_EFFECT", "NATIVE_CODEX_CATALOG_MISMATCH", "UNKNOWN"
+    )
+
+
+def test_native_codex_policy_contract_has_no_static_version_pin():
+    from ai_commerce.opportunity.core import models
+
+    policy = models.native_codex_policy_contract()
+    assert policy["schema_version"] == "A10CodexPolicyContract.v1"
+    assert policy["transport"] == models.NATIVE_CODEX_TRANSPORT
+    assert policy["boundary"] == models._NATIVE_CODEX_BOUNDARY
+    assert "version" not in policy and "0.164.0" not in json.dumps(policy)
+    assert policy["disabled_features"] == list(models._NATIVE_DISABLED_FEATURES)
+    assert policy["config_overrides"] == list(models._NATIVE_CODEX_CONFIG_OVERRIDES)
+    assert policy["forbidden_home_entries"] == sorted(models._NATIVE_CODEX_FORBIDDEN_HOME_ENTRIES)
+    selector = models.ai_provider_profile("codex-cli")
+    argv = models.codex_research_argv("codex.exe", model=selector["model"], effort=selector["effort"])
+    assert policy["required_exec_flags"] == sorted({arg for arg in argv[2:] if arg.startswith("--")})
+    assert policy["policy_sha256"] == digest({k: v for k, v in policy.items() if k != "policy_sha256"})
+    assert not hasattr(models, "_NATIVE_CODEX_VERSION")
+
+
+def _sample_codex_evidence(**overrides):
+    from ai_commerce.opportunity.core import models
+
+    defaults = {
+        "source_sha": "a" * 40,
+        "observed_at": "2026-11-21T08:00:00Z",
+        "max_age_seconds": 3600,
+        "binary": {
+            "state": "OBSERVED",
+            "sha256": "b" * 64,
+            "version_status": "STABLE_SEMVER",
+            "version": "0.170.0",
+            "help_sha256": "c" * 64,
+        },
+        "cli_declarations": {
+            "root_help": "USAGE_OBSERVED",
+            "root_flags": "DECLARED",
+            "exec_help": "USAGE_OBSERVED",
+            "exec_flags": "DECLARED",
+            "config_override_flags": "DECLARED",
+            "feature_disable_flag": "DECLARED",
+        },
+        "system_config": {
+            "status": "UNKNOWN",
+            "basis": "KNOWN_SYSTEM_PATHS_ABSENT_NOT_EXHAUSTIVE",
+            "known_paths_checked": 3,
+        },
+        "account_config": {
+            "status": "UNKNOWN",
+            "basis": "REMOTE_ACCOUNT_POLICY_UNPROVABLE_OFFLINE",
+        },
+        "windows_boundary": True,
+    }
+    defaults.update(overrides)
+    return models.make_codex_effective_config_evidence(**defaults)
+
+
+@pytest.mark.parametrize("version", ["0.164.0", "0.170.0", "1.2.3", "2.10.4"])
+def test_codex_effective_config_evidence_dynamic_versions_and_strict_binding(version):
+    from ai_commerce.opportunity.core import models
+
+    ev = _sample_codex_evidence(binary={
+        "state": "OBSERVED", "sha256": "b" * 64, "version_status": "STABLE_SEMVER",
+        "version": version, "help_sha256": "c" * 64,
+    })
+    assert ev["readiness_verdict"] == "HOLD_UNVERIFIED"
+    assert ev["native_inference_executed"] is False
+    assert ev["layers"]["disabled_features"] == {"status": "UNKNOWN", "basis": "HELP_DECLARATION_NOT_RUNTIME_PROOF"}
+    assert ev["layers"]["read_only_policy"] == {"status": "UNKNOWN", "basis": "HELP_DECLARATION_NOT_OS_ENFORCEMENT"}
+    assert models.verify_codex_effective_config_binding(
+        ev, source_sha="a" * 40, as_of="2026-11-21T09:00:00Z", binary_sha256="b" * 64,
+        version=version, help_sha256="c" * 64, host_verification_sha256=ev["evidence_sha256"],
+    ) == ev
+
+    with pytest.raises(models.SignalValidationError, match="HOLD_DEPENDENCY_NATIVE_CODEX_EFFECTIVE_CONFIG_UNVERIFIED"):
+        models.require_codex_effective_config_proven(ev)
+
+    for kwargs, code in (
+        ({"as_of": "2026-11-21T09:00:01Z"}, "CODEX_EVIDENCE_STALE"),
+        ({"as_of": "2026-11-21T07:59:59Z"}, "CODEX_EVIDENCE_FUTURE"),
+        ({"as_of": "2026-11-21T08:00:00"}, "CODEX_EVIDENCE_CLOCK_INVALID"),
+        ({"source_sha": "f" * 40}, "CODEX_EVIDENCE_SOURCE_MISMATCH"),
+        ({"policy_sha256": "f" * 64}, "CODEX_EVIDENCE_POLICY_MISMATCH"),
+        ({"binary_sha256": "f" * 64}, "CODEX_EVIDENCE_BINARY_MISMATCH"),
+        ({"version": "9.9.9"}, "CODEX_EVIDENCE_VERSION_MISMATCH"),
+        ({"help_sha256": "f" * 64}, "CODEX_EVIDENCE_HELP_MISMATCH"),
+        ({"host_verification_sha256": "f" * 64}, "CODEX_EVIDENCE_GRANT_MISMATCH"),
+    ):
+        call = {"source_sha": "a" * 40, "as_of": "2026-11-21T08:30:00Z", **kwargs}
+        with pytest.raises(models.SignalValidationError, match=code):
+            models.verify_codex_effective_config_binding(ev, **call)
+
+
+def test_codex_effective_config_evidence_rejects_forged_positive_and_false_sandbox_assurance():
+    from ai_commerce.opportunity.core import models
+
+    def rehash(record):
+        record["evidence_sha256"] = digest({k: v for k, v in record.items() if k != "evidence_sha256"})
+        return record
+
+    base = _sample_codex_evidence()
+    forged_verdict = deepcopy(base)
+    forged_verdict["readiness_verdict"] = "HOST_READINESS_VERIFIED"
+    with pytest.raises(models.SignalValidationError, match="CODEX_EVIDENCE_VERDICT_MISMATCH"):
+        models.validate_codex_effective_config_evidence(rehash(forged_verdict))
+
+    for layer_name in ("system_config", "account_config", "disabled_features", "read_only_policy"):
+        for status in ("VERIFIED", "CLEAN", "ENFORCED", "HOST_READINESS_VERIFIED"):
+            tampered = deepcopy(base)
+            tampered["layers"][layer_name]["status"] = status
+            with pytest.raises(models.SignalValidationError, match="CODEX_EVIDENCE_LAYER_INVALID"):
+                models.validate_codex_effective_config_evidence(rehash(tampered))
+
+    false_sandbox = deepcopy(base)
+    false_sandbox["cli_declarations"]["exec_flags"] = "NOT_DECLARED"
+    false_sandbox["readiness_verdict"] = "HOLD_UNSUPPORTED"
+    with pytest.raises(models.SignalValidationError, match="CODEX_EVIDENCE_FALSE_ASSURANCE"):
+        models.validate_codex_effective_config_evidence(rehash(false_sandbox))
+
+    forged_inference = deepcopy(base)
+    forged_inference["native_inference_executed"] = True
+    with pytest.raises(models.SignalValidationError, match="CODEX_EVIDENCE_INFERENCE_FORBIDDEN"):
+        models.validate_codex_effective_config_evidence(rehash(forged_inference))
+
+    inconsistent_cli = deepcopy(base)
+    inconsistent_cli["cli_declarations"]["config_override_flags"] = "NOT_DECLARED"
+    inconsistent_cli["layers"]["read_only_policy"] = {"status": "NOT_DECLARED", "basis": "SANDBOX_OR_CONFIG_FLAGS_NOT_DECLARED"}
+    inconsistent_cli["readiness_verdict"] = "HOLD_UNSUPPORTED"
+    with pytest.raises(models.SignalValidationError, match="CODEX_EVIDENCE_CLI_INCONSISTENT"):
+        models.validate_codex_effective_config_evidence(rehash(inconsistent_cli))
+
+    missing_help = deepcopy(base)
+    missing_help["binary"]["help_sha256"] = None
+    with pytest.raises(models.SignalValidationError, match="CODEX_EVIDENCE_HELP_INVALID"):
+        models.validate_codex_effective_config_evidence(rehash(missing_help))
+
+    bad_digest = deepcopy(base)
+    bad_digest["source_sha"] = "f" * 40
+    with pytest.raises(models.SignalValidationError, match="CODEX_EVIDENCE_DIGEST_MISMATCH"):
+        models.validate_codex_effective_config_evidence(bad_digest)
+
+    prerelease_as_stable = deepcopy(base)
+    prerelease_as_stable["binary"]["version"] = "0.170.0-rc.1"
+    with pytest.raises(models.SignalValidationError, match="CODEX_EVIDENCE_VERSION_INVALID"):
+        models.validate_codex_effective_config_evidence(rehash(prerelease_as_stable))
+
+    for bad_age in (True, -1, models.CODEX_EVIDENCE_MAX_AGE_LIMIT + 1):
+        bad_fresh = deepcopy(base)
+        bad_fresh["max_age_seconds"] = bad_age
+        with pytest.raises(models.SignalValidationError, match="CODEX_EVIDENCE_FRESHNESS_INVALID"):
+            models.validate_codex_effective_config_evidence(rehash(bad_fresh))
+
+
+def test_codex_effective_config_conflicts_and_dedicated_home_inspection(tmp_path, monkeypatch):
+    from ai_commerce.opportunity.core import models
+
+    home = tmp_path.resolve() / "codex-home"
+    home.mkdir()
+    assert models.inspect_dedicated_codex_home_evidence(home) == {
+        "status": "MISSING_PRIVATE_CONFIG", "basis": "DEDICATED_HOME_AUTH_ABSENT",
+    }
+    (home / "config.toml").write_text("# forbidden", encoding="utf-8")
+    assert models.inspect_dedicated_codex_home_evidence(home) == {
+        "status": "CONFLICTING_PRIVATE_CONFIG", "basis": "DEDICATED_HOME_FORBIDDEN_CONFIG_PRESENT",
+    }
+    (home / "config.toml").unlink()
+    (home / "auth.json").write_bytes(b"SECRET_NEVER_READ")
+    monkeypatch.setattr(Path, "open", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("auth must not be read")))
+    assert models.inspect_dedicated_codex_home_evidence(home) == {
+        "status": "UNKNOWN", "basis": "REMOTE_ACCOUNT_POLICY_UNPROVABLE_OFFLINE",
+    }
+    for unsafe_home in (Path("relative/home"), Path(r"\\server\share\codex"), tmp_path / "missing"):
+        assert models.inspect_dedicated_codex_home_evidence(unsafe_home) == {
+            "status": "UNSAFE", "basis": "DEDICATED_HOME_UNSAFE",
+        }
+
+    cases = [
+        ({"system_config": {"status": "CONFLICTING_POLICY_PRESENT",
+                            "basis": "KNOWN_SYSTEM_POLICY_FILE_PRESENT", "known_paths_checked": 1}},
+         "HOLD_CONFLICT", "HOLD_DEPENDENCY_NATIVE_CODEX_SYSTEM_CONFIG"),
+        ({"account_config": {"status": "MISSING_PRIVATE_CONFIG", "basis": "DEDICATED_HOME_AUTH_ABSENT"}},
+         "HOLD_CONFLICT", "HOLD_DEPENDENCY_NATIVE_CODEX_ACCOUNT_CONFIG"),
+        ({"binary": {"state": "OBSERVED", "sha256": "b" * 64, "version_status": "PRERELEASE_UNSUPPORTED",
+                     "version": None, "help_sha256": "c" * 64}},
+         "HOLD_UNSUPPORTED", "HOLD_DEPENDENCY_NATIVE_CODEX_BINARY"),
+        ({"cli_declarations": {"root_help": "USAGE_OBSERVED", "root_flags": "DECLARED",
+                               "exec_help": "USAGE_OBSERVED", "exec_flags": "NOT_DECLARED",
+                               "config_override_flags": "NOT_DECLARED", "feature_disable_flag": "DECLARED"}},
+         "HOLD_UNSUPPORTED", "HOLD_DEPENDENCY_NATIVE_CODEX_EXEC_FLAGS"),
+        ({"windows_boundary": False},
+         "HOLD_CONFLICT", "HOLD_DEPENDENCY_NATIVE_CODEX_READ_ONLY_BOUNDARY"),
+    ]
+    for overrides, verdict, hold_code in cases:
+        ev = _sample_codex_evidence(**overrides)
+        assert ev["readiness_verdict"] == verdict
+        with pytest.raises(models.SignalValidationError, match=hold_code):
+            models.require_codex_effective_config_proven(ev)
+
+
 @pytest.fixture(autouse=True)
 def offline(monkeypatch):
     def deny(*args, **kwargs):
