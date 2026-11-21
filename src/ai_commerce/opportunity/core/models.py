@@ -460,6 +460,31 @@ def ai_handoff_packet(task: dict) -> dict:
 
 NATIVE_CODEX_TRANSPORT = "A10CodexExecJsonl.v1"
 _NATIVE_CODEX_BOUNDARY = "WINDOWS_JOB_READ_ONLY_V1"
+CODEX_POLICY_CONTRACT_SCHEMA = "A10CodexPolicyContract.v1"
+CODEX_EFFECTIVE_CONFIG_EVIDENCE_SCHEMA = "A10CodexEffectiveConfigEvidence.v1"
+CODEX_EVIDENCE_MAX_AGE_LIMIT = 86400
+_NATIVE_CODEX_STABLE_VERSION = r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}"
+_NATIVE_CODEX_CONFIG_OVERRIDES = (
+    'model_provider="openai"',
+    'forced_login_method="chatgpt"',
+    'approval_policy="never"',
+    'approvals_reviewer="user"',
+    'web_search="disabled"',
+    'agents.enabled=false',
+    'mcp_servers={}',
+    'project_doc_max_bytes=0',
+    'project_root_markers=[]',
+    'include_environment_context=false',
+    'cli_auth_credentials_store="file"',
+    'check_for_update_on_startup=false',
+    'analytics.enabled=false',
+    'allow_login_shell=false',
+    'windows.sandbox="unelevated"',
+)
+_NATIVE_CODEX_FORBIDDEN_HOME_ENTRIES = (
+    "config.toml", "requirements.toml", "environments.toml", "AGENTS.md", "AGENTS.override.md",
+    "agents", "skills", "rules", "plugins", "hooks.json", ".agents", ".codex", ".git",
+)
 _NATIVE_DISABLED_FEATURES = (
     "shell_tool", "shell_snapshot", "code_mode_host", "request_permissions_tool",
     "apps", "plugins", "remote_plugin", "tool_suggest", "hooks", "memories",
@@ -471,12 +496,7 @@ _NATIVE_DISABLED_FEATURES = (
 
 
 def _native_codex_restrictions():
-    config = ('approval_policy="never"', 'approvals_reviewer="user"', 'web_search="disabled"', 'agents.enabled=false',
-              'mcp_servers={}', 'project_doc_max_bytes=0', 'project_root_markers=[]',
-              'include_environment_context=false',
-              'cli_auth_credentials_store="file"', 'check_for_update_on_startup=false',
-              'analytics.enabled=false', 'allow_login_shell=false', 'windows.sandbox="unelevated"')
-    return [arg for value in config for arg in ("--config", value)] + [
+    return [arg for value in _NATIVE_CODEX_CONFIG_OVERRIDES[2:] for arg in ("--config", value)] + [
         arg for feature in _NATIVE_DISABLED_FEATURES for arg in ("--disable", feature)]
 
 
@@ -486,9 +506,323 @@ def codex_research_argv(executable: str, *, model: str, effort: str) -> list[str
     ai_provider_profile("codex-cli", model=model, effort=effort)
     return [executable, "exec", "--ignore-user-config", "--strict-config", "--sandbox", "read-only",
             "--json", "--model", model, "--config", "model_reasoning_effort=" + json.dumps(effort),
-            "--config", 'model_provider="openai"', "--config", 'forced_login_method="chatgpt"',
+            "--config", _NATIVE_CODEX_CONFIG_OVERRIDES[0], "--config", _NATIVE_CODEX_CONFIG_OVERRIDES[1],
             *_native_codex_restrictions(),
             "--output-schema", "{schema}", "--skip-git-repo-check", "-"]
+
+
+def native_codex_policy_contract() -> dict:
+    """Deterministic source policy fingerprint for native Codex exec; no CLI version pin."""
+    selector = ai_provider_profile("codex-cli")
+    argv = codex_research_argv("codex.exe", model=selector["model"], effort=selector["effort"])
+    body = {
+        "schema_version": CODEX_POLICY_CONTRACT_SCHEMA,
+        "transport": NATIVE_CODEX_TRANSPORT,
+        "boundary": _NATIVE_CODEX_BOUNDARY,
+        "required_exec_flags": sorted({arg for arg in argv[2:] if arg.startswith("--")}),
+        "config_overrides": list(_NATIVE_CODEX_CONFIG_OVERRIDES),
+        "disabled_features": list(_NATIVE_DISABLED_FEATURES),
+        "forbidden_home_entries": sorted(_NATIVE_CODEX_FORBIDDEN_HOME_ENTRIES),
+    }
+    return {"policy_sha256": digest(body), **body}
+
+
+CodexEvidenceVerdict = Literal["HOLD_UNVERIFIED", "HOLD_CONFLICT", "HOLD_UNSUPPORTED"]
+CodexBinaryState = Literal["OBSERVED", "NOT_FOUND_IN_SCOPE", "AMBIGUOUS", "UNSAFE", "UNKNOWN"]
+CodexVersionStatus = Literal["STABLE_SEMVER", "PRERELEASE_UNSUPPORTED", "UNKNOWN"]
+
+_CODEX_LAYER_BASES = {
+    "system_config": {
+        "UNKNOWN": ("NOT_CHECKED", "KNOWN_SYSTEM_PATHS_ABSENT_NOT_EXHAUSTIVE"),
+        "CONFLICTING_POLICY_PRESENT": ("KNOWN_SYSTEM_POLICY_FILE_PRESENT",),
+        "UNSAFE": ("SYSTEM_PATH_UNSAFE",),
+    },
+    "account_config": {
+        "UNKNOWN": ("NOT_CHECKED", "REMOTE_ACCOUNT_POLICY_UNPROVABLE_OFFLINE"),
+        "MISSING_PRIVATE_CONFIG": ("DEDICATED_HOME_AUTH_ABSENT",),
+        "CONFLICTING_PRIVATE_CONFIG": ("DEDICATED_HOME_FORBIDDEN_CONFIG_PRESENT",),
+        "UNSAFE": ("DEDICATED_HOME_UNSAFE",),
+    },
+    "disabled_features": {
+        "UNKNOWN": ("CLI_PROBE_UNAVAILABLE", "HELP_DECLARATION_NOT_RUNTIME_PROOF"),
+        "NOT_DECLARED": ("DISABLE_FLAG_NOT_DECLARED",),
+        "UNSAFE": ("BINARY_OR_PROBE_UNSAFE",),
+    },
+    "read_only_policy": {
+        "UNKNOWN": ("CLI_PROBE_UNAVAILABLE", "HELP_DECLARATION_NOT_OS_ENFORCEMENT"),
+        "NOT_DECLARED": ("SANDBOX_OR_CONFIG_FLAGS_NOT_DECLARED",),
+        "UNSAFE": ("NON_WINDOWS_BOUNDARY", "BINARY_OR_PROBE_UNSAFE"),
+    },
+}
+_CODEX_CONFLICT_LAYER_STATUSES = frozenset({
+    "CONFLICTING_POLICY_PRESENT", "MISSING_PRIVATE_CONFIG", "CONFLICTING_PRIVATE_CONFIG", "UNSAFE",
+})
+
+
+class A10CodexEffectiveConfigEvidence(TypedDict):
+    """Source-side R7a effective-config evidence contract; unprovable layers stay UNKNOWN."""
+    schema_version: Literal["A10CodexEffectiveConfigEvidence.v1"]
+    evidence_sha256: str
+    source_sha: str
+    policy_sha256: str
+    observed_at: str
+    max_age_seconds: int
+    binary: dict
+    cli_declarations: dict
+    layers: dict
+    readiness_verdict: CodexEvidenceVerdict
+    native_inference_executed: Literal[False]
+
+
+def _parse_iso_timestamp(value: str, code: str) -> datetime:
+    require(isinstance(value, str) and 0 < len(value) <= 64
+            and re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})", value)
+            is not None, code)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise SignalValidationError(code) from None
+    require(parsed.utcoffset() is not None, code)
+    return parsed
+
+
+def _derive_cli_policy_layers(binary_state: str, cli_declarations: dict, *, windows_boundary: bool) -> tuple[dict, dict]:
+    if binary_state == "UNSAFE":
+        disabled = {"status": "UNSAFE", "basis": "BINARY_OR_PROBE_UNSAFE"}
+    elif cli_declarations["exec_help"] != "USAGE_OBSERVED":
+        disabled = {"status": "UNKNOWN", "basis": "CLI_PROBE_UNAVAILABLE"}
+    elif cli_declarations["feature_disable_flag"] == "NOT_DECLARED":
+        disabled = {"status": "NOT_DECLARED", "basis": "DISABLE_FLAG_NOT_DECLARED"}
+    else:
+        disabled = {"status": "UNKNOWN", "basis": "HELP_DECLARATION_NOT_RUNTIME_PROOF"}
+
+    if not windows_boundary:
+        read_only = {"status": "UNSAFE", "basis": "NON_WINDOWS_BOUNDARY"}
+    elif binary_state == "UNSAFE":
+        read_only = {"status": "UNSAFE", "basis": "BINARY_OR_PROBE_UNSAFE"}
+    elif cli_declarations["exec_help"] != "USAGE_OBSERVED":
+        read_only = {"status": "UNKNOWN", "basis": "CLI_PROBE_UNAVAILABLE"}
+    elif (cli_declarations["exec_flags"] == "NOT_DECLARED"
+            or cli_declarations["config_override_flags"] == "NOT_DECLARED"):
+        read_only = {"status": "NOT_DECLARED", "basis": "SANDBOX_OR_CONFIG_FLAGS_NOT_DECLARED"}
+    else:
+        read_only = {"status": "UNKNOWN", "basis": "HELP_DECLARATION_NOT_OS_ENFORCEMENT"}
+    return disabled, read_only
+
+
+def _derive_effective_config_verdict(binary: dict, cli_declarations: dict, layers: dict) -> CodexEvidenceVerdict:
+    if (binary["state"] in ("UNSAFE", "AMBIGUOUS")
+            or any(layer["status"] in _CODEX_CONFLICT_LAYER_STATUSES for layer in layers.values())):
+        return "HOLD_CONFLICT"
+    if (binary["state"] == "NOT_FOUND_IN_SCOPE"
+            or binary["version_status"] == "PRERELEASE_UNSUPPORTED"
+            or any(layer["status"] == "NOT_DECLARED" for layer in layers.values())
+            or any(cli_declarations[k] == "NOT_DECLARED"
+                   for k in ("root_flags", "exec_flags", "config_override_flags", "feature_disable_flag"))):
+        return "HOLD_UNSUPPORTED"
+    return "HOLD_UNVERIFIED"
+
+
+def inspect_dedicated_codex_home_evidence(home: Path) -> dict:
+    """Metadata-only dedicated CODEX_HOME check; never reads auth.json or config bytes."""
+    if not isinstance(home, Path):
+        return {"status": "UNSAFE", "basis": "DEDICATED_HOME_UNSAFE"}
+    raw = str(home)
+    if (not raw or len(raw) > 1024 or "\x00" in raw
+            or not home.is_absolute() or raw.startswith(("//", "\\\\"))):
+        return {"status": "UNSAFE", "basis": "DEDICATED_HOME_UNSAFE"}
+    try:
+        if not home.is_dir() or home.is_symlink() or home.resolve(strict=True) != home:
+            return {"status": "UNSAFE", "basis": "DEDICATED_HOME_UNSAFE"}
+        for name in _NATIVE_CODEX_FORBIDDEN_HOME_ENTRIES:
+            if os.path.lexists(home / name):
+                return {"status": "CONFLICTING_PRIVATE_CONFIG", "basis": "DEDICATED_HOME_FORBIDDEN_CONFIG_PRESENT"}
+        auth = home / "auth.json"
+        if not os.path.lexists(auth):
+            return {"status": "MISSING_PRIVATE_CONFIG", "basis": "DEDICATED_HOME_AUTH_ABSENT"}
+        if auth.is_symlink() or not auth.is_file() or auth.resolve(strict=True) != auth:
+            return {"status": "UNSAFE", "basis": "DEDICATED_HOME_UNSAFE"}
+    except (OSError, RuntimeError, ValueError):
+        return {"status": "UNSAFE", "basis": "DEDICATED_HOME_UNSAFE"}
+    # Clean dedicated home + present auth.json still cannot verify remote ChatGPT account policy offline.
+    return {"status": "UNKNOWN", "basis": "REMOTE_ACCOUNT_POLICY_UNPROVABLE_OFFLINE"}
+
+
+def validate_codex_effective_config_evidence(evidence: dict) -> A10CodexEffectiveConfigEvidence:
+    """Validate closed-schema R7a effective-config evidence; reject forged positive claims."""
+    _ai_bounded(evidence)
+    _ai_object(evidence, {
+        "schema_version", "evidence_sha256", "source_sha", "policy_sha256", "observed_at",
+        "max_age_seconds", "binary", "cli_declarations", "layers", "readiness_verdict",
+        "native_inference_executed",
+    }, "CODEX_EVIDENCE_INVALID")
+    require(evidence["schema_version"] == CODEX_EFFECTIVE_CONFIG_EVIDENCE_SCHEMA, "CODEX_EVIDENCE_VERSION")
+    require(isinstance(evidence["source_sha"], str)
+            and re.fullmatch(r"[a-f0-9]{40}(?:[a-f0-9]{24})?", evidence["source_sha"]) is not None,
+            "CODEX_EVIDENCE_SOURCE_INVALID")
+    require(isinstance(evidence["policy_sha256"], str)
+            and re.fullmatch(r"[a-f0-9]{64}", evidence["policy_sha256"]) is not None,
+            "CODEX_EVIDENCE_POLICY_INVALID")
+    _parse_iso_timestamp(evidence["observed_at"], "CODEX_EVIDENCE_TIMESTAMP_INVALID")
+    max_age = evidence["max_age_seconds"]
+    require(type(max_age) is int and 0 <= max_age <= CODEX_EVIDENCE_MAX_AGE_LIMIT, "CODEX_EVIDENCE_FRESHNESS_INVALID")
+    require(evidence["native_inference_executed"] is False, "CODEX_EVIDENCE_INFERENCE_FORBIDDEN")
+
+    binary = evidence["binary"]
+    _ai_object(binary, {"state", "sha256", "version_status", "version", "help_sha256"}, "CODEX_EVIDENCE_BINARY_INVALID")
+    require(binary["state"] in ("OBSERVED", "NOT_FOUND_IN_SCOPE", "AMBIGUOUS", "UNSAFE", "UNKNOWN"),
+            "CODEX_EVIDENCE_BINARY_INVALID")
+    require(binary["version_status"] in ("STABLE_SEMVER", "PRERELEASE_UNSUPPORTED", "UNKNOWN"),
+            "CODEX_EVIDENCE_BINARY_INVALID")
+    if binary["state"] == "OBSERVED":
+        require(isinstance(binary["sha256"], str)
+                and re.fullmatch(r"[a-f0-9]{64}", binary["sha256"]) is not None,
+                "CODEX_EVIDENCE_BINARY_INVALID")
+    else:
+        require(binary["sha256"] is None and binary["version_status"] == "UNKNOWN"
+                and binary["version"] is None and binary["help_sha256"] is None,
+                "CODEX_EVIDENCE_BINARY_INVALID")
+    if binary["version_status"] == "STABLE_SEMVER":
+        require(isinstance(binary["version"], str) and len(binary["version"]) <= 64
+                and re.fullmatch(_NATIVE_CODEX_STABLE_VERSION, binary["version"]) is not None,
+                "CODEX_EVIDENCE_VERSION_INVALID")
+    else:
+        require(binary["version"] is None, "CODEX_EVIDENCE_VERSION_INVALID")
+
+    cli = evidence["cli_declarations"]
+    _ai_object(cli, {"root_help", "root_flags", "exec_help", "exec_flags",
+                     "config_override_flags", "feature_disable_flag"}, "CODEX_EVIDENCE_CLI_INVALID")
+    require(cli["root_help"] in ("USAGE_OBSERVED", "UNKNOWN")
+            and cli["exec_help"] in ("USAGE_OBSERVED", "UNKNOWN")
+            and all(cli[k] in ("DECLARED", "NOT_DECLARED", "UNKNOWN")
+                    for k in ("root_flags", "exec_flags", "config_override_flags", "feature_disable_flag")),
+            "CODEX_EVIDENCE_CLI_INVALID")
+    if binary["state"] != "OBSERVED" or binary["version_status"] == "UNKNOWN":
+        require(all(v == "UNKNOWN" for v in cli.values()) and binary["help_sha256"] is None,
+                "CODEX_EVIDENCE_CLI_INCONSISTENT")
+    if cli["root_help"] == "USAGE_OBSERVED":
+        require(cli["root_flags"] in ("DECLARED", "NOT_DECLARED"), "CODEX_EVIDENCE_CLI_INCONSISTENT")
+    else:
+        require(cli["root_flags"] == "UNKNOWN", "CODEX_EVIDENCE_CLI_INCONSISTENT")
+    if cli["exec_help"] == "USAGE_OBSERVED":
+        require(all(cli[k] in ("DECLARED", "NOT_DECLARED")
+                    for k in ("exec_flags", "config_override_flags", "feature_disable_flag")),
+                "CODEX_EVIDENCE_CLI_INCONSISTENT")
+        require(isinstance(binary["help_sha256"], str)
+                and re.fullmatch(r"[a-f0-9]{64}", binary["help_sha256"]) is not None,
+                "CODEX_EVIDENCE_HELP_INVALID")
+        if cli["exec_flags"] == "DECLARED":
+            require(cli["config_override_flags"] == "DECLARED" and cli["feature_disable_flag"] == "DECLARED",
+                    "CODEX_EVIDENCE_CLI_INCONSISTENT")
+    else:
+        require(all(cli[k] == "UNKNOWN" for k in ("exec_flags", "config_override_flags", "feature_disable_flag"))
+                and binary["help_sha256"] is None, "CODEX_EVIDENCE_CLI_INCONSISTENT")
+
+    layers = evidence["layers"]
+    _ai_object(layers, set(_CODEX_LAYER_BASES), "CODEX_EVIDENCE_LAYER_INVALID")
+    sys_layer = layers["system_config"]
+    _ai_object(sys_layer, {"status", "basis", "known_paths_checked"}, "CODEX_EVIDENCE_LAYER_INVALID")
+    sys_allowed = _CODEX_LAYER_BASES["system_config"].get(sys_layer["status"])
+    require(sys_allowed is not None and sys_layer["basis"] in sys_allowed, "CODEX_EVIDENCE_LAYER_INVALID")
+    checked = sys_layer["known_paths_checked"]
+    require(type(checked) is int and 0 <= checked <= 16
+            and (checked == 0 if sys_layer["basis"] == "NOT_CHECKED" else checked >= 1),
+            "CODEX_EVIDENCE_LAYER_INVALID")
+
+    for name in ("account_config", "disabled_features", "read_only_policy"):
+        layer = layers[name]
+        _ai_object(layer, {"status", "basis"}, "CODEX_EVIDENCE_LAYER_INVALID")
+        allowed = _CODEX_LAYER_BASES[name].get(layer["status"])
+        require(allowed is not None and layer["basis"] in allowed, "CODEX_EVIDENCE_LAYER_INVALID")
+
+    expected_disabled, expected_ro_win = _derive_cli_policy_layers(binary["state"], cli, windows_boundary=True)
+    require(layers["disabled_features"] == expected_disabled, "CODEX_EVIDENCE_FALSE_ASSURANCE")
+    require(layers["read_only_policy"] in (expected_ro_win, {"status": "UNSAFE", "basis": "NON_WINDOWS_BOUNDARY"}),
+            "CODEX_EVIDENCE_FALSE_ASSURANCE")
+
+    expected_verdict = _derive_effective_config_verdict(binary, cli, layers)
+    require(evidence["readiness_verdict"] == expected_verdict, "CODEX_EVIDENCE_VERDICT_MISMATCH")
+    expected_digest = digest({k: v for k, v in evidence.items() if k != "evidence_sha256"})
+    require(isinstance(evidence["evidence_sha256"], str) and evidence["evidence_sha256"] == expected_digest,
+            "CODEX_EVIDENCE_DIGEST_MISMATCH")
+    return evidence
+
+
+def make_codex_effective_config_evidence(*, source_sha: str, observed_at: str, max_age_seconds: int = 3600,
+                                         binary: dict, cli_declarations: dict, system_config: dict,
+                                         account_config: dict, windows_boundary: bool = True
+                                         ) -> A10CodexEffectiveConfigEvidence:
+    """Build canonical R7a effective-config evidence; unprovable layers remain UNKNOWN."""
+    binary_copy = deepcopy(binary)
+    cli_copy = deepcopy(cli_declarations)
+    disabled, read_only = _derive_cli_policy_layers(
+        binary_copy.get("state", "UNKNOWN"), cli_copy, windows_boundary=windows_boundary,
+    )
+    layers = {
+        "system_config": deepcopy(system_config),
+        "account_config": deepcopy(account_config),
+        "disabled_features": disabled,
+        "read_only_policy": read_only,
+    }
+    body = {
+        "schema_version": CODEX_EFFECTIVE_CONFIG_EVIDENCE_SCHEMA,
+        "source_sha": source_sha,
+        "policy_sha256": native_codex_policy_contract()["policy_sha256"],
+        "observed_at": observed_at,
+        "max_age_seconds": max_age_seconds,
+        "binary": binary_copy,
+        "cli_declarations": cli_copy,
+        "layers": layers,
+        "readiness_verdict": _derive_effective_config_verdict(binary_copy, cli_copy, layers),
+        "native_inference_executed": False,
+    }
+    return validate_codex_effective_config_evidence({"evidence_sha256": digest(body), **body})
+
+
+def verify_codex_effective_config_binding(evidence: dict, *, source_sha: str, as_of: str,
+                                          binary_sha256: str | None = None, version: str | None = None,
+                                          help_sha256: str | None = None, policy_sha256: str | None = None,
+                                          host_verification_sha256: str | None = None
+                                          ) -> A10CodexEffectiveConfigEvidence:
+    """Verify freshness, source, policy, binary, version, help and optional digest binding."""
+    validated = validate_codex_effective_config_evidence(evidence)
+    observed_dt = _parse_iso_timestamp(validated["observed_at"], "CODEX_EVIDENCE_TIMESTAMP_INVALID")
+    as_of_dt = _parse_iso_timestamp(as_of, "CODEX_EVIDENCE_CLOCK_INVALID")
+    require(observed_dt <= as_of_dt, "CODEX_EVIDENCE_FUTURE")
+    require(as_of_dt - observed_dt <= timedelta(seconds=validated["max_age_seconds"]), "CODEX_EVIDENCE_STALE")
+    require(validated["source_sha"] == source_sha, "CODEX_EVIDENCE_SOURCE_MISMATCH")
+    expected_policy = native_codex_policy_contract()["policy_sha256"] if policy_sha256 is None else policy_sha256
+    require(validated["policy_sha256"] == expected_policy, "CODEX_EVIDENCE_POLICY_MISMATCH")
+    binary = validated["binary"]
+    if binary_sha256 is not None:
+        require(binary["state"] == "OBSERVED" and binary["sha256"] == binary_sha256, "CODEX_EVIDENCE_BINARY_MISMATCH")
+    if version is not None:
+        require(binary["version_status"] == "STABLE_SEMVER" and binary["version"] == version,
+                "CODEX_EVIDENCE_VERSION_MISMATCH")
+    if help_sha256 is not None:
+        require(binary["help_sha256"] == help_sha256, "CODEX_EVIDENCE_HELP_MISMATCH")
+    if host_verification_sha256 is not None:
+        require(validated["evidence_sha256"] == host_verification_sha256, "CODEX_EVIDENCE_GRANT_MISMATCH")
+    return validated
+
+
+def require_codex_effective_config_proven(evidence: dict) -> None:
+    """Fail closed with the exact HOLD reason; R7a source-only evidence never authorizes inference."""
+    validated = validate_codex_effective_config_evidence(evidence)
+    layers = validated["layers"]
+    binary = validated["binary"]
+    if layers["system_config"]["status"] in ("CONFLICTING_POLICY_PRESENT", "UNSAFE"):
+        raise SignalValidationError("HOLD_DEPENDENCY_NATIVE_CODEX_SYSTEM_CONFIG")
+    if layers["account_config"]["status"] in ("MISSING_PRIVATE_CONFIG", "CONFLICTING_PRIVATE_CONFIG", "UNSAFE"):
+        raise SignalValidationError("HOLD_DEPENDENCY_NATIVE_CODEX_ACCOUNT_CONFIG")
+    if binary["state"] != "OBSERVED" or binary["version_status"] != "STABLE_SEMVER":
+        raise SignalValidationError("HOLD_DEPENDENCY_NATIVE_CODEX_BINARY")
+    if (layers["disabled_features"]["status"] == "NOT_DECLARED"
+            or layers["read_only_policy"]["status"] == "NOT_DECLARED"):
+        raise SignalValidationError("HOLD_DEPENDENCY_NATIVE_CODEX_EXEC_FLAGS")
+    if layers["read_only_policy"]["status"] == "UNSAFE":
+        raise SignalValidationError("HOLD_DEPENDENCY_NATIVE_CODEX_READ_ONLY_BOUNDARY")
+    raise SignalValidationError("HOLD_DEPENDENCY_NATIVE_CODEX_EFFECTIVE_CONFIG_UNVERIFIED")
 
 
 def _native_codex_capability(task, capability, *, native):
@@ -512,8 +846,7 @@ def _native_codex_capability(task, capability, *, native):
         require(isinstance(capability[key], str) and re.fullmatch(r"[a-f0-9]{64}", capability[key]) is not None,
                 "NATIVE_CODEX_CAPABILITY_INVALID")
     version = capability["version"]
-    stable_version = r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}"
-    version_pattern = stable_version if native else r"[0-9]+\.[0-9]+\.[0-9]+(?:-[a-z0-9.-]+)?"
+    version_pattern = _NATIVE_CODEX_STABLE_VERSION if native else r"[0-9]+\.[0-9]+\.[0-9]+(?:-[a-z0-9.-]+)?"
     require(isinstance(version, str) and len(version) <= 64 and re.fullmatch(version_pattern, version) is not None,
             "NATIVE_CODEX_VERSION_INVALID")
     argv = capability["argv"]
@@ -551,8 +884,7 @@ def _check_native_codex_home(executable, home):
     require(executable.suffix.lower() == ".exe" and executable.resolve(strict=True) == executable
             and home.is_dir() and home.resolve() == home, "NATIVE_CODEX_PATH_INVALID")
     # Auth stays in the dedicated home and is opened only by Codex.
-    for name in ("config.toml", "requirements.toml", "environments.toml", "AGENTS.md", "AGENTS.override.md",
-                 "agents", "skills", "rules", "plugins", "hooks.json", ".agents", ".codex", ".git"):
+    for name in _NATIVE_CODEX_FORBIDDEN_HOME_ENTRIES:
         require(not os.path.lexists(home / name), "HOLD_DEPENDENCY_NATIVE_CODEX_DEDICATED_HOME")
     require((home / "auth.json").is_file() and (home / "auth.json").resolve() == home / "auth.json",
             "NATIVE_CODEX_LOGIN_UNVERIFIED")
@@ -899,9 +1231,14 @@ def _run_native_codex(task, capability, runner, before_invoke):
                 before_invoke(deepcopy(execution))
                 reserving = False
                 reserved = True
+            require(digest(capability) == execution["capability_sha256"], "NATIVE_CODEX_CAPABILITY_INVALID")
             if native:
                 _check_native_codex_home(executable, home)
             require(_native_binary_digest(executable) == capability["executable_sha256"], "NATIVE_CODEX_BINARY_MISMATCH")
+            catalog_path = home / "models_cache.json"
+            require(catalog_path.resolve().parent == home.resolve(), "NATIVE_CODEX_PATH_INVALID")
+            require(sha256_bytes(_native_file(catalog_path, AI_MAX_BYTES)) == capability["model_catalog_sha256"],
+                    "NATIVE_CODEX_CATALOG_MISMATCH")
             started_ns = time.time_ns()
             reserved = True  # Injected runners can omit a durable journal.
             result = _native_codex_process(runner, argv, packet, directory, home, 60)

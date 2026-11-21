@@ -4436,6 +4436,11 @@ _A10_PROBE_ARGS = (("--version",), ("--help",), ("exec", "--help"))
 _A10_PROBE_TIMEOUT = 5
 _A10_PROBE_MAX_BYTES = 32768
 _A10_PROBE_WARNING = re.compile(rb"\bWARN\b|^warning:", re.IGNORECASE)
+_A10_SYSTEM_CONFIG_RELATIVE = (
+    PureWindowsPath("OpenAI/Codex/config.toml"),
+    PureWindowsPath("OpenAI/Codex/managed_config.toml"),
+    PureWindowsPath("OpenAI/Codex/requirements.toml"),
+)
 
 
 def _a10_readiness_receipt(issue_number, source_sha=None, *, observations=None):
@@ -4634,7 +4639,7 @@ def _a10_default_catalog_state():
     return "UNKNOWN"
 
 
-def _a10_probe_text(probe, args):
+def _a10_probe_raw_text(probe, args):
     from ai_commerce.opportunity.core.models import OpportunityError
 
     try:
@@ -4647,13 +4652,17 @@ def _a10_probe_text(probe, args):
             if result.stderr and (not result.stderr.strip() or any(
                 not _A10_PROBE_WARNING.search(line) for line in result.stderr.splitlines() if line.strip()
             )):
-                return ""
+                return b"", ""
             text = result.stdout.decode("utf-8").replace("\r\n", "\n")
             if not re.search(r"[\x00-\x08\x0b-\x1f\x7f]", text):
-                return text
+                return result.stdout, text
     except (OpportunityError, OSError, subprocess.SubprocessError, UnicodeError, AttributeError):
         pass
-    return ""
+    return b"", ""
+
+
+def _a10_probe_text(probe, args):
+    return _a10_probe_raw_text(probe, args)[1]
 
 
 def _a10_help_options(text, *, exec_help):
@@ -4693,22 +4702,27 @@ def _a10_observe_cli(probe, observations):
         observations["feature_disable_flag"] = "DECLARED" if "--disable" in exec_options else "NOT_DECLARED"
 
 
+def _a10_verify_binary_unchanged(executable, observed_sha):
+    from ai_commerce.opportunity.core.models import _native_binary_digest
+
+    try:
+        return (executable.resolve(strict=True) == executable
+                and _a10_is_native_executable(executable)
+                and _native_binary_digest(executable) == observed_sha)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 @contextmanager
 def _a10_isolated_cli(executable, observed_sha):
-    from ai_commerce.opportunity.core.models import _bounded_native_codex, _native_binary_digest
+    from ai_commerce.opportunity.core.models import _bounded_native_codex
 
     with tempfile.TemporaryDirectory(prefix="a10-readiness-") as directory:
         def probe(args):
             if args not in _A10_PROBE_ARGS:
                 deny("A10_PROBE_DENIED")
             # Recheck the resolved native file before every metadata process.
-            try:
-                same_binary = (executable.resolve(strict=True) == executable
-                               and _a10_is_native_executable(executable)
-                               and _native_binary_digest(executable) == observed_sha)
-            except (OSError, RuntimeError, ValueError):
-                same_binary = False
-            if not same_binary:
+            if not _a10_verify_binary_unchanged(executable, observed_sha):
                 deny("A10_PROBE_BINARY_CHANGED")
             return _bounded_native_codex(
                 [str(executable), *args], input=b"", cwd=directory, codex_home=directory,
@@ -4716,6 +4730,140 @@ def _a10_isolated_cli(executable, observed_sha):
             )
 
         yield probe
+
+
+def _a10_system_config_probe(env=None):
+    """Metadata-only negative check for known Windows system Codex policy files.
+
+    Never reads file bytes or emits paths. Absence of these known paths does not
+    exhaustively prove absence of registry/MDM/version-specific policy, so clean
+    absence remains UNKNOWN.
+    """
+    current_env = os.environ if env is None else env
+    program_data = _a10_local_path(current_env.get("ProgramData"))
+    if program_data is None:
+        return {"status": "UNKNOWN", "basis": "NOT_CHECKED", "known_paths_checked": 0}
+    checked = 0
+    for rel in _A10_SYSTEM_CONFIG_RELATIVE:
+        checked += 1
+        try:
+            with _a10_pin_local_path(program_data / rel):
+                return {
+                    "status": "CONFLICTING_POLICY_PRESENT",
+                    "basis": "KNOWN_SYSTEM_POLICY_FILE_PRESENT",
+                    "known_paths_checked": checked,
+                }
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return {
+                "status": "UNSAFE",
+                "basis": "SYSTEM_PATH_UNSAFE",
+                "known_paths_checked": checked,
+            }
+    return {
+        "status": "UNKNOWN",
+        "basis": "KNOWN_SYSTEM_PATHS_ABSENT_NOT_EXHAUSTIVE",
+        "known_paths_checked": checked,
+    }
+
+
+def _a10_collect_r7_internal_evidence(source_sha, *, as_of=None, env=None, max_age_seconds=3600):
+    """Testable, non-emitting R7a internal effective-config evidence collector.
+
+    Never emitted directly to GitHub before protected R7b sanitizer review.
+    Retains dynamic stable semver acceptance, bounds system-config negative
+    checks without reading secrets, rechecks binary digest after probing, and
+    keeps every unprovable effective-config layer explicitly UNKNOWN.
+    """
+    from ai_commerce.opportunity.core import models
+
+    if type(source_sha) is not str or re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+        deny("PROTECTED_HOSTOPS_ONLY")
+    observed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if as_of is None else as_of
+    current_env = os.environ if env is None else env
+    system_config = _a10_system_config_probe(current_env)
+    account_config = {"status": "UNKNOWN", "basis": "REMOTE_ACCOUNT_POLICY_UNPROVABLE_OFFLINE"}
+    cli = dict.fromkeys(
+        ("root_help", "root_flags", "exec_help", "exec_flags", "config_override_flags", "feature_disable_flag"),
+        "UNKNOWN",
+    )
+    kind, executable, observed_sha = _a10_find_executable(_a10_install_candidates(current_env))
+    binary = {
+        "state": kind,
+        "sha256": observed_sha if kind == "OBSERVED" else None,
+        "version_status": "UNKNOWN",
+        "version": None,
+        "help_sha256": None,
+    }
+    if executable is not None:
+        binary_drifted = False
+        try:
+            with _a10_isolated_cli(executable, observed_sha) as probe:
+                version_line = _a10_probe_text(probe, ("--version",)).strip()
+                if version_line.startswith("codex-cli "):
+                    candidate_ver = version_line[len("codex-cli "):]
+                    if (len(candidate_ver) <= 64
+                            and re.fullmatch(models._NATIVE_CODEX_STABLE_VERSION, candidate_ver, flags=re.ASCII)):
+                        binary["version_status"] = "STABLE_SEMVER"
+                        binary["version"] = candidate_ver
+                    elif "-" in candidate_ver and re.fullmatch(_HEALTH_VERSION, candidate_ver, flags=re.ASCII):
+                        binary["version_status"] = "PRERELEASE_UNSUPPORTED"
+                if binary["version_status"] != "UNKNOWN":
+                    root_options = _a10_help_options(_a10_probe_text(probe, ("--help",)), exec_help=False)
+                    if root_options is not None:
+                        cli["root_help"] = "USAGE_OBSERVED"
+                        cli["root_flags"] = "DECLARED" if {"--config", "--disable"} <= root_options else "NOT_DECLARED"
+                    exec_raw, exec_text = _a10_probe_raw_text(probe, ("exec", "--help"))
+                    exec_options = _a10_help_options(exec_text, exec_help=True)
+                    if exec_options is not None:
+                        required = set(models.native_codex_policy_contract()["required_exec_flags"])
+                        binary["help_sha256"] = hashlib.sha256(exec_raw).hexdigest()
+                        cli["exec_help"] = "USAGE_OBSERVED"
+                        cli["exec_flags"] = "DECLARED" if required <= exec_options else "NOT_DECLARED"
+                        cli["config_override_flags"] = "DECLARED" if _A10_CONFIG_FLAGS <= exec_options else "NOT_DECLARED"
+                        cli["feature_disable_flag"] = "DECLARED" if "--disable" in exec_options else "NOT_DECLARED"
+        except Denied as exc:
+            if str(exc) == "A10_PROBE_BINARY_CHANGED":
+                binary_drifted = True
+        except (OSError, ValueError):
+            pass
+        if binary_drifted or not _a10_verify_binary_unchanged(executable, observed_sha):
+            binary = {
+                "state": "UNSAFE", "sha256": None,
+                "version_status": "UNKNOWN", "version": None, "help_sha256": None,
+            }
+            cli = dict.fromkeys(cli, "UNKNOWN")
+    return models.make_codex_effective_config_evidence(
+        source_sha=source_sha, observed_at=observed_at, max_age_seconds=max_age_seconds,
+        binary=binary, cli_declarations=cli, system_config=system_config, account_config=account_config,
+        windows_boundary=(os.name == "nt"),
+    )
+
+
+def _a10_project_public_observations(evidence, *, catalog="UNKNOWN"):
+    """Downgrade R7a internal evidence to backwards-compatible A10CodexHostReadiness.v1 observations."""
+    from ai_commerce.opportunity.core import models
+
+    validated = models.validate_codex_effective_config_evidence(evidence)
+    binary = validated["binary"]
+    observations = {"binary": binary["state"]}
+    if binary["state"] != "OBSERVED":
+        return observations
+    observations["observed_binary_sha256"] = binary["sha256"]
+    observations["catalog"] = catalog if catalog in _A10_CHECK_CODES["catalog"] else "UNKNOWN"
+    if binary["version_status"] == "STABLE_SEMVER":
+        observations["version"] = (
+            "MATCHES_SOURCE_VERSION" if binary["version"] == _A10_VERSION_DIAGNOSTIC_BASELINE
+            else "DIFFERS_FROM_SOURCE_VERSION"
+        )
+    elif binary["version_status"] == "PRERELEASE_UNSUPPORTED":
+        observations["version"] = "DIFFERS_FROM_SOURCE_VERSION"
+    for field, value in validated["cli_declarations"].items():
+        if value != "UNKNOWN":
+            observations[field] = value
+    # R7a two-phase contract: these four layers stay UNKNOWN in outward GitHub receipts until R7b.
+    return observations
 
 
 def _a10_collect_readiness():

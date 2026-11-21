@@ -478,6 +478,287 @@ Options:
         )
         self.assertEqual((hold["status"], hold["code"]), ("HOLD", "HOST_UNVERIFIED"))
 
+    def test_r7_system_config_probe_metadata_only_and_fails_closed(self):
+        with patch.object(hostops, "_a10_pin_local_path", side_effect=FileNotFoundError) as pin:
+            result = hostops._a10_system_config_probe({"ProgramData": r"C:\ProgramData"})
+        self.assertEqual(result, {
+            "status": "UNKNOWN", "basis": "KNOWN_SYSTEM_PATHS_ABSENT_NOT_EXHAUSTIVE", "known_paths_checked": 3,
+        })
+        self.assertEqual(pin.call_args_list, [
+            call(PureWindowsPath(r"C:\ProgramData\OpenAI\Codex\config.toml")),
+            call(PureWindowsPath(r"C:\ProgramData\OpenAI\Codex\managed_config.toml")),
+            call(PureWindowsPath(r"C:\ProgramData\OpenAI\Codex\requirements.toml")),
+        ])
+
+        with (patch.object(hostops, "_a10_pin_local_path",
+                           side_effect=[FileNotFoundError, FileNotFoundError, nullcontext(Path("unused"))]),
+              patch.object(Path, "read_bytes", side_effect=AssertionError("must not read policy bytes"))):
+            conflict = hostops._a10_system_config_probe({"ProgramData": r"C:\ProgramData"})
+        self.assertEqual(conflict, {
+            "status": "CONFLICTING_POLICY_PRESENT", "basis": "KNOWN_SYSTEM_POLICY_FILE_PRESENT",
+            "known_paths_checked": 3,
+        })
+
+        with patch.object(hostops, "_a10_pin_local_path", side_effect=[FileNotFoundError, OSError("reparse")]):
+            unsafe = hostops._a10_system_config_probe({"ProgramData": r"C:\ProgramData"})
+        self.assertEqual(unsafe, {"status": "UNSAFE", "basis": "SYSTEM_PATH_UNSAFE", "known_paths_checked": 2})
+
+        for bad in ({}, {"ProgramData": r"\\server\share"}, {"ProgramData": "relative"},
+                    {"ProgramData": r"C:\ProgramData:stream"}, {"ProgramData": r"C:\CON"}):
+            with self.subTest(bad=bad), patch.object(hostops, "_a10_pin_local_path") as pin:
+                self.assertEqual(hostops._a10_system_config_probe(bad), {
+                    "status": "UNKNOWN", "basis": "NOT_CHECKED", "known_paths_checked": 0,
+                })
+                pin.assert_not_called()
+
+    def test_r7_internal_evidence_dynamic_version_drift_conflicts_and_public_downgrade(self):
+        from ai_commerce.opportunity.core import models
+
+        raw = b"observed r7 binary"
+        binary_sha = hashlib.sha256(raw).hexdigest()
+        full_exec_help = self.EXEC_HELP.replace(
+            b"      --json", b"      --ignore-user-config\n      --strict-config\n      --json"
+        )
+        as_of = "2026-11-21T08:00:00Z"
+
+        with self.assertRaisesRegex(hostops.Denied, "PROTECTED_HOSTOPS_ONLY"):
+            hostops._a10_collect_r7_internal_evidence("not-a-sha", as_of=as_of)
+
+        for version in ("0.164.0", "0.170.0", "2.3.4"):
+            executable = self._binary(PureWindowsPath("D:/Codex/codex.exe"), raw)
+            executable.resolve.return_value = executable
+            executable.open.side_effect = lambda _: BytesIO(raw)
+            with (self.subTest(version=version),
+                  patch.object(hostops, "os", SimpleNamespace(name="nt", environ={"ProgramData": r"C:\ProgramData"})),
+                  patch.object(hostops, "_a10_find_executable", return_value=("OBSERVED", executable, binary_sha)),
+                  patch.object(hostops, "_a10_is_native_executable", return_value=True),
+                  patch.object(hostops, "_a10_pin_local_path", side_effect=FileNotFoundError),
+                  patch.object(hostops.tempfile, "TemporaryDirectory", return_value=nullcontext("fake-temp")),
+                  patch.object(models, "_bounded_native_codex", side_effect=[
+                      self._output(f"codex-cli {version}".encode()),
+                      self._output(self.ROOT_HELP),
+                      self._output(full_exec_help),
+                  ])):
+                ev = hostops._a10_collect_r7_internal_evidence(self.SHA, as_of=as_of)
+            self.assertEqual(ev["readiness_verdict"], "HOLD_UNVERIFIED")
+            self.assertEqual(ev["binary"], {
+                "state": "OBSERVED", "sha256": binary_sha, "version_status": "STABLE_SEMVER",
+                "version": version, "help_sha256": hashlib.sha256(full_exec_help).hexdigest(),
+            })
+            self.assertFalse(ev["native_inference_executed"])
+            self.assertEqual(ev["layers"]["system_config"]["status"], "UNKNOWN")
+            self.assertEqual(ev["layers"]["account_config"]["status"], "UNKNOWN")
+            self.assertEqual(ev["layers"]["disabled_features"], {
+                "status": "UNKNOWN", "basis": "HELP_DECLARATION_NOT_RUNTIME_PROOF",
+            })
+            self.assertEqual(ev["layers"]["read_only_policy"], {
+                "status": "UNKNOWN", "basis": "HELP_DECLARATION_NOT_OS_ENFORCEMENT",
+            })
+            models.verify_codex_effective_config_binding(
+                ev, source_sha=self.SHA, as_of="2026-11-21T08:10:00Z",
+                binary_sha256=binary_sha, version=version, help_sha256=hashlib.sha256(full_exec_help).hexdigest(),
+            )
+            with self.assertRaisesRegex(models.SignalValidationError, "HOLD_DEPENDENCY_NATIVE_CODEX_EFFECTIVE_CONFIG_UNVERIFIED"):
+                models.require_codex_effective_config_proven(ev)
+
+            projected = hostops._a10_project_public_observations(ev, catalog="DEFAULT_CACHE_PRESENT")
+            receipt = hostops._a10_readiness_receipt(17, self.SHA, observations=projected)
+            self.assertEqual(receipt["a10_readiness"]["state"], "HOST_UNVERIFIED")
+            self.assertEqual(receipt["a10_readiness"]["version"],
+                             "MATCHES_SOURCE_VERSION" if version == "0.164.0" else "DIFFERS_FROM_SOURCE_VERSION")
+            for layer in ("system_config", "account_config", "disabled_features", "read_only_policy"):
+                self.assertEqual(receipt["a10_readiness"][layer], "UNKNOWN")
+            self.assertNotIn(version, json.dumps(receipt))
+
+        # Prerelease, missing flags, conflicting system policy, post-probe binary drift, and non-Windows boundary
+        for case in ("prerelease", "missing-flags", "system-conflict", "post-probe-drift", "non-windows"):
+            executable = self._binary(PureWindowsPath("D:/Codex/codex.exe"), raw)
+            executable.resolve.return_value = executable
+            if case == "post-probe-drift":
+                executable.open.side_effect = [BytesIO(raw), BytesIO(raw), BytesIO(raw), BytesIO(b"swapped-binary")]
+            else:
+                executable.open.side_effect = lambda _: BytesIO(raw)
+            ver_out = b"codex-cli 0.170.0-rc.1" if case == "prerelease" else b"codex-cli 0.170.0"
+            help_out = self.EXEC_HELP if case == "missing-flags" else full_exec_help
+            pin_effect = nullcontext(Path("unused")) if case == "system-conflict" else FileNotFoundError
+            os_name = "posix" if case == "non-windows" else "nt"
+            with (self.subTest(case=case),
+                  patch.object(hostops, "os", SimpleNamespace(name=os_name, environ={"ProgramData": r"C:\ProgramData"})),
+                  patch.object(hostops, "_a10_find_executable", return_value=("OBSERVED", executable, binary_sha)),
+                  patch.object(hostops, "_a10_is_native_executable", return_value=True),
+                  patch.object(hostops, "_a10_pin_local_path", side_effect=[pin_effect, FileNotFoundError, FileNotFoundError]),
+                  patch.object(hostops.tempfile, "TemporaryDirectory", return_value=nullcontext("fake-temp")),
+                  patch.object(models, "_bounded_native_codex", side_effect=[
+                      self._output(ver_out), self._output(self.ROOT_HELP), self._output(help_out),
+                  ])):
+                ev = hostops._a10_collect_r7_internal_evidence(self.SHA, as_of=as_of)
+            if case == "prerelease":
+                self.assertEqual(ev["binary"]["version_status"], "PRERELEASE_UNSUPPORTED")
+                self.assertIsNone(ev["binary"]["version"])
+                self.assertEqual(ev["readiness_verdict"], "HOLD_UNSUPPORTED")
+            elif case == "missing-flags":
+                self.assertEqual(ev["cli_declarations"]["exec_flags"], "NOT_DECLARED")
+                self.assertEqual(ev["layers"]["read_only_policy"], {
+                    "status": "NOT_DECLARED", "basis": "SANDBOX_OR_CONFIG_FLAGS_NOT_DECLARED",
+                })
+                self.assertEqual(ev["readiness_verdict"], "HOLD_UNSUPPORTED")
+            elif case == "system-conflict":
+                self.assertEqual(ev["layers"]["system_config"]["status"], "CONFLICTING_POLICY_PRESENT")
+                self.assertEqual(ev["readiness_verdict"], "HOLD_CONFLICT")
+            elif case == "post-probe-drift":
+                self.assertEqual(ev["binary"]["state"], "UNSAFE")
+                self.assertIsNone(ev["binary"]["sha256"])
+                self.assertTrue(all(v == "UNKNOWN" for v in ev["cli_declarations"].values()))
+                self.assertEqual(ev["readiness_verdict"], "HOLD_CONFLICT")
+            else:
+                self.assertEqual(ev["layers"]["read_only_policy"], {
+                    "status": "UNSAFE", "basis": "NON_WINDOWS_BOUNDARY",
+                })
+                self.assertEqual(ev["readiness_verdict"], "HOLD_CONFLICT")
+
+    def test_r7_protected_a10_sanitizer_compatibility_and_negative_rejection(self):
+        """Execute actual .github/workflows/issue-ingress.yml A10 JS sanitizer offline via Node."""
+        import os
+        import shutil
+
+        node = shutil.which("node") or shutil.which("node.exe")
+        if not node and os.name == "nt" and os.environ.get("RUNNER_TEMP"):
+            runner_root = Path(os.environ["RUNNER_TEMP"]).parents[1]
+            for version in ("node24", "node20"):
+                candidate = runner_root / "externals" / version / "bin" / "node.exe"
+                if candidate.is_file():
+                    node = str(candidate)
+                    break
+        if not node:
+            self.skipTest("Node CLI unavailable: hosted Windows JS sanitizer verification required")
+        workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+        workflow = workflow.split("  hostops-d5-carrier:", 1)[0]
+        script = "\n".join(line[12:] if line.startswith("            ") else line
+                           for line in workflow.split("          script: |\n", 1)[1].splitlines())
+        encode = lambda x: json.dumps(x, ensure_ascii=True, separators=(",", ":"))
+
+        def rehash_public(rec):
+            copy = copy_mod.deepcopy(rec)
+            copy["a10_readiness"].pop("public_observation_sha256", None)
+            digest = hashlib.sha256(json.dumps(copy, sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest()
+            copy["a10_readiness"]["public_observation_sha256"] = digest
+            return copy
+
+        copy_mod = copy
+        sha = "f" * 40
+        bin_sha = "b" * 64
+        r1251_obs = {
+            "binary": "OBSERVED", "observed_binary_sha256": bin_sha,
+            "version": "DIFFERS_FROM_SOURCE_VERSION", "root_help": "USAGE_OBSERVED",
+            "root_flags": "DECLARED", "exec_help": "USAGE_OBSERVED", "exec_flags": "DECLARED",
+            "config_override_flags": "DECLARED", "feature_disable_flag": "DECLARED",
+            "catalog": "DEFAULT_CACHE_PRESENT",
+        }
+        r1251 = hostops._a10_readiness_receipt(17, sha, observations=r1251_obs)
+        matched = hostops._a10_readiness_receipt(17, sha, observations={**r1251_obs, "version": "MATCHES_SOURCE_VERSION"})
+        absent = hostops._a10_readiness_receipt(17, sha, observations={"binary": "NOT_FOUND_IN_SCOPE"})
+        source_only = hostops._a10_readiness_receipt(17, sha)
+        base_ctx = {
+            "eventName": "issues",
+            "repo": {"owner": "trung-via", "repo": "ai-commerce"},
+            "issue": {"number": 17},
+            "sha": sha,
+            "payload": {
+                "action": "opened",
+                "sender": {"login": "trung-via"},
+                "issue": {
+                    "user": {"login": "trung-via"},
+                    "title": "[HOSTOPS READ] A10-O2b R7a readiness",
+                    "body": encode({"schema": hostops.SCHEMA, "operation": self.OP, "parameters": {}}),
+                },
+            },
+        }
+        cases = [
+            {"name": "r1251_compat", "body": encode(r1251), "ctx": base_ctx,
+             "status": "HOLD", "code": "HOST_UNVERIFIED", "expected": r1251},
+            {"name": "matches_version", "body": encode(matched), "ctx": base_ctx,
+             "status": "HOLD", "code": "HOST_UNVERIFIED", "expected": matched},
+            {"name": "binary_absent", "body": encode(absent), "ctx": base_ctx,
+             "status": "HOLD", "code": "HOST_UNVERIFIED", "expected": absent},
+            {"name": "source_present", "body": encode(source_only), "ctx": base_ctx,
+             "status": "BLOCKED", "code": "A10_PROTECTED_WORKFLOW_REQUIRED", "expected": source_only},
+        ]
+        # Negative cases: forged positive enums, HOST_READINESS_VERIFIED, inference=True, wrong owner, extra fields
+        for layer in ("system_config", "account_config", "disabled_features", "read_only_policy"):
+            forged = copy.deepcopy(r1251)
+            forged["a10_readiness"][layer] = "VERIFIED"
+            cases.append({"name": f"forged_{layer}", "body": encode(rehash_public(forged)), "ctx": base_ctx,
+                          "status": "BLOCKED", "code": "INVALID_PUBLIC_A10_READINESS_RECEIPT"})
+        forged_state = copy.deepcopy(r1251)
+        forged_state["code"] = "HOST_READINESS_VERIFIED"
+        forged_state["a10_readiness"]["state"] = "HOST_READINESS_VERIFIED"
+        cases.append({"name": "forged_verified_state", "body": encode(rehash_public(forged_state)), "ctx": base_ctx,
+                      "status": "BLOCKED", "code": "INVALID_PUBLIC_A10_READINESS_RECEIPT"})
+        forged_inf = copy.deepcopy(r1251)
+        forged_inf["a10_readiness"]["native_inference_executed"] = True
+        cases.append({"name": "forged_inference", "body": encode(rehash_public(forged_inf)), "ctx": base_ctx,
+                      "status": "BLOCKED", "code": "INVALID_PUBLIC_A10_READINESS_RECEIPT"})
+        leaked_internal = {**r1251, "a10_effective_config_evidence": {"secret": "PRIVATE_SECRET"}}
+        cases.append({"name": "leaked_internal_field", "body": encode(leaked_internal), "ctx": base_ctx,
+                      "status": "BLOCKED", "code": "INVALID_PUBLIC_A10_READINESS_RECEIPT"})
+        tampered_digest = copy.deepcopy(r1251)
+        tampered_digest["a10_readiness"]["public_observation_sha256"] = "0" * 64
+        cases.append({"name": "tampered_digest", "body": encode(tampered_digest), "ctx": base_ctx,
+                      "status": "BLOCKED", "code": "INVALID_PUBLIC_A10_READINESS_RECEIPT"})
+        wrong_sha = copy.deepcopy(r1251)
+        wrong_sha["source_sha"] = "0" * 40
+        cases.append({"name": "wrong_source_sha", "body": encode(rehash_public(wrong_sha)), "ctx": base_ctx,
+                      "status": "BLOCKED", "code": "INVALID_PUBLIC_A10_READINESS_RECEIPT"})
+        bad_cli = copy.deepcopy(r1251)
+        bad_cli["a10_readiness"]["exec_help"] = "UNKNOWN"
+        cases.append({"name": "inconsistent_cli", "body": encode(rehash_public(bad_cli)), "ctx": base_ctx,
+                      "status": "BLOCKED", "code": "INVALID_PUBLIC_A10_READINESS_RECEIPT"})
+        wrong_sender_ctx = copy.deepcopy(base_ctx)
+        wrong_sender_ctx["payload"]["sender"]["login"] = "attacker"
+        cases.append({"name": "wrong_sender", "body": encode(r1251), "ctx": wrong_sender_ctx,
+                      "status": "BLOCKED", "code": "INVALID_PUBLIC_A10_READINESS_RECEIPT"})
+        injected_param_ctx = copy.deepcopy(base_ctx)
+        injected_param_ctx["payload"]["issue"]["body"] = encode(
+            {"schema": hostops.SCHEMA, "operation": self.OP, "parameters": {"path": "PRIVATE_SECRET"}}
+        )
+        cases.append({"name": "injected_param", "body": encode(r1251), "ctx": injected_param_ctx,
+                      "status": "BLOCKED", "code": "INVALID_PUBLIC_A10_READINESS_RECEIPT"})
+
+        harness = r"""
+const fs = require('fs'), path = require('path'), vm = require('vm');
+const cases = JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
+const script = fs.readFileSync(process.argv[2],'utf8');
+(async () => {
+  for (const item of cases) {
+    fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'personal-hostops-result.json'),item.body,'utf8');
+    const comments = [];
+    const github = {rest:{issues:{createComment:async args => { comments.push(args.body); }}}};
+    await vm.runInNewContext('(async () => {\n'+script+'\n})()',
+      {require,process,context:item.ctx,github,Buffer});
+    if (comments.length !== 1 || !comments[0].startsWith('AI_COMMERCE_PERSONAL_HOSTOPS_RESULT_V1\n'))
+      throw new Error(item.name+': missing result');
+    const result = JSON.parse(comments[0].split('\n').slice(1).join('\n'));
+    if (result.status !== item.status || result.code !== item.code)
+      throw new Error(item.name+': unexpected '+JSON.stringify(result));
+    if (item.expected) require('assert').deepStrictEqual(result,item.expected,item.name+': changed receipt');
+    if (JSON.stringify(result).includes('PRIVATE_SECRET'))
+      throw new Error(item.name+': private data leak');
+  }
+  process.stdout.write('A10_VERIFIED_CASES='+cases.length);
+})().catch(error => { console.error(error); process.exitCode=1; });
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)
+            (path / "cases.json").write_text(encode(cases), encoding="utf-8")
+            (path / "workflow.js").write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [node, "-e", harness, str(path / "cases.json"), str(path / "workflow.js")],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                timeout=30, env={**os.environ, "RUNNER_TEMP": str(path)}, check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr[-3000:])
+        self.assertIn("A10_VERIFIED_CASES=" + str(len(cases)), completed.stdout)
+
 
 class PersonalHostOpsContractTests(unittest.TestCase):
     @staticmethod
