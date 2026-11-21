@@ -49,13 +49,12 @@ The authorized trigger must retain the same local state directory between runs.
 Exit codes: 0 PLAN/COMPLETE or successful intake, 2 FAIL or blocked input,
 3 WAIT or held dispatch, 4 UNKNOWN local dispatch.
 
-CLI capabilities are trusted operator files, not fields in an untrusted job:
---capability JSON follows run_ai_research's exact-argv contract. Real invocations
-also require installed_probe:{executable_sha256,capability,authentication}; both
-probe entries contain read-only argv and an independently trusted stdout_sha256
-for this exact installed version/authenticated session. Unsupported CLI versions
-must not be granted a capability. No capability means PROVIDER_UNAVAILABLE,
-never fallback. Injected test runners are explicitly labelled MOCK, not real AI.
+--capability is a trusted operator file. A10CodexExecJsonl.v1 pins the exact
+local binary, help, model catalog, model and effort. Native execution requires
+the reviewed WINDOWS_JOB_READ_ONLY_V1 boundary, a host verification digest,
+and a dedicated authenticated Codex home. The operator verifies the effective
+system and account configuration of the pinned release before issuing a grant.
+Antigravity has no registered native protocol.
 Time, token and Human counters remain UNKNOWN unless observed.
 """
 from __future__ import annotations
@@ -73,7 +72,7 @@ from ai_commerce.core.provenance import canonical_bytes, sha256_bytes
 from ..audience import AudienceLedger, signal_evidence_ref
 from ..audience.models import MAX_NOTES_BYTES, prepare_bytes as prepare_notes, prepare_human_audience
 from ..core.models import (
-    AI_MAX_BYTES, OpportunityError, ai_handoff_packet, ai_provider_profile,
+    AI_MAX_BYTES, NATIVE_CODEX_TRANSPORT, OpportunityError, ai_handoff_packet, ai_provider_profile,
     ai_research_receipt, digest, make_ai_research_task, parse_json, require,
     run_ai_research, validate_ai_research_receipt, make_opportunity_decision,
     validate_opportunity_decision,
@@ -276,12 +275,18 @@ def execute(args):
 
 
 def _execute_automation(args, manifest_path: Path, manifest: dict, *, production=None) -> dict:
+    capability = None
+    if args.mode == "execute" and args.capability:
+        try:
+            capability = _json(args.capability, limit=MAX_JOB_BYTES)
+        except (OpportunityError, OSError, ValueError, TypeError, RecursionError):
+            capability = {}  # Invalid grants follow the provider WAIT path.
     return run_automation(
         manifest, base_dir=manifest_path.parent, source_sha=args.source_sha,
         state_dir=args.state_dir, mode=args.mode, permissions=args.allow_effect,
         selection=_json(args.selection) if args.selection else None,
         human_identity=_json(args.human_identity) if args.human_identity else None,
-        capability=_json(args.capability, limit=MAX_JOB_BYTES) if args.capability else None,
+        capability=capability,
         attended_output=read_local(args.attended_output, limit=AI_MAX_BYTES) if args.attended_output else None,
         production=production, result_path=args.result,
     )
@@ -597,8 +602,20 @@ def _run_automation(manifest: dict, *, base_dir: Path, source_sha: str, state_di
             if raw_notes is not None:
                 sha = sha256_bytes(raw_notes)
                 sources.append({"ref": "sha256:" + sha, "sha256": sha})
+            provider = manifest["provider"]
+            selector = {}
+            if provider != "chatgpt-attended" and isinstance(capability, dict):
+                transport = capability.get("transport")
+                if ((provider == "codex-cli" and transport == NATIVE_CODEX_TRANSPORT)
+                        or (runner is not None and "transport" not in capability
+                            and {"argv", "model", "effort"} <= set(capability))):
+                    selector = {key: capability.get(key) for key in ("model", "effort")}
+                    try:
+                        ai_provider_profile(provider, **selector)
+                    except OpportunityError:
+                        return finish("WAIT", "PROVIDER_UNAVAILABLE", "REVIEW_PROVIDER_CAPABILITY")
             task = make_ai_research_task(stage="OPPORTUNITY_ASSESSMENT", sources=sources,
-                source_sha=source_sha, provider=manifest["provider"],
+                source_sha=source_sha, provider=provider, **selector,
                 context={"job_id": manifest["job_id"], "manifest_sha256": digest(manifest),
                          "topic": manifest["topic"], "as_of": manifest["as_of"], "proposals": result["proposals"],
                          "decision_schema": "A10OpportunityChoice.v1"})
@@ -611,10 +628,14 @@ def _run_automation(manifest: dict, *, base_dir: Path, source_sha: str, state_di
                 assessment = validate_ai_research_receipt(_json(receipt_path, limit=AI_MAX_BYTES), task)
                 if assessment["execution"] is not None:
                     require(intent_path.exists(), "JOB_ASSESSMENT_INVOCATION_REQUIRED")
+                    reservation = {key: value for key, value in assessment["execution"].items() if key != "session_sha256"}
                     require(_json(intent_path) == {"schema_version": "A10AIInvocation.v1", "task_id": task["task_id"],
-                        "task_sha256": digest(task), "execution": assessment["execution"]}, "JOB_INVOCATION_BINDING_MISMATCH")
+                        "task_sha256": digest(task), "execution": reservation}, "JOB_INVOCATION_BINDING_MISMATCH")
                     require(assessment["execution"]["kind"] != "MOCK_AUTHENTICATED_RUNNER" or runner is not None,
                             "JOB_MOCK_RUNNER_REQUIRED")
+                    if assessment["reason"] in ("NATIVE_CODEX_VERIFIED", "NATIVE_CODEX_MOCK_VERIFIED"):
+                        if not isinstance(capability, dict) or digest(capability) != reservation["capability_sha256"]:
+                            return finish("WAIT", "PROVIDER_UNAVAILABLE", "REVIEW_PROVIDER_CAPABILITY")
             elif intent_path.exists():
                 intent = _json(intent_path)
                 require(set(intent) == {"schema_version", "task_id", "task_sha256", "execution"}
@@ -634,6 +655,8 @@ def _run_automation(manifest: dict, *, base_dir: Path, source_sha: str, state_di
                     _write_job_record(receipt_path, assessment)
             result["assessment"] = assessment
             if assessment["status"] != "OK":
+                if assessment["effect"] == "NOT_ATTEMPTED" and assessment["reason"].startswith("HOLD_DEPENDENCY_"):
+                    return finish("WAIT", "HOLD_DEPENDENCY", "VERIFY_NATIVE_CODEX_CAPABILITY")
                 reason = "PROVIDER_UNAVAILABLE" if assessment["status"] == "UNSUPPORTED" else assessment["status"]
                 return finish("FAIL" if assessment["status"] == "FAILED" else "WAIT", reason,
                               "RECONCILE_WITH_OPERATOR_NO_RETRY" if assessment["status"] == "UNKNOWN_EFFECT" else "REVIEW_PROVIDER_RECEIPT")

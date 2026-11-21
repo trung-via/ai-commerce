@@ -434,7 +434,7 @@ def automation_output(task):
     return canonical_bytes({"schema_version": "A10AIResearchOutput.v1", "task_id": task["task_id"],
         "task_sha256": digest(task), "provider": task["provider"], "status": "OK", "effects": [],
         "reported_model": "gpt-6.1-sol" if task["provider"]["profile"] == "chatgpt-attended" else task["provider"]["model"],
-        "reported_effort": "xhigh", "claims": [
+        "reported_effort": "xhigh" if task["provider"]["profile"] == "chatgpt-attended" else task["provider"]["effort"], "claims": [
             {"kind": "MODEL_INFERENCE", "origin": "MODEL", "text": "SYNTHETIC optional machine assessment.",
              "citations": [task["sources"][0]]}],
         "decision": {"schema_version": "A10OpportunityChoice.v1", "outcome": "SELECT" if selected else "NO_SUITABLE_OPPORTUNITY",
@@ -898,6 +898,148 @@ def test_automation_execute_requires_provider_capability_without_fallback(automa
     assert result["status"] == "WAIT" and result["reason"] == "PROVIDER_UNAVAILABLE"
     assert result["assessment"]["reason"] == "CAPABILITY_REQUIRED" and result["brief"] is None
     assert result["handoff"] is None and result["decision"] is None
+
+
+@pytest.mark.parametrize("scenario", ["success", "timeout", "missing", "invalid", "version", "boundary", "host"])
+def test_cli_native_codex_reserves_once_and_can_dispatch_the_a03_source_handoff(cli_handoff, capsys, monkeypatch, scenario):
+    from datetime import datetime, timezone
+
+    from ai_commerce.opportunity import NATIVE_CODEX_TRANSPORT, codex_research_argv
+    from ai_commerce.opportunity.core import models
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Test must never start a real process")
+
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    manifest, base, automate, _, grant = cli_handoff
+    manifest.update(provider="codex-cli", ai_assessment=True)
+    write(base / "job.json", manifest)
+    home = base.resolve() / "codex-home"
+    home.mkdir()
+    (home / "auth.json").write_bytes(b"SYNTHETIC authentication marker")
+    executable = base.resolve() / "codex.exe"
+    executable.write_bytes(b"SYNTHETIC binary")
+    model, effort, version = "synthetic-research-model", "medium", "0.164.0"
+    catalog = write(home / "models_cache.json", {"client_version": version, "models": [
+        {"slug": model, "supported_reasoning_levels": [{"effort": effort}]}]})
+    argv = codex_research_argv(str(executable), model=model, effort=effort)
+    help_bytes = " ".join(argv[1:]).encode()
+    cap = {"transport": NATIVE_CODEX_TRANSPORT, "model": model, "effort": effort, "argv": argv,
+           "boundary": "WINDOWS_JOB_READ_ONLY_V1", "version": version,
+           "host_verification_sha256": sha256_bytes(b"SYNTHETIC host review"),
+           "executable_sha256": sha256_bytes(executable.read_bytes()), "help_sha256": sha256_bytes(help_bytes),
+           "model_catalog_sha256": sha256_bytes(catalog.read_bytes()), "codex_home": str(home)}
+    if scenario == "version":
+        cap["version"] = "0.123.0"
+    elif scenario == "boundary":
+        del cap["boundary"]
+    elif scenario == "host":
+        del cap["host_verification_sha256"]
+    capability_path = write(base / "capability.json", cap)
+    if scenario == "invalid":
+        capability_path.write_bytes(b"invalid JSON")
+
+    args = [*automate, *grant, "--mode", "execute"]
+    if scenario != "missing":
+        args += ["--capability", str(capability_path)]
+    for effect in manifest["allowed_effects"]:
+        args += ["--allow-effect", effect]
+
+    job = base / "state" / manifest["job_id"]
+    calls = []
+    thread = "1a2b3c4d-0000-0000-0000-0123456789ab"
+
+    def synthetic_process(argv, *, input, cwd, codex_home, shell, timeout, max_bytes):
+        assert scenario in ("success", "timeout")
+        assert argv[0] == str(executable) and codex_home == str(home) and shell is False
+        assert max_bytes == models.AI_MAX_BYTES
+        calls.append(argv[1:])
+        probes = {("--version",): ("codex-cli " + version).encode(),
+                  ("exec", "--help"): help_bytes, ("login", "status"): b"Logged in using ChatGPT"}
+        if tuple(argv[1:]) in probes:
+            assert not (job / "invocation.json").exists() and timeout == 15
+            return subprocess.CompletedProcess(argv, 0, probes[tuple(argv[1:])], b"")
+        assert timeout == 60 and not (job / "assessment.json").exists()
+        task = json.loads(input)["task"]
+        intent = read(job / "invocation.json")
+        assert intent["task_sha256"] == digest(task)
+        assert intent["execution"]["kind"] == "AUTHENTICATED_CLI_PROBE"
+        assert intent["execution"]["capability_sha256"] == digest(cap)
+        if scenario == "timeout":
+            raise subprocess.TimeoutExpired(argv, timeout)
+        output = automation_output(task).decode()
+        records = [
+            {"type": "session_meta", "payload": {"id": thread, "session_id": thread, "source": "exec",
+                "cwd": cwd, "cli_version": version, "model_provider": "openai"}},
+            {"type": "turn_context", "payload": {"cwd": cwd, "model": model, "effort": effort,
+                "approval_policy": "never", "sandbox_policy": {"type": "read-only"}}},
+            {"type": "response_item", "payload": {"type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": input.decode()}]}},
+            {"type": "response_item", "payload": {"type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": output}]}},
+        ]
+        folder = home / "sessions" / datetime.now(timezone.utc).strftime("%Y/%m/%d")
+        folder.mkdir(parents=True)
+        (folder / ("rollout-synthetic-" + thread + ".jsonl")).write_bytes(
+            b"\n".join(canonical_bytes(record) for record in records) + b"\n")
+        events = [{"type": "thread.started", "thread_id": thread}, {"type": "turn.started"},
+                  {"type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": output}},
+                  {"type": "turn.completed"}]
+        return subprocess.CompletedProcess(argv, 0, b"\n".join(canonical_bytes(event) for event in events), b"")
+
+    monkeypatch.setattr(models, "_bounded_native_codex", synthetic_process)
+    code = 0 if scenario == "success" else 3
+    actual = handoff_cli(capsys, args, code=code)
+    event = read(base / "event.json")
+    if scenario == "success":
+        assert actual["status"] == "SUCCESS" and actual["scope"] == "SOURCE_ONLY_LOCAL"
+        assert actual["event"]["receipt"]["consumer_executed"] is True
+        assert event["ai_task"]["provider"] == {"profile": "codex-cli", "model": model, "effort": effort}
+        assert event["assessment"]["reason"] == "NATIVE_CODEX_VERIFIED"
+        assert len(event["assessment"]["execution"]["session_sha256"]) == 64
+        assert event["decision"]["actor"] == "BRAIN"
+        assert intake_brief(event["brief"]) == event["brief"]
+    else:
+        assert actual["status"] == "HOLD" and actual["completed"] is None
+        assert event["decision"] is None and event["brief"] is None
+        if scenario == "timeout":
+            assert event["reason"] == "UNKNOWN_EFFECT"
+            assert (job / "invocation.json").is_file() and (job / "assessment.json").is_file()
+        else:
+            hold_reasons = {"version": "HOLD_DEPENDENCY_NATIVE_CODEX_REVIEWED_VERSION",
+                            "boundary": "HOLD_DEPENDENCY_NATIVE_CODEX_READ_ONLY_BOUNDARY",
+                            "host": "HOLD_DEPENDENCY_NATIVE_CODEX_HOST_VERIFICATION"}
+            assert event["reason"] == ("HOLD_DEPENDENCY" if scenario in hold_reasons else "PROVIDER_UNAVAILABLE")
+            if scenario in hold_reasons:
+                assert event["assessment"]["reason"] == hold_reasons[scenario]
+            assert event["assessment"]["effect"] == "NOT_ATTEMPTED"
+            assert not (job / "invocation.json").exists()
+    assert handoff_cli(capsys, args, code=code) == actual
+    assert len(calls) == (4 if scenario in ("success", "timeout") else 0)
+
+
+def test_automation_operator_selector_cannot_rebind_reserved_task(automation_job):
+    from ai_commerce.opportunity import run_automation
+
+    manifest, kwargs = automation_job
+    manifest.update(provider="codex-cli", ai_assessment=True)
+    kwargs["mode"] = "execute"
+    cap = automation_capability()
+    cap.update(model="gpt-6.2-sol", effort="high", argv=["codex", "exec", "--model", "gpt-6.2-sol", "--effort", "high"])
+    seen = []
+
+    def fake(argv, **options):
+        task = json.loads(options["input"])["task"]
+        seen.append(task["task_id"])
+        raise subprocess.TimeoutExpired(argv, options["timeout"])
+
+    first = run_automation(manifest, **kwargs, capability=cap, runner=fake)
+    assert first["status"] == "WAIT" and first["reason"] == "UNKNOWN_EFFECT"
+    assert first["ai_task"]["provider"]["model"] == cap["model"] and first["ai_task"]["provider"]["effort"] == cap["effort"]
+    assert first == run_automation(manifest, **kwargs, capability=cap, runner=fake)
+    rebound = run_automation(manifest, **kwargs, capability=automation_capability(), runner=fake)
+    assert rebound["status"] == "FAIL" and rebound["reason"] == "AI_RECEIPT_BINDING_MISMATCH"
+    assert seen == [first["ai_task"]["task_id"]]
 
 
 def test_automation_advisory_receipt_is_not_an_autonomous_chooser(automation_job):
