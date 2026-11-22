@@ -910,14 +910,27 @@ def test_c1_unavailable_r3_provider_cannot_publish_a04_handoff(
         request = creative_v2._production_request(job, a03_r3_case["cycle"], saved.request.source)
         turn = client.prepare_turn(AIReasoningTask(creative_v2._production_stage_job(job, request), grant))
         output = json.loads(json.loads(saved.response_json)["output_json"])
-        response = json.dumps({"task_sha256": turn.task.digest, "stream_nonce": turn.stream_nonce, "output": output})
+        envelope = {"task_sha256": turn.task.digest, "stream_nonce": turn.stream_nonce, "output": output}
+        conversation_id = "050ca293-cd26-49fa-a980-bbe5426cb6b9"
         stdout = b"\n".join([
-            canonical_bytes({"event": "init", "init": {"authenticated": True, "session": "fixture:spoof"}}),
-            canonical_bytes({"event": "result", "result": {"status": "SUCCESS", "response": response}}),
+            canonical_bytes({"event": "init", "conversation_id": conversation_id, "init": {
+                "cwd": "/fixture/project", "tools": [], "permission_mode": "request-review",
+                "json_schema": turn.output_schema, "authenticated": True, "session": "fixture:spoof",
+            }}),
+            canonical_bytes({"event": "step_update", "step_update": {
+                "conversation_id": conversation_id, "step_index": 0, "state": "DONE", "step_type": "user_input",
+            }}),
+            canonical_bytes({"event": "result", "result": {
+                "conversation_id": conversation_id, "status": "SUCCESS", "response": json.dumps(envelope) + "\n",
+                "num_turns": 1, "duration_seconds": 0.1, "structured_output": envelope,
+                "json_schema": turn.output_schema,
+            }}),
             b"",
         ])
         receipt = turn.check_terminal(stdout, returncode=0, capture_complete=True)
-        assert (receipt.status, receipt.terminal_status, receipt.error_code) == ("HOLD", "SUCCESS", failure)
+        assert (receipt.status, receipt.effect, receipt.terminal_status, receipt.error_code) == (
+            "HOLD", "UNKNOWN_EFFECT", "SUCCESS", failure,
+        )
         with pytest.raises(OrchestrationError, match="PRODUCER_SCHEMA"):
             owner.complete_a03(receipt, store=sidecars)
     result = run_creative_production(job, sidecars, reasoner, authorization=grant, production=owner)
