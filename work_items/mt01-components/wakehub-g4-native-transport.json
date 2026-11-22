@@ -1,0 +1,23 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "wakehub-g4-native-transport",
+  "sources": [
+    "src/ai_commerce/wakehub/g4_service_transport.py",
+    "src/ai_commerce/wakehub/g4_desktop_transport.py",
+    "src/ai_commerce/wakehub/g4_release_provenance.py"
+  ],
+  "tests": ["tests/test_wakehub_g4_native_transport.py"],
+  "acs": [
+    "WAKEHUB.G4.fixed-local-status-transport",
+    "WAKEHUB.G4.independent-interactive-signer",
+    "WAKEHUB.G4.release-packaging-fail-closed",
+    "WAKEHUB.G4.durable-unknown-no-retry"
+  ],
+  "consumers": [
+    "src/ai_commerce/wakehub/g3_service_host.py",
+    "src/ai_commerce/wakehub/g3_desktop_observer.py",
+    "src/ai_commerce/wakehub/native_broker.py",
+    "src/ai_commerce/wakehub/native_journal.py"
+  ],
+  "contracts": []
+}
