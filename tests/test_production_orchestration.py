@@ -932,7 +932,8 @@ def test_c1_unavailable_r3_provider_cannot_publish_a04_handoff(
             stdout = b"".join(canonical_bytes(event) + b"\n" for event in (
                 {"event": "init", "conversation_id": conversation_id, "init": {
                     "cwd": cwd, "tools": [], "permission_mode": "request-review",
-                    "json_schema": turn.output_schema, "authenticated": True, "session": "fixture:spoof",
+                    "model": config.model, "json_schema": turn.output_schema,
+                    "authenticated": True, "session": "fixture:spoof",
                 }},
                 {"event": "step_update", "step_update": {
                     "conversation_id": conversation_id, "step_index": 0, "state": "DONE", "step_type": "user_input",
@@ -951,6 +952,8 @@ def test_c1_unavailable_r3_provider_cannot_publish_a04_handoff(
         assert (receipt.status, receipt.effect, receipt.terminal_status, receipt.error_code) == (
             "HOLD", "UNKNOWN_EFFECT", "SUCCESS", failure,
         )
+        assert receipt.observed_model == config.model and receipt.observed_usage is None
+        assert receipt.observed_session == "UNKNOWN"
         with pytest.raises(OrchestrationError, match="PRODUCER_SCHEMA"):
             owner.complete_a03(receipt, store=sidecars)
     result = run_creative_production(job, sidecars, reasoner, authorization=grant, production=owner)

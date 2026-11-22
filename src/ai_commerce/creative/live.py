@@ -804,6 +804,7 @@ def _agy_task_requirement(task: AIReasoningTask) -> tuple[Literal["BLOCK", "HOLD
 
 _AGY_MAX_EVENTS = 12000
 _AGY_MAX_LINE_BYTES = 512 * 1024
+_AGY_MAX_TOKEN_COUNT = 2**63 - 1
 _AGY_USAGE_FIELDS = frozenset({
     "input_tokens", "output_tokens", "thinking_tokens", "cache_read_tokens", "total_tokens",
 })
@@ -816,10 +817,13 @@ def _agy_conversation_id(value: object, expected: str | None) -> str:
     return conversation_id
 
 
-def _agy_terminal(stdout: bytes, schema_json: bytes, *, cwd: str | None) -> tuple[dict[str, Any], bool]:
+def _agy_terminal(
+    stdout: bytes, schema_json: bytes, *, cwd: str | None, expected_model: str | None,
+) -> tuple[dict[str, Any], bool, str]:
     """Read one turn from a bounded, closed AGY stream-json stdout capture."""
     seen_init = False
     init_schema_matches = True
+    observed_model = "UNKNOWN"
     conversation_id = None
     terminal = None
     active: dict[int, str] = {}
@@ -845,10 +849,13 @@ def _agy_terminal(stdout: bytes, schema_json: bytes, *, cwd: str | None) -> tupl
                 conversation_id = _agy_conversation_id(event["conversation_id"], conversation_id)
             if "conversation_id" in payload:
                 conversation_id = _agy_conversation_id(payload["conversation_id"], conversation_id)
-            if cwd is not None and "cwd" in payload:
-                _need(Path(require_text(payload["cwd"], "AGY cwd")) == Path(cwd), "AGY_STREAM_SCOPE_MISMATCH")
-            if cwd is not None and "permission_mode" in payload:
-                _need(payload["permission_mode"] in ("request-review", "strict"), "AGY_STREAM_SCOPE_MISMATCH")
+            if cwd is not None:
+                model = payload.get("model")
+                _need(isinstance(model, str) and model == expected_model, "AGY_STREAM_MODEL_MISMATCH")
+                reported_cwd = payload.get("cwd")
+                _need(isinstance(reported_cwd, str) and Path(reported_cwd) == Path(cwd)
+                      and payload.get("permission_mode") == "request-review", "AGY_STREAM_SCOPE_MISMATCH")
+                observed_model = model
             if "json_schema" in payload:
                 reported_schema = payload["json_schema"]
                 init_schema_matches = (
@@ -900,14 +907,14 @@ def _agy_terminal(stdout: bytes, schema_json: bytes, *, cwd: str | None) -> tupl
         _need(type(duration) in (int, float) and 0 <= duration < float("inf"), "AGY_STREAM_INVALID")
     if "usage" in terminal:
         usage = terminal["usage"]
-        _need(isinstance(usage, dict) and all(type(usage[key]) is int and usage[key] >= 0
+        _need(isinstance(usage, dict) and all(type(usage[key]) is int and 0 <= usage[key] <= _AGY_MAX_TOKEN_COUNT
               for key in _AGY_USAGE_FIELDS & usage.keys()), "AGY_STREAM_INVALID")
-    return terminal, init_schema_matches
+    return terminal, init_schema_matches, observed_model
 
 
 @dataclass(frozen=True, slots=True)
 class AntigravityCliTerminalReceipt:
-    """Public structural diagnostic. Terminal status describes the supplied bytes."""
+    """Public structural diagnostic. Observations describe the checked capture bytes."""
 
     task_sha256: str
     job_sha256: str
@@ -920,6 +927,11 @@ class AntigravityCliTerminalReceipt:
     stdout_sha256: str | None
     terminal_status: Literal["SUCCESS", "ERROR", "UNKNOWN"]
     error_code: str
+    observed_model: str = "UNKNOWN"
+    observed_usage: tuple[tuple[str, int], ...] | None = None
+    observed_effort: Literal["UNKNOWN"] = field(init=False, default="UNKNOWN")
+    observed_account: Literal["UNKNOWN"] = field(init=False, default="UNKNOWN")
+    observed_session: Literal["UNKNOWN"] = field(init=False, default="UNKNOWN")
     status: Literal["HOLD"] = field(init=False, default="HOLD")
     effect: Literal["UNKNOWN_EFFECT"] = field(init=False, default="UNKNOWN_EFFECT")
 
@@ -1026,7 +1038,10 @@ class AntigravityCliTurn:
                      rb"(?:denied|required|blocked|approval|allow).{0,120}permission", stderr, re.IGNORECASE):
             return receipt("AGY_STREAM_TOOL_ERROR")
         try:
-            terminal, init_schema_matches = _agy_terminal(stdout, schema_json, cwd=cwd)
+            expected_model = self.task.job.configuration.model if cwd is not None else None
+            terminal, init_schema_matches, observed_model = _agy_terminal(
+                stdout, schema_json, cwd=cwd, expected_model=expected_model,
+            )
         except _CLIStopped as exc:
             if cwd is not None and returncode and exc.code in ("AGY_STREAM_INCOMPLETE", "AGY_STREAM_INVALID"):
                 return receipt("AGY_PROCESS_NONZERO_EXIT")
@@ -1055,7 +1070,13 @@ class AntigravityCliTurn:
             parse_creative_output(self.task.job.request, canonical_bytes(envelope["output"]).decode("utf-8"))
         except (ValueError, TypeError, RecursionError):
             return receipt("AGY_TERMINAL_SCHEMA_INVALID")
-        return receipt(_AGY_SESSION_UNAVAILABLE, "SUCCESS")
+        result = receipt(_AGY_SESSION_UNAVAILABLE, "SUCCESS")
+        if cwd is None:
+            return result
+        # The terminal usage is session-cumulative. The parser permits just one turn.
+        usage = terminal.get("usage", {})
+        observed_usage = tuple((key, usage[key]) for key in sorted(_AGY_USAGE_FIELDS & usage.keys()))
+        return replace(result, observed_model=observed_model, observed_usage=observed_usage or None)
 
 
 @dataclass(frozen=True, slots=True)
