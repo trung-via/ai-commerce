@@ -886,9 +886,11 @@ def test_c1_unavailable_r3_provider_cannot_publish_a04_handoff(
     a03_r3_case, tmp_path, monkeypatch, provider, failure, explicit_agy,
 ):
     from ai_commerce.creative import (
-        AntigravityCliCreativeClient, LiveCreativeReasoner, ModelConfiguration, run_creative_production,
+        AIReasoningTask, AntigravityCliCreativeClient, LiveCreativeReasoner, ModelConfiguration,
+        run_creative_production,
     )
     from ai_commerce.creative import live as creative_live
+    from ai_commerce.creative import v2 as creative_v2
     from ai_commerce.media import generation as mg
 
     monkeypatch.setattr(mg, "accept_creative_production_package", lambda **_: pytest.fail("A04 invoked"))
@@ -903,6 +905,21 @@ def test_c1_unavailable_r3_provider_cannot_publish_a04_handoff(
         reasoner = LiveCreativeReasoner(config, client)
         monkeypatch.setattr(creative_live, "_bounded_cli_process", lambda *a, **kw: pytest.fail("AGY process launched"))
     job = replace(a03_r3_case["job"], attempt=2, configuration=config)
+    if explicit_agy:
+        saved = a03_r3_case["result"].stage.reasoning
+        request = creative_v2._production_request(job, a03_r3_case["cycle"], saved.request.source)
+        turn = client.prepare_turn(AIReasoningTask(creative_v2._production_stage_job(job, request), grant))
+        output = json.loads(json.loads(saved.response_json)["output_json"])
+        response = json.dumps({"task_sha256": turn.task.digest, "stream_nonce": turn.stream_nonce, "output": output})
+        stdout = b"\n".join([
+            canonical_bytes({"event": "init", "init": {"authenticated": True, "session": "fixture:spoof"}}),
+            canonical_bytes({"event": "result", "result": {"status": "SUCCESS", "response": response}}),
+            b"",
+        ])
+        receipt = turn.check_terminal(stdout, returncode=0, capture_complete=True)
+        assert (receipt.status, receipt.terminal_status, receipt.error_code) == ("HOLD", "SUCCESS", failure)
+        with pytest.raises(OrchestrationError, match="PRODUCER_SCHEMA"):
+            owner.complete_a03(receipt, store=sidecars)
     result = run_creative_production(job, sidecars, reasoner, authorization=grant, production=owner)
     assert (result.status, result.failure, result.package, result.stage) == ("HOLD", failure, None, None)
     assert run_creative_production(job, sidecars, reasoner, authorization=grant, production=owner) == result
