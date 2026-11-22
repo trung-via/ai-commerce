@@ -1705,7 +1705,8 @@ def agy_stdout(events, newline=b"\r\n"):
     return b"".join(canonical_bytes(event) + newline for event in events)
 
 
-def test_agy_native_turn_sends_one_private_event_and_closes_stdin(agy_preflight_case, monkeypatch):
+@pytest.mark.parametrize("permission_mode", ["request-review", "strict"])
+def test_agy_native_turn_sends_one_private_event_and_closes_stdin(agy_preflight_case, monkeypatch, permission_mode):
     client, _, task = agy_preflight_case
     turn = client.prepare_turn(task)
     calls = []
@@ -1737,7 +1738,7 @@ def test_agy_native_turn_sends_one_private_event_and_closes_stdin(agy_preflight_
             payload = canonical_bytes({"event": "user", "message": {"content": turn.canonical_payload.decode()}}) + b"\n"
             assert payload.count(b"\n") == 1 and task.authorization.authorization_ref.encode() not in payload
             events, _ = agy_terminal_fixture(turn, streamed_prompt=True)
-            events[0]["init"].update(cwd=cwd, authenticated=True, account="private-account",
+            events[0]["init"].update(cwd=cwd, permission_mode=permission_mode, authenticated=True, account="private-account",
                                      session="private-session", effort="high", provider="codex-cli")
             events[-1]["result"]["usage"]["future_field"] = "private-usage-metadata"
             raw = output = agy_stdout(events)
@@ -1780,7 +1781,9 @@ def test_agy_native_turn_sends_one_private_event_and_closes_stdin(agy_preflight_
     assert receipt.requested_configuration_sha256 == sha256_bytes(canonical_bytes(config.to_dict()))
     assert receipt.observed_model == config.model and dict(receipt.observed_usage) == AGY_USAGE
     assert (receipt.observed_effort, receipt.observed_account, receipt.observed_session) == ("UNKNOWN",) * 3
-    public = json.dumps(asdict(receipt))
+    public_fields = asdict(receipt)
+    assert "verified_reasoning_receipt" not in public_fields
+    public = json.dumps(public_fields)
     assert all(value not in public for value in (
         "private-account", "private-session", "private-usage-metadata", "codex-cli", "high", TEXT,
         AGY_CONVERSATION_ID, json.dumps(calls[-1][1])[1:-1],
@@ -1854,7 +1857,10 @@ def test_agy_native_turn_blocks_before_launch(agy_preflight_case, monkeypatch, f
     ("tool-activity", "AGY_STREAM_TOOL_ACTIVITY"),
     ("cwd", "AGY_STREAM_SCOPE_MISMATCH"),
     ("missing-cwd", "AGY_STREAM_SCOPE_MISMATCH"),
-    ("permission-mode", "AGY_STREAM_SCOPE_MISMATCH"),
+    ("always-proceed", "AGY_STREAM_SCOPE_MISMATCH"),
+    ("proceed-in-sandbox", "AGY_STREAM_SCOPE_MISMATCH"),
+    ("Strict", "AGY_STREAM_SCOPE_MISMATCH"),
+    ("non-string-permission-mode", "AGY_STREAM_SCOPE_MISMATCH"),
     ("missing-permission-mode", "AGY_STREAM_SCOPE_MISMATCH"),
     ("model", "AGY_STREAM_MODEL_MISMATCH"),
     ("missing-model", "AGY_STREAM_MODEL_MISMATCH"),
@@ -1894,8 +1900,10 @@ def test_agy_native_turn_holds_on_process_and_stream_failures(agy_preflight_case
         events, _ = agy_terminal_fixture(turn, streamed_prompt=True)
         init = events[0]["init"]
         init["cwd"] = "/private/unexpected" if failure == "cwd" else cwd
-        if failure == "permission-mode":
-            init["permission_mode"] = "always-proceed"
+        if failure in ("always-proceed", "proceed-in-sandbox", "Strict"):
+            init["permission_mode"] = failure
+        if failure == "non-string-permission-mode":
+            init["permission_mode"] = ["strict"]
         if failure == "model":
             init["model"] = "Explicit-model"
         if failure in ("missing-cwd", "missing-model", "missing-permission-mode"):
