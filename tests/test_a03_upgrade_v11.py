@@ -1562,7 +1562,7 @@ def agy_preflight_case(tmp_path):
     executable = tmp_path.resolve() / ("agy.exe" if os.name == "nt" else "agy")
     executable.write_bytes(b"test-only AGY probe binary")
     client = AntigravityCliCreativeClient(str(executable), sha256_bytes(executable.read_bytes()))
-    config = ModelConfiguration("antigravity-cli", "explicit-model", "explicit-effort")
+    config = ModelConfiguration("antigravity-cli", "explicit-model", "high")
     cycle = cycle_job(seed_options={"purpose": "PRODUCTION", "configuration": config})
     request = creative_v2._cycle_request(cycle, "explore", "EXPLORE")
     job = creative_v2._cycle_stage_job(cycle, request)
@@ -1576,6 +1576,9 @@ AGY_HELP = b"""Usage of agy:
   --json-schema     Enforce structured output
   --input-format    text, stream-json
   --output-format   text, json, stream-json
+  --mode            Execution mode, including plan
+  --sandbox         Enable terminal sandbox
+  --disable-slash-commands  Disable slash command expansion
 """
 
 
@@ -1702,6 +1705,224 @@ def agy_stdout(events, newline=b"\r\n"):
     return b"".join(canonical_bytes(event) + newline for event in events)
 
 
+def test_agy_native_turn_sends_one_private_event_and_closes_stdin(agy_preflight_case, monkeypatch):
+    client, _, task = agy_preflight_case
+    turn = client.prepare_turn(task)
+    calls = []
+    raw = b""
+
+    def popen(argv, *, stdin, stdout, stderr, shell, cwd, **terminal_options):
+        nonlocal raw
+        assert type(argv) is list and argv[0] == client.executable
+        assert shell is False and stdin == stdout == stderr == subprocess.PIPE
+        assert terminal_options == ({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt"
+                                    else {"start_new_session": True})
+        assert Path(cwd).is_dir() and not list(Path(cwd).iterdir())
+        assert Path(cwd) not in (Path.cwd(), Path(client.executable).parent)
+        calls.append((argv[1:], cwd))
+        args = argv[1:]
+        payload, limit = b"", 15
+        if args == ["--version"]:
+            output = b"2.41.0-rc.2\n"
+        elif args == ["--help"]:
+            output = AGY_HELP
+        else:
+            assert args == [
+                "--input-format", "stream-json", "--output-format", "stream-json",
+                "--model", "explicit-model", "--effort", "high",
+                "--json-schema", canonical_bytes(turn.output_schema).decode(),
+                "--mode", "plan", "--sandbox", "--disable-slash-commands",
+            ]
+            assert client.invoke_native_turn(turn, authorization=task.authorization).error_code == "AGY_STREAM_REPLAY"
+            payload = canonical_bytes({"event": "user", "message": {"content": turn.canonical_payload.decode()}}) + b"\n"
+            assert payload.count(b"\n") == 1 and task.authorization.authorization_ref.encode() not in payload
+            events, _ = agy_terminal_fixture(turn, streamed_prompt=True)
+            events[0]["init"].update(cwd=cwd, authenticated=True, account="private-account", session="private-session")
+            raw = output = agy_stdout(events)
+            limit = 120
+
+        class Process:
+            stdout, stderr = io.BytesIO(output), io.BytesIO()
+            returncode = None
+
+            def wait(self, timeout):
+                assert 0 < timeout <= limit
+                assert closed.wait(timeout=5) and self.stdin.closed
+                self.returncode = 0
+
+        closed = threading.Event()
+
+        class Input(io.BytesIO):
+            def close(self):
+                if not self.closed:
+                    assert self.getvalue() == payload
+                    super().close()
+                    closed.set()
+
+        process = Process()
+        process.stdin = Input()
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    config = task.job.configuration
+    assert client.complete(StructuredModelRequest(config, task.job.request)).error_code == "UNAUTHORIZED"
+    assert not calls
+
+    receipt = client.invoke_native_turn(turn, authorization=task.authorization)
+    assert (receipt.status, receipt.effect, receipt.terminal_status, receipt.error_code) == (
+        "HOLD", "UNKNOWN_EFFECT", "SUCCESS", "AGY_AUTHENTICATED_CLI_SESSION_UNAVAILABLE",
+    )
+    assert receipt.stdout_sha256 == sha256_bytes(raw) and receipt.task_sha256 == task.digest
+    assert receipt.output_schema_sha256 == sha256_bytes(canonical_bytes(turn.output_schema))
+    assert receipt.job_sha256 == task.job.digest and receipt.source_brief_sha256 == task.job.source_brief_digest
+    assert all(value not in repr(receipt) for value in ("private-account", "private-session", calls[-1][1], TEXT))
+    assert client.invoke_native_turn(turn, authorization=task.authorization).error_code == "AGY_STREAM_REPLAY"
+    assert turn.check_terminal(raw, returncode=0, capture_complete=True).error_code == "AGY_STREAM_REPLAY"
+    assert [args[0] for args, _ in calls] == ["--version", "--help", "--input-format"]
+    assert len({cwd for _, cwd in calls}) == 1 and not Path(calls[-1][1]).exists()
+
+
+@pytest.mark.parametrize(("failure", "code"), [
+    ("grant", "UNAUTHORIZED"),
+    ("grant-ref", "UNAUTHORIZED"),
+    ("wrong-pin", "AGY_TURN_BINDING_MISMATCH"),
+    ("wrong-path", "AGY_TURN_BINDING_MISMATCH"),
+    ("relative-executable", "AGY_CLI_EXECUTABLE_UNVERIFIED"),
+    ("binary", "AGY_CLI_EXECUTABLE_UNVERIFIED"),
+    ("missing-executable", "AGY_CLI_UNAVAILABLE"),
+    ("model", "UNVERIFIED_MODEL_CONFIGURATION"),
+    ("effort", "UNVERIFIED_MODEL_CONFIGURATION"),
+    ("schema", "AGY_TERMINAL_SCHEMA_INVALID"),
+    ("input-limit", "AGY_INPUT_LIMIT_EXCEEDED"),
+    ("offline-claim", "AGY_STREAM_REPLAY"),
+])
+def test_agy_native_turn_blocks_before_launch(agy_preflight_case, monkeypatch, failure, code):
+    client, _, task = agy_preflight_case
+    grant = task.authorization
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: pytest.fail("AGY process launched"))
+    if failure == "model":
+        task = replace(task, job=replace(task.job, configuration=replace(task.job.configuration, model="--continue")))
+    if failure == "effort":
+        task = replace(task, job=replace(task.job, configuration=replace(task.job.configuration, effort="auto")))
+    if failure == "relative-executable":
+        client = replace(client, executable=Path(client.executable).name)
+    turn = client.prepare_turn(task)
+    path = Path(client.executable)
+    if failure == "grant":
+        grant = replace(grant, allow_spend=False)
+    if failure == "grant-ref":
+        grant = replace(grant, authorization_ref="fixture:another-grant")
+    if failure == "wrong-pin":
+        client = replace(client, executable_sha256="2" * 64)
+    if failure == "wrong-path":
+        client = replace(client, executable=str(path.parent / "elsewhere" / path.name))
+    if failure == "binary":
+        path.write_bytes(b"different executable")
+    if failure == "missing-executable":
+        path.unlink()
+    if failure == "schema":
+        monkeypatch.setattr(type(turn), "output_schema", property(lambda _: {"type": "string"}))
+    if failure == "input-limit":
+        monkeypatch.setattr(creative_live, "CLI_MAX_BYTES", 10)
+    if failure == "offline-claim":
+        turn.check_terminal(b"", returncode=None, capture_complete=False)
+    result = client.invoke_native_turn(turn, authorization=grant)
+    assert result.status in ("BLOCK", "HOLD", "UNAVAILABLE") and result.error_code == code
+
+
+@pytest.mark.parametrize(("failure", "code"), [
+    ("missing-capability", "AGY_CLI_CAPABILITY_UNAVAILABLE"),
+    ("probe-cwd-mutation", "AGY_CLI_PRIVATE_CWD_UNAVAILABLE"),
+    ("optional-slash-flag", "AGY_AUTHENTICATED_CLI_SESSION_UNAVAILABLE"),
+    ("timeout", "AGY_STREAM_TIMEOUT"),
+    ("closed-pipes-unproven", "AGY_STREAM_INCOMPLETE"),
+    ("killed", "AGY_STREAM_INCOMPLETE"),
+    ("stdout-limit", "AGY_STREAM_LIMIT_EXCEEDED"),
+    ("stderr-limit", "AGY_STREAM_LIMIT_EXCEEDED"),
+    ("nonzero", "AGY_PROCESS_NONZERO_EXIT"),
+    ("terminal-error", "AGY_TERMINAL_ERROR"),
+    ("tool-permission", "AGY_STREAM_TOOL_ERROR"),
+    ("tool-activity", "AGY_STREAM_TOOL_ACTIVITY"),
+    ("cwd", "AGY_STREAM_SCOPE_MISMATCH"),
+    ("permission-mode", "AGY_STREAM_SCOPE_MISMATCH"),
+    ("conversation", "AGY_STREAM_INVALID"),
+    ("duplicate-user", "AGY_STREAM_INVALID"),
+    ("duplicate-result", "AGY_STREAM_INVALID"),
+    ("incomplete", "AGY_STREAM_INCOMPLETE"),
+    ("mutation", "AGY_CLI_EXECUTABLE_CHANGED"),
+])
+def test_agy_native_turn_holds_on_process_and_stream_failures(agy_preflight_case, monkeypatch, failure, code):
+    client, _, task = agy_preflight_case
+    turn = client.prepare_turn(task)
+    calls = []
+
+    def process(argv, *, input, cwd, timeout, max_bytes, detach_terminal):
+        calls.append(argv[1])
+        assert detach_terminal and max_bytes == creative_live.CLI_MAX_BYTES
+        if argv[1] == "--version":
+            return subprocess.CompletedProcess(argv, 0, b"2.41.0", b"")
+        if argv[1] == "--help":
+            help_text = AGY_HELP
+            if failure == "missing-capability":
+                help_text = help_text.replace(b"--sandbox", b"--other-flag")
+            if failure == "optional-slash-flag":
+                help_text = help_text.replace(b"--disable-slash-commands", b"--other-flag")
+            if failure == "probe-cwd-mutation":
+                (Path(cwd) / "unexpected").touch()
+            return subprocess.CompletedProcess(argv, 0, help_text, b"")
+        assert argv[1] == "--input-format" and timeout == 120
+        assert ("--disable-slash-commands" in argv) == (failure != "optional-slash-flag")
+        if failure == "timeout":
+            raise creative_live._CLIStopped("UNKNOWN_EFFECT", capture_issue="TIMEOUT")
+        if failure == "closed-pipes-unproven":
+            raise creative_live._CLIStopped("UNKNOWN_EFFECT")
+        events, _ = agy_terminal_fixture(turn, streamed_prompt=True)
+        events[0]["init"]["cwd"] = "/private/unexpected" if failure == "cwd" else cwd
+        if failure == "permission-mode":
+            events[0]["init"]["permission_mode"] = "always-proceed"
+        stderr = b""
+        if failure == "mutation":
+            Path(client.executable).write_bytes(b"changed during turn")
+        if failure == "conversation":
+            events[-1]["result"]["conversation_id"] = "wrong-conversation"
+        if failure == "terminal-error":
+            events[-1]["result"].update(status="ERROR", response="", error="private quota text")
+        if failure == "tool-permission":
+            stderr = b"Permission denied for private command"
+        if failure == "tool-activity":
+            # A tool is a separate completed step, not a type change to the
+            # in-flight agent_response step (which is structurally invalid).
+            events.insert(-1, {"event": "step_update", "step_update": {
+                "conversation_id": AGY_CONVERSATION_ID, "step_index": 5,
+                "step_type": "tool", "state": "DONE", "tool_name": "run_command",
+            }})
+        if failure == "duplicate-user":
+            events.insert(2, {"event": "step_update", "step_update": {**events[1]["step_update"], "step_index": 10}})
+        if failure == "duplicate-result":
+            events.append(events[-1])
+        raw = agy_stdout(events)
+        if failure == "incomplete":
+            raw = raw[:-1]
+        if failure == "stdout-limit":
+            raw = b"x" * (max_bytes + 1)
+        if failure == "stderr-limit":
+            stderr = b"x" * (max_bytes + 1)
+        returncode = {"nonzero": 1, "terminal-error": 1, "killed": -9}.get(failure, 0)
+        return subprocess.CompletedProcess(argv, returncode, raw, stderr)
+
+    monkeypatch.setattr(creative_live, "_bounded_cli_process", process)
+    result = client.invoke_native_turn(turn, authorization=task.authorization)
+    assert result.error_code == code
+    assert "private quota text" not in repr(result) and "private command" not in repr(result)
+    if failure in ("missing-capability", "probe-cwd-mutation"):
+        assert calls == ["--version", "--help"]
+        return
+    expected_status = {"terminal-error": "ERROR", "optional-slash-flag": "SUCCESS"}.get(failure, "UNKNOWN")
+    assert (result.status, result.effect, result.terminal_status) == ("HOLD", "UNKNOWN_EFFECT", expected_status)
+    assert client.invoke_native_turn(turn, authorization=task.authorization).error_code == "AGY_STREAM_REPLAY"
+    assert calls == ["--version", "--help", "--input-format"]
+
+
 @pytest.mark.parametrize(("streamed_prompt", "newline"), [(False, b"\r\n"), (True, b"\n")])
 def test_agy_structural_success_is_private_task_bound_hold_and_one_shot(
     agy_preflight_case, monkeypatch, streamed_prompt, newline,
@@ -1798,10 +2019,10 @@ def test_agy_concurrent_capture_can_only_be_claimed_once(agy_preflight_case, mon
     parsing, release = threading.Event(), threading.Event()
     parse = creative_live._agy_terminal
 
-    def wait_for_second_claim(*args):
+    def wait_for_second_claim(*args, **kwargs):
         parsing.set()
         assert release.wait(timeout=5)
-        return parse(*args)
+        return parse(*args, **kwargs)
 
     monkeypatch.setattr(creative_live, "_agy_terminal", wait_for_second_claim)
     with ThreadPoolExecutor(max_workers=1) as executor:

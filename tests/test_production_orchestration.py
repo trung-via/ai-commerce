@@ -3,10 +3,12 @@ import copy
 from dataclasses import FrozenInstanceError, replace
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import socket
 import sqlite3
+import subprocess
 
 import pytest
 
@@ -899,11 +901,13 @@ def test_c1_unavailable_r3_provider_cannot_publish_a04_handoff(
     grant = a03_r3_case["cli_grant"]
     # The existing Codex client must never be tried as a fallback.
     config, reasoner = ModelConfiguration(provider), a03_r3_case["reasoner"]
+    agy_calls = []
     if explicit_agy:
         config = ModelConfiguration(provider, "explicit-agy-model", "high")
-        client = AntigravityCliCreativeClient(str(tmp_path / "agy.exe"), "a" * 64)
+        executable = tmp_path.resolve() / ("agy.exe" if os.name == "nt" else "agy")
+        executable.write_bytes(b"synthetic AGY executable")
+        client = AntigravityCliCreativeClient(str(executable), bytes_digest(executable.read_bytes()))
         reasoner = LiveCreativeReasoner(config, client)
-        monkeypatch.setattr(creative_live, "_bounded_cli_process", lambda *a, **kw: pytest.fail("AGY process launched"))
     job = replace(a03_r3_case["job"], attempt=2, configuration=config)
     if explicit_agy:
         saved = a03_r3_case["result"].stage.reasoning
@@ -912,22 +916,38 @@ def test_c1_unavailable_r3_provider_cannot_publish_a04_handoff(
         output = json.loads(json.loads(saved.response_json)["output_json"])
         envelope = {"task_sha256": turn.task.digest, "stream_nonce": turn.stream_nonce, "output": output}
         conversation_id = "050ca293-cd26-49fa-a980-bbe5426cb6b9"
-        stdout = b"\n".join([
-            canonical_bytes({"event": "init", "conversation_id": conversation_id, "init": {
-                "cwd": "/fixture/project", "tools": [], "permission_mode": "request-review",
-                "json_schema": turn.output_schema, "authenticated": True, "session": "fixture:spoof",
-            }}),
-            canonical_bytes({"event": "step_update", "step_update": {
-                "conversation_id": conversation_id, "step_index": 0, "state": "DONE", "step_type": "user_input",
-            }}),
-            canonical_bytes({"event": "result", "result": {
-                "conversation_id": conversation_id, "status": "SUCCESS", "response": json.dumps(envelope) + "\n",
-                "num_turns": 1, "duration_seconds": 0.1, "structured_output": envelope,
-                "json_schema": turn.output_schema,
-            }}),
-            b"",
-        ])
-        receipt = turn.check_terminal(stdout, returncode=0, capture_complete=True)
+
+        def process(argv, *, input, cwd, timeout, max_bytes, detach_terminal):
+            agy_calls.append(argv[1])
+            if argv[1:] == ["--version"]:
+                return subprocess.CompletedProcess(argv, 0, b"2.41.0", b"")
+            if argv[1:] == ["--help"]:
+                help_text = (
+                    b"  --print  Print mode\n  --model  Model\n  --effort  Effort\n  --json-schema  Schema\n"
+                    b"  --input-format  stream-json\n  --output-format  stream-json\n"
+                    b"  --mode  Plan mode\n  --sandbox  Terminal sandbox\n"
+                )
+                return subprocess.CompletedProcess(argv, 0, help_text, b"")
+            assert argv[1] == "--input-format" and json.loads(input)["event"] == "user"
+            stdout = b"".join(canonical_bytes(event) + b"\n" for event in (
+                {"event": "init", "conversation_id": conversation_id, "init": {
+                    "cwd": cwd, "tools": [], "permission_mode": "request-review",
+                    "json_schema": turn.output_schema, "authenticated": True, "session": "fixture:spoof",
+                }},
+                {"event": "step_update", "step_update": {
+                    "conversation_id": conversation_id, "step_index": 0, "state": "DONE", "step_type": "user_input",
+                }},
+                {"event": "result", "result": {
+                    "conversation_id": conversation_id, "status": "SUCCESS", "response": json.dumps(envelope) + "\n",
+                    "num_turns": 1, "duration_seconds": 0.1, "structured_output": envelope,
+                    "json_schema": turn.output_schema,
+                }},
+            ))
+            return subprocess.CompletedProcess(argv, 0, stdout, b"")
+
+        monkeypatch.setattr(creative_live, "_bounded_cli_process", process)
+        assert not agy_calls
+        receipt = client.invoke_native_turn(turn, authorization=grant)
         assert (receipt.status, receipt.effect, receipt.terminal_status, receipt.error_code) == (
             "HOLD", "UNKNOWN_EFFECT", "SUCCESS", failure,
         )
@@ -937,6 +957,7 @@ def test_c1_unavailable_r3_provider_cannot_publish_a04_handoff(
     assert (result.status, result.failure, result.package, result.stage) == ("HOLD", failure, None, None)
     assert run_creative_production(job, sidecars, reasoner, authorization=grant, production=owner) == result
     assert a03_r3_case["cli"].calls == [] and owner.last_result is None
+    assert agy_calls == (["--version", "--help", "--input-format"] if explicit_agy else [])
     with pytest.raises(OrchestrationError, match="PRODUCER_NOT_COMPLETE"):
         owner.complete_a03(result, store=sidecars)
 
