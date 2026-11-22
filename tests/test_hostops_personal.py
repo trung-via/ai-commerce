@@ -1358,6 +1358,22 @@ class PersonalHostOpsContractTests(unittest.TestCase):
                                           "diagnostics": [{"message": "PRIVATE_SECRET"}]}),
                           "status": "UNKNOWN", "code": code,
                           "no_diagnostics": True, "expected": topology})
+        forensic_op = "clean_9444_1270_forensic_read"
+        forensic = {
+            "status": "OBSERVED", "operation": forensic_op,
+            "code": "UNKNOWN_EFFECT+BACKUP_UNATTESTED+DEMAND_READY+D5_ENABLED+JOURNAL_COMPLETE+PENDING_CLEAR",
+            "issue_number": 17, "source_sha": "f" * 40,
+            "approval_channel": "CHATGPT_TO_AI_COMMERCE_ISSUE",
+            "remote_shell_enabled": False, "arbitrary_shell_enabled": False, "wake_sent": False,
+        }
+        for private_fields in ({}, {"forensic": {"xml": "PRIVATE_SECRET"},
+                                    "diagnostics": [{"sddl": "PRIVATE_SECRET"}]}):
+            cases.append({
+                "name": "forensic_projection", "body": encode({**forensic, **private_fields}),
+                "payload": event("read", forensic_op, {}),
+                "status": "OBSERVED", "code": forensic["code"],
+                "no_diagnostics": True, "expected": forensic,
+            })
         harness = r"""
 const fs = require('fs'), path = require('path'), vm = require('vm');
 const cases = JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
@@ -1367,6 +1383,7 @@ const script = fs.readFileSync(process.argv[2],'utf8');
     fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'personal-hostops-result.json'),item.body,'utf8');
     const comments = [];
     const context = {repo:{owner:'trung-via',repo:'ai-commerce'},issue:{number:17},sha:'f'.repeat(40)};
+    if (item.payload) Object.assign(context, {eventName:'issues',payload:item.payload});
     const github = {rest:{issues:{createComment:async args => { comments.push(args.body); }}}};
     await vm.runInNewContext('(async () => {\n'+script+'\n})()',
       {require,process,context,github,Buffer});
@@ -3384,6 +3401,154 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
     def invoke_probe(self, payload=None):
         with patch.dict(self.env, GITHUB_EVENT_NAME="issues"):
             return self.invoke(payload or event("read", "clean_9444_runtime_probe", {}), mode="read")
+
+    def invoke_forensic(self, payload=None):
+        with patch.dict(self.env, GITHUB_EVENT_NAME="issues"):
+            return self.invoke(
+                payload or event("read", "clean_9444_1270_forensic_read", {}), mode="read",
+            )
+
+    def test_forensic_read_accepts_only_the_owner_opened_empty_read_request(self):
+        op = "clean_9444_1270_forensic_read"
+        payload = event("read", op, {})
+        request = hostops.parse_event(payload, "read")
+        self.assertEqual(request, {"issue_number": 17, "operation": op, "parameters": {}})
+        with self.assertRaisesRegex(hostops.Denied, "OPERATION_DENIED"):
+            hostops.perform(request)
+        self.assertEqual(self.invoke(event("write", op, {}))["code"], "WRITE_SCOPE_DENIED")
+        for actor in (payload["sender"], payload["issue"]["user"]):
+            with patch.dict(actor, login="another-account"):
+                self.assertEqual(self.invoke_forensic(payload)["status"], "BLOCKED")
+        with patch.dict(payload, action="edited"):
+            self.assertEqual(self.invoke_forensic(payload)["code"], "READ_EVENT_DENIED")
+        for key in ("task", "path", "command", "sid", "sddl", "executable", "url", "schema"):
+            with self.subTest(key=key):
+                denied = self.invoke_forensic(event("read", op, {key: "PRIVATE"}))
+                self.assertEqual(denied["code"], "INVALID_PARAMETERS")
+        body = json.loads(payload["issue"]["body"])
+        with patch.dict(payload["issue"], body=json.dumps({**body, "extra": "PRIVATE"})):
+            self.assertEqual(self.invoke_forensic(payload)["code"], "INVALID_SCHEMA")
+        self.session.assert_not_called()
+        self.reconcile.assert_not_called()
+
+    def test_forensic_read_requires_runner_pin_and_stable_native_owner(self):
+        for key, value, expected in (
+            ("RUNNER_NAME", "AI-COMMERCE-EF02-01", "PROTECTED_HOSTOPS_ONLY"),
+            ("GITHUB_ACTOR", "another-account", "PROTECTED_HOSTOPS_ONLY"),
+            ("GITHUB_SHA", "PRIVATE", "SOURCE_CUSTODY_UNVERIFIED"),
+            ("GITHUB_WORKFLOW_SHA", "b" * 40, "SOURCE_CUSTODY_UNVERIFIED"),
+        ):
+            with self.subTest(key=key), patch.dict(self.env, {key: value}):
+                receipt = self.invoke_forensic()
+                self.assertEqual(receipt["code"], expected)
+                self.assertNotIn("source_sha", receipt)
+        self.session.assert_not_called()
+        self.source.assert_not_called()
+        self.source.side_effect = hostops.Denied("SOURCE_BYTES_MISMATCH")
+        self.assertEqual(self.invoke_forensic()["code"], "SOURCE_CUSTODY_UNVERIFIED")
+        self.source.side_effect = None
+        self.session.side_effect = (0,)
+        self.assertEqual(self.invoke_forensic()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+        self.session.side_effect = (7, 8)
+        self.assertEqual(self.invoke_forensic()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+        self.reconcile.assert_not_called()
+        self.session.side_effect = (7, 7, 8)
+        self.assertEqual(self.invoke_forensic()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+        self.session.side_effect = None
+        foreign = (self.local, 7, "S-1-5-21-100-200-300-400")
+        with patch.object(self.acq, "_native_operator", side_effect=(self.owner, self.owner, foreign)):
+            self.assertEqual(self.invoke_forensic()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+        self.reconcile.return_value = {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}
+        self.assertEqual(self.invoke_forensic()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+
+    def test_forensic_read_public_projection_reports_good_current_state_and_unknown_history(self):
+        workflow = (MODULE.parents[3] / ".github/workflows/issue-ingress.yml").read_text(encoding="utf-8")
+        fields = set(re.findall(r"'([^']+)'", re.search(r"const publicFields = \[(.*?)\];", workflow)[1]))
+        with patch.dict(self.env, GITHUB_WORKFLOW_SHA=""):
+            receipt = self.invoke_forensic()
+        self.assertEqual(receipt, {
+            "status": "OBSERVED",
+            "code": "UNKNOWN_EFFECT+BACKUP_UNATTESTED+DEMAND_READY+D5_ENABLED+JOURNAL_COMPLETE+PENDING_CLEAR",
+            "operation": "clean_9444_1270_forensic_read",
+            "source_sha": self.sha, "issue_number": 17,
+            "approval_channel": "CHATGPT_TO_AI_COMMERCE_ISSUE",
+            "remote_shell_enabled": False, "arbitrary_shell_enabled": False, "wake_sent": False,
+        })
+        self.assertEqual({key: value for key, value in receipt.items() if key in fields}, receipt)
+        self.assertTrue({"diagnostics", "content_utf8", "forensic"}.isdisjoint(receipt))
+        self.assertLessEqual(len(receipt["code"]), hostops._CLEAN_1270_CODE_LIMIT)
+        self.source.assert_called_once_with(self.acq, self.sha)
+        self.reconcile.assert_called_once_with(self.owner, self.target, self.candidates)
+        self.assertEqual(self.acq._clean_pending.call_args_list, [call(self.acq._CLEAN_TASK_PENDING)] * 2)
+        self.assertEqual(self.launch_pending.call_count, 2)
+        self.task.assert_not_called()
+        self.record.assert_not_called()
+        self.inventory.assert_not_called()
+        self.probe.assert_not_called()
+
+    def test_forensic_read_does_not_open_or_attest_unbound_backup_files(self):
+        baseline = self.invoke_forensic()
+        backup = self.local / "1270-backup.xml"
+        acl = self.local / "1270-backup.sddl"
+        original_open = Path.open
+
+        def open_public_fixture(path, *args, **kwargs):
+            self.assertNotIn(path, (backup, acl))
+            return original_open(path, *args, **kwargs)
+
+        for text in ("<Task/>", "<Task><UserId>FOREIGN_OWNER</UserId></Task>"):
+            with self.subTest(text=text):
+                backup.write_text(text, encoding="utf-8")
+                acl.write_text("O:SYD:PRIVATE", encoding="utf-8")
+                with patch.object(Path, "open", open_public_fixture):
+                    self.assertEqual(self.invoke_forensic(), baseline)
+        self.assertIn("+BACKUP_UNATTESTED+", baseline["code"])
+
+    def test_forensic_read_holds_pending_and_distinguishes_current_conflicts(self):
+        op_prefix = "UNKNOWN_EFFECT+BACKUP_UNATTESTED+"
+        for autostart, launch, expected in (
+            ((True, True), (False, False), "AUTOSTART_PENDING"),
+            ((False, False), (True, True), "LAUNCH_PENDING"),
+            ((True, True), (True, True), "BOTH_PENDING"),
+            ((False, True), (True, True), "PENDING_STATE_CHANGED"),
+            ((False, False), (True, False), "PENDING_STATE_CHANGED"),
+            ((PermissionError("PRIVATE HKCU"), False), (False, False), "PENDING_UNVERIFIED"),
+        ):
+            self.launch_pending.side_effect = launch
+            with self.subTest(expected=expected), patch.object(self.acq, "_clean_pending", side_effect=autostart) as pending:
+                result = self.invoke_forensic()
+                current = ("TASK_UNAVAILABLE+D5_UNVERIFIED+JOURNAL_UNVERIFIED"
+                           if expected == "PENDING_STATE_CHANGED" else "DEMAND_READY+D5_ENABLED+JOURNAL_COMPLETE")
+                self.assertEqual((result["status"], result["code"]), ("HOLD", op_prefix + current + "+" + expected))
+                self.assertEqual(pending.call_count, 2)
+        self.launch_pending.side_effect = None
+
+        for current, expected in (
+            ({"task": "MULTIPLE_CANDIDATES", "d5": "ENABLED_ATTESTED", "journal": "COMPLETE"},
+             "TASK_MULTIPLE+D5_ENABLED+JOURNAL_COMPLETE"),
+            ({"task": "FOREIGN_CANDIDATE", "d5": "UNVERIFIED_EXE", "journal": "ROLLBACK_ONLY"},
+             "TASK_FOREIGN+D5_UNVERIFIED_EXE+ROLLBACK_ONLY"),
+            ({"task": "DEMAND_READY", "d5": "UNVERIFIED_ACTION", "journal": "COMPLETE_ONLY"},
+             "DEMAND_READY+D5_UNVERIFIED_ACTION+COMPLETE_ONLY"),
+            ({"task": "PRIVATE", "d5": {"raw": "PRIVATE"}, "journal": "MISMATCH"},
+             "TASK_UNAVAILABLE+D5_UNVERIFIED+JOURNAL_MISMATCH"),
+            ({"task": "DEMAND_READY", "d5": "ENABLED_ATTESTED", "journal": "COMPLETE", "diagnostics": "PRIVATE"},
+             "TASK_UNAVAILABLE+D5_UNVERIFIED+JOURNAL_UNVERIFIED"),
+        ):
+            with self.subTest(expected=expected):
+                self.reconcile.return_value = current
+                result = self.invoke_forensic()
+                self.assertEqual((result["status"], result["code"]),
+                                 ("HOLD", op_prefix + expected + "+PENDING_CLEAR"))
+        self.task.assert_not_called()
+        self.record.assert_not_called()
+        self.probe.assert_not_called()
+
+    def test_forensic_read_checks_public_transport_before_native_access(self):
+        with patch.object(hostops, "PERSONAL_PUBLIC_FIELDS", hostops.PERSONAL_PUBLIC_FIELDS - {"source_sha"}):
+            self.assertEqual(self.invoke_forensic(), {"status": "NATIVE_HOLD", "code": "PUBLIC_TRANSPORT_GAP"})
+        self.session.assert_not_called()
+        self.reconcile.assert_not_called()
 
     def test_runtime_probe_rejects_unapproved_events_and_nonempty_parameters(self):
         op = "clean_9444_runtime_probe"

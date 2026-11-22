@@ -3145,6 +3145,9 @@ def test_clean_9444_reconcile_read_is_strictly_readonly_and_sanitized(clean_9444
         SimpleNamespace(returncode=0, stdout=b'{"error":"WINDOWS_OWNER_CONTEXT_UNVERIFIED"}\n'),
         SimpleNamespace(returncode=0, stdout=b'{"task":"PRIVATE_LEAK","journal":"FRESH","d5":"ABSENT"}'),
         SimpleNamespace(returncode=0, stdout=b'{"task":"DEMAND_READY","journal":"FRESH","d5":"ABSENT","extra":"secret"}'),
+        SimpleNamespace(returncode=0, stdout=b'{"task":"PRIVATE_LEAK","task":"DEMAND_READY","journal":"FRESH","d5":"ABSENT"}'),
+        SimpleNamespace(returncode=0, stdout=b'{"task":"DEMAND_READY","journal":"FRESH","d5":{"exe":"PRIVATE"}}'),
+        SimpleNamespace(returncode=0, stdout=b'{"task":"DEMAND_READY","journal":"FRESH","d5":"ABSENT"}' + b" " * 512),
         SimpleNamespace(returncode=1, stdout=b'{"task":"DEMAND_READY","journal":"FRESH","d5":"ABSENT"}'),
     ))
     calls = []
@@ -3167,7 +3170,7 @@ def test_clean_9444_reconcile_read_is_strictly_readonly_and_sanitized(clean_9444
     assert ca._clean_reconcile_read(owner, target, candidates) == {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}
     assert ca._clean_reconcile_read(owner, target, candidates) == {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}
     fallback = {"task": "UNAVAILABLE", "journal": "UNVERIFIED", "d5": "UNVERIFIED"}
-    for _ in range(3):
+    for _ in range(6):
         assert ca._clean_reconcile_read(owner, target, candidates) == fallback
 
     args, kwargs = calls[0]
@@ -3237,6 +3240,9 @@ def test_clean_9444_reconcile_read_is_strictly_readonly_and_sanitized(clean_9444
     ("legacy_pwsh77_workdir_mismatch", "CONFLICT_LEGACY_WORKDIR", "FRESH", "ENABLED_ATTESTED"),
     ("d5_pwsh_unverified_unsigned", "DEMAND_READY", "COMPLETE", "UNVERIFIED_EXE"),
     ("d5_untrusted_exe_powershell51", "DEMAND_READY", "COMPLETE", "UNVERIFIED_EXE"),
+    ("d5_direct_signed_wrong_port", "DEMAND_READY", "COMPLETE", "UNVERIFIED_ACTION"),
+    ("d5_direct_signed_bad_workdir", "DEMAND_READY", "COMPLETE", "UNVERIFIED_ACTION"),
+    ("d5_direct_relative_exe_path", "DEMAND_READY", "COMPLETE", "UNVERIFIED_EXE"),
     ("d5_pwsh_script_9444_contamination", "DEMAND_READY", "COMPLETE", "UNVERIFIED_SCRIPT"),
     ("d5_pwsh_script_malicious_ast", "DEMAND_READY", "COMPLETE", "UNVERIFIED_SCRIPT"),
     ("d5_pwsh_script_bad_custody", "DEMAND_READY", "COMPLETE", "UNVERIFIED_CUSTODY"),
@@ -3717,6 +3723,17 @@ switch ($case) {
     }
     'd5_untrusted_exe_powershell51' {
         $script:d5 = New-FakeD5Task -enabled $true -state 3 -exePath 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -argsOverride $pwshFileArgs
+    }
+    'd5_direct_signed_wrong_port' {
+        $script:d5 = New-FakeD5Task
+        $a = $script:d5.Definition.Actions.Entry
+        $a.Arguments = $a.Arguments.Replace('--remote-debugging-port=9333', '--remote-debugging-port=9334')
+    }
+    'd5_direct_signed_bad_workdir' {
+        $script:d5 = New-FakeD5Task -workDir 'C:relative'
+    }
+    'd5_direct_relative_exe_path' {
+        $script:d5 = New-FakeD5Task -exePath 'chrome.exe'
     }
     'd5_pwsh_script_bad_custody' {
         $sec = [IO.FileSystemAclExtensions]::GetAccessControl([IO.FileInfo]::new($script:d5ScriptPath))

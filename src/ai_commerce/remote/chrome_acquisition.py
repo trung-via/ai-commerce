@@ -4260,6 +4260,13 @@ _CLEAN_RECONCILE_D5_VALUES = frozenset({
 })
 
 
+def _clean_reconcile_unique_object(pairs):
+    data = dict(pairs)
+    if len(data) != len(pairs):
+        raise ValueError("DUPLICATE_RECONCILE_KEY")
+    return data
+
+
 def _clean_reconcile_read(owner: tuple[Path, int, str], target: _ChromeTarget,
                           candidates: tuple[Path, ...]) -> dict[str, str]:
     """Read-only post-UNKNOWN reconciler for WakeHub 9444 task, journal and D5."""
@@ -4293,12 +4300,13 @@ def _clean_reconcile_read(owner: tuple[Path, int, str], target: _ChromeTarget,
         raw = result.stdout.decode("utf-8").strip()
         if raw == "WINDOWS_OWNER_CONTEXT_UNVERIFIED":
             return {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}
-        data = json.loads(raw)
+        data = json.loads(raw, object_pairs_hook=_clean_reconcile_unique_object)
         if type(data) is not dict:
             return fallback
         if data == {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}:
             return {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}
         if (set(data) == {"task", "journal", "d5"}
+                and all(type(value) is str for value in data.values())
                 and data["task"] in _CLEAN_RECONCILE_TASK_VALUES
                 and data["journal"] in _CLEAN_RECONCILE_JOURNAL_VALUES
                 and data["d5"] in _CLEAN_RECONCILE_D5_VALUES):

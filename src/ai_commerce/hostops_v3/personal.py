@@ -53,6 +53,7 @@ MAX_WRITE = 2048
 _CLEAN_AUTOSTART = "install_clean_9444_autostart"
 _CLEAN_DEMAND_MIGRATION = "migrate_clean_9444_demand_task"
 _CLEAN_RUNTIME_PROBE = "clean_9444_runtime_probe"
+_CLEAN_1270_FORENSIC_READ = "clean_9444_1270_forensic_read"
 _A10_READINESS = "a10_codex_native_readiness"
 _A10_READINESS_SCHEMA = "A10CodexHostReadiness.v1"
 _ACQUISITION_SOURCE = Path("src/ai_commerce/remote/chrome_acquisition.py")
@@ -189,7 +190,7 @@ def parse_event(event, mode):
     params = _dict(request["parameters"])
     operation = request["operation"]
     if mode == "read":
-        if operation == _A10_READINESS:
+        if operation in (_A10_READINESS, _CLEAN_1270_FORENSIC_READ):
             if params:
                 deny("INVALID_PARAMETERS")
             if number > 2**53 - 1:
@@ -829,6 +830,127 @@ def _probe_protected_clean_runtime(event=None):
         # A failed probe can never project native output or exception text.
         code = _clean_probe_exception_code(exc)
         result["code"] = code if code in _CLEAN_RUNTIME_PROBE_CODES else "UNKNOWN"
+    return result
+
+
+_CLEAN_1270_PENDING_CODES = {
+    (False, False): "PENDING_CLEAR",
+    (True, False): "AUTOSTART_PENDING",
+    (False, True): "LAUNCH_PENDING",
+    (True, True): "BOTH_PENDING",
+}
+_CLEAN_1270_RECONCILE_FIELDS = (
+    ("task", _CLEAN_RECONCILE_TASK_MAP, "UNAVAILABLE"),
+    ("d5", _CLEAN_RECONCILE_D5_MAP, "UNVERIFIED"),
+    ("journal", _CLEAN_RECONCILE_JOURNAL_MAP, "UNVERIFIED"),
+)
+_CLEAN_1270_CODE_LIMIT = 160
+
+
+def _clean_1270_current(acquisition, owner):
+    """Sample both HKCU markers around the fixed native Task Scheduler read."""
+    def read_marker(reader):
+        try:
+            value = reader()
+        except (acquisition.AcquisitionBlocked, acquisition._EnrollmentHold,
+                acquisition._Clean9444Hold, OSError):
+            return None
+        return value if type(value) is bool else None
+
+    def sample_pending():
+        return (
+            read_marker(lambda: acquisition._clean_pending(acquisition._CLEAN_TASK_PENDING)),
+            read_marker(acquisition._clean_launch_pending),
+        )
+
+    before = sample_pending()
+    try:
+        target, candidates = acquisition._clean_target(owner)
+        current = acquisition._clean_reconcile_read(owner, target, candidates)
+    except (acquisition.AcquisitionBlocked, acquisition._EnrollmentHold,
+            acquisition._Clean9444Hold, OSError):
+        current = {}
+    after = sample_pending()
+    if (acquisition._native_operator() != owner
+            or current == {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}):
+        deny("WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+    if None in (*before, *after):
+        return current, "PENDING_UNVERIFIED"
+    if before != after:
+        return {}, "PENDING_STATE_CHANGED"
+    return current, _CLEAN_1270_PENDING_CODES[after]
+
+
+def _clean_1270_public_code(current, pending):
+    # There is no source-fixed custody route binding an approved #1270 receipt,
+    # prestate XML/ACL and task transition. The live rollback journal documents
+    # current migration state only. No historical backup files are opened.
+    if type(pending) is not str or pending not in (
+        *_CLEAN_1270_PENDING_CODES.values(), "PENDING_UNVERIFIED", "PENDING_STATE_CHANGED",
+    ):
+        return None
+    fields = {field for field, _, _ in _CLEAN_1270_RECONCILE_FIELDS}
+    if type(current) is not dict or current.keys() != fields:
+        current = {}
+    observed_codes = []
+    for field, codes, fallback in _CLEAN_1270_RECONCILE_FIELDS:
+        value = current.get(field)
+        observed_codes.append(codes.get(value, codes[fallback]) if type(value) is str else codes[fallback])
+    task, d5, journal = observed_codes
+    code = "+".join(("UNKNOWN_EFFECT", "BACKUP_UNATTESTED", task, d5, journal, pending))
+    if len(code) > _CLEAN_1270_CODE_LIMIT:
+        return None
+    healthy_current = (pending == "PENDING_CLEAR"
+                       and f"{task}_{journal}_{d5}" in _CLEAN_RUNTIME_PROBE_OBSERVED_CODES)
+    return ("OBSERVED" if healthy_current else "HOLD", code)
+
+
+def _protected_clean_1270_forensic_read(event):
+    request = parse_event(event, "read")
+    if request["operation"] != _CLEAN_1270_FORENSIC_READ:
+        deny("READ_OPERATION_DENIED")
+    result = {
+        "status": "HOLD", "code": "PROTECTED_HOSTOPS_ONLY",
+        "operation": _CLEAN_1270_FORENSIC_READ, "issue_number": request["issue_number"],
+        "approval_channel": "CHATGPT_TO_AI_COMMERCE_ISSUE",
+        "remote_shell_enabled": False, "arbitrary_shell_enabled": False,
+    }
+    if not (result.keys() | {"source_sha", "wake_sent"}) <= PERSONAL_PUBLIC_FIELDS:
+        return {"status": "NATIVE_HOLD", "code": "PUBLIC_TRANSPORT_GAP"}
+    result["wake_sent"] = False
+    try:
+        _require_protected_clean_runner("issues")
+    except Denied:
+        return result
+    try:
+        sha = _protected_clean_workflow_sha(allow_blank_workflow_sha=True)
+    except Denied:
+        return {**result, "code": "SOURCE_CUSTODY_UNVERIFIED"}
+    result["source_sha"] = sha
+
+    try:
+        from ai_commerce.remote import chrome_acquisition as acquisition
+        from ai_commerce.remote.local_wake_entry import LocalWakeConfigError
+    except ImportError:
+        return {**result, "code": "NATIVE_READ_UNVERIFIED"}
+
+    try:
+        owner = acquisition._native_operator()
+        try:
+            _persistent_clean_source(acquisition, sha)
+        except Denied:
+            return {**result, "code": "SOURCE_CUSTODY_UNVERIFIED"}
+        if acquisition._native_operator() != owner:
+            deny("WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+        current, pending = _clean_1270_current(acquisition, owner)
+    except (Denied, acquisition.AcquisitionBlocked, acquisition._EnrollmentHold, LocalWakeConfigError, OSError):
+        return {**result, "code": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}
+    except Exception:
+        return {**result, "code": "NATIVE_READ_UNVERIFIED"}
+    projected = _clean_1270_public_code(current, pending)
+    if projected is None:
+        return {**result, "status": "NATIVE_HOLD", "code": "PUBLIC_TRANSPORT_GAP"}
+    result["status"], result["code"] = projected
     return result
 
 
@@ -5314,6 +5436,8 @@ def main():
             result = _protected_a10_readiness(request["issue_number"])
         elif request["operation"] == _CLEAN_RUNTIME_PROBE:
             result = _probe_protected_clean_runtime(event)
+        elif request["operation"] == _CLEAN_1270_FORENSIC_READ:
+            result = _protected_clean_1270_forensic_read(event)
         else:
             if request["operation"] == _CLEAN_AUTOSTART:
                 outcome = _install_protected_clean_autostart(event)
