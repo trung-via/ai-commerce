@@ -1679,7 +1679,7 @@ def agy_terminal_fixture(turn, *, streamed_prompt=False):
     events = [
         {"event": "init", "conversation_id": AGY_CONVERSATION_ID, "init": {
             "cwd": "/fixture/project", "tools": ["ask_permission", "run_command", "write_to_file"],
-            "permission_mode": "request-review", "json_schema": turn.output_schema,
+            "model": job.configuration.model, "permission_mode": "request-review", "json_schema": turn.output_schema,
         }},
         step(0, "user_input"),
     ]
@@ -1737,7 +1737,9 @@ def test_agy_native_turn_sends_one_private_event_and_closes_stdin(agy_preflight_
             payload = canonical_bytes({"event": "user", "message": {"content": turn.canonical_payload.decode()}}) + b"\n"
             assert payload.count(b"\n") == 1 and task.authorization.authorization_ref.encode() not in payload
             events, _ = agy_terminal_fixture(turn, streamed_prompt=True)
-            events[0]["init"].update(cwd=cwd, authenticated=True, account="private-account", session="private-session")
+            events[0]["init"].update(cwd=cwd, authenticated=True, account="private-account",
+                                     session="private-session", effort="high", provider="codex-cli")
+            events[-1]["result"]["usage"]["future_field"] = "private-usage-metadata"
             raw = output = agy_stdout(events)
             limit = 120
 
@@ -1775,7 +1777,14 @@ def test_agy_native_turn_sends_one_private_event_and_closes_stdin(agy_preflight_
     assert receipt.stdout_sha256 == sha256_bytes(raw) and receipt.task_sha256 == task.digest
     assert receipt.output_schema_sha256 == sha256_bytes(canonical_bytes(turn.output_schema))
     assert receipt.job_sha256 == task.job.digest and receipt.source_brief_sha256 == task.job.source_brief_digest
-    assert all(value not in repr(receipt) for value in ("private-account", "private-session", calls[-1][1], TEXT))
+    assert receipt.requested_configuration_sha256 == sha256_bytes(canonical_bytes(config.to_dict()))
+    assert receipt.observed_model == config.model and dict(receipt.observed_usage) == AGY_USAGE
+    assert (receipt.observed_effort, receipt.observed_account, receipt.observed_session) == ("UNKNOWN",) * 3
+    public = json.dumps(asdict(receipt))
+    assert all(value not in public for value in (
+        "private-account", "private-session", "private-usage-metadata", "codex-cli", "high", TEXT,
+        AGY_CONVERSATION_ID, json.dumps(calls[-1][1])[1:-1],
+    ))
     assert client.invoke_native_turn(turn, authorization=task.authorization).error_code == "AGY_STREAM_REPLAY"
     assert turn.check_terminal(raw, returncode=0, capture_complete=True).error_code == "AGY_STREAM_REPLAY"
     assert [args[0] for args, _ in calls] == ["--version", "--help", "--input-format"]
@@ -1844,10 +1853,16 @@ def test_agy_native_turn_blocks_before_launch(agy_preflight_case, monkeypatch, f
     ("tool-permission", "AGY_STREAM_TOOL_ERROR"),
     ("tool-activity", "AGY_STREAM_TOOL_ACTIVITY"),
     ("cwd", "AGY_STREAM_SCOPE_MISMATCH"),
+    ("missing-cwd", "AGY_STREAM_SCOPE_MISMATCH"),
     ("permission-mode", "AGY_STREAM_SCOPE_MISMATCH"),
+    ("missing-permission-mode", "AGY_STREAM_SCOPE_MISMATCH"),
+    ("model", "AGY_STREAM_MODEL_MISMATCH"),
+    ("missing-model", "AGY_STREAM_MODEL_MISMATCH"),
     ("conversation", "AGY_STREAM_INVALID"),
     ("duplicate-user", "AGY_STREAM_INVALID"),
     ("duplicate-result", "AGY_STREAM_INVALID"),
+    ("cumulative-turns", "AGY_STREAM_INVALID"),
+    ("usage-limit", "AGY_STREAM_INVALID"),
     ("incomplete", "AGY_STREAM_INCOMPLETE"),
     ("mutation", "AGY_CLI_EXECUTABLE_CHANGED"),
 ])
@@ -1877,9 +1892,15 @@ def test_agy_native_turn_holds_on_process_and_stream_failures(agy_preflight_case
         if failure == "closed-pipes-unproven":
             raise creative_live._CLIStopped("UNKNOWN_EFFECT")
         events, _ = agy_terminal_fixture(turn, streamed_prompt=True)
-        events[0]["init"]["cwd"] = "/private/unexpected" if failure == "cwd" else cwd
+        init = events[0]["init"]
+        init["cwd"] = "/private/unexpected" if failure == "cwd" else cwd
         if failure == "permission-mode":
-            events[0]["init"]["permission_mode"] = "always-proceed"
+            init["permission_mode"] = "always-proceed"
+        if failure == "model":
+            init["model"] = "Explicit-model"
+        if failure in ("missing-cwd", "missing-model", "missing-permission-mode"):
+            key = failure.removeprefix("missing-").replace("-", "_")
+            events[-1]["result"][key] = init.pop(key)
         stderr = b""
         if failure == "mutation":
             Path(client.executable).write_bytes(b"changed during turn")
@@ -1900,6 +1921,10 @@ def test_agy_native_turn_holds_on_process_and_stream_failures(agy_preflight_case
             events.insert(2, {"event": "step_update", "step_update": {**events[1]["step_update"], "step_index": 10}})
         if failure == "duplicate-result":
             events.append(events[-1])
+        if failure == "cumulative-turns":
+            events[-1]["result"]["num_turns"] = 2
+        if failure == "usage-limit":
+            events[-1]["result"]["usage"]["total_tokens"] = 2**63
         raw = agy_stdout(events)
         if failure == "incomplete":
             raw = raw[:-1]
@@ -1919,6 +1944,8 @@ def test_agy_native_turn_holds_on_process_and_stream_failures(agy_preflight_case
         return
     expected_status = {"terminal-error": "ERROR", "optional-slash-flag": "SUCCESS"}.get(failure, "UNKNOWN")
     assert (result.status, result.effect, result.terminal_status) == ("HOLD", "UNKNOWN_EFFECT", expected_status)
+    if expected_status != "SUCCESS":
+        assert result.observed_model == "UNKNOWN" and result.observed_usage is None
     assert client.invoke_native_turn(turn, authorization=task.authorization).error_code == "AGY_STREAM_REPLAY"
     assert calls == ["--version", "--help", "--input-format"]
 
@@ -1952,6 +1979,7 @@ def test_agy_structural_success_is_private_task_bound_hold_and_one_shot(
     assert receipt.pinned_executable_sha256 == client.executable_sha256
     assert receipt.output_schema_sha256 == sha256_bytes(canonical_bytes(turn.output_schema))
     assert receipt.stdout_sha256 == sha256_bytes(raw) and receipt.stream_nonce == envelope["stream_nonce"]
+    assert receipt.observed_model == "UNKNOWN" and receipt.observed_usage is None
     public = json.dumps(asdict(receipt))
     assert all(value not in public for value in (
         TEXT, task.authorization.authorization_ref, "private-account", "private-session", AGY_CONVERSATION_ID,
@@ -1970,6 +1998,8 @@ def test_agy_correlates_nested_ids_when_init_omits_id(agy_preflight_case):
     turn = client.prepare_turn(task)
     events, _ = agy_terminal_fixture(turn)
     del events[0]["conversation_id"]
+    for key in ("model", "cwd", "permission_mode"):
+        del events[0]["init"][key]
     del events[-1]["result"]["usage"]
     receipt = turn.check_terminal(agy_stdout(events), returncode=0, capture_complete=True)
     assert (receipt.status, receipt.terminal_status) == ("HOLD", "SUCCESS")
