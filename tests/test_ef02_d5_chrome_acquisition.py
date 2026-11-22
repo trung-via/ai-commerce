@@ -657,6 +657,12 @@ def test_wh01b_9444_ensure_is_exact_closed_one_shot_no_send():
     assert "cancel-in-progress: false" in ensure
     assert "NO_INTERACTIVE_SESSION" in ensure
     assert "DEDICATED_CONFIG_NOT_ENROLLED" in ensure
+    # HostOps must use the same finite registry as native 9444 diagnostics,
+    # including the existing D5-Isolated-9444-Trial slot.
+    assert "ca._config_9444_registry(local, checkout)" in ensure
+    assert "len(registry.present) != 1" in ensure
+    assert "ca.load_environment(registry.present[0], checkout, local_app_data=local)" in ensure
+    assert "AI_COMMERCE_ENSURE_9444_PRIVATE_CONFIG" not in ensure
     assert "ELEVATED" in ensure
     assert 'env.port != 9444 or env.endpoint != "http://127.0.0.1:9444"' in ensure
     assert "ca.run(env, launch=True, opt_in=True)" in ensure
