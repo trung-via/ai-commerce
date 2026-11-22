@@ -854,7 +854,7 @@ def _agy_terminal(
                 _need(isinstance(model, str) and model == expected_model, "AGY_STREAM_MODEL_MISMATCH")
                 reported_cwd = payload.get("cwd")
                 _need(isinstance(reported_cwd, str) and Path(reported_cwd) == Path(cwd)
-                      and payload.get("permission_mode") == "request-review", "AGY_STREAM_SCOPE_MISMATCH")
+                      and payload.get("permission_mode") in ("request-review", "strict"), "AGY_STREAM_SCOPE_MISMATCH")
                 observed_model = model
             if "json_schema" in payload:
                 reported_schema = payload["json_schema"]

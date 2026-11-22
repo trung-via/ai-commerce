@@ -931,7 +931,7 @@ def test_c1_unavailable_r3_provider_cannot_publish_a04_handoff(
             assert argv[1] == "--input-format" and json.loads(input)["event"] == "user"
             stdout = b"".join(canonical_bytes(event) + b"\n" for event in (
                 {"event": "init", "conversation_id": conversation_id, "init": {
-                    "cwd": cwd, "tools": [], "permission_mode": "request-review",
+                    "cwd": cwd, "tools": [], "permission_mode": "strict",
                     "model": config.model, "json_schema": turn.output_schema,
                     "authenticated": True, "session": "fixture:spoof",
                 }},
