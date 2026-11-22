@@ -488,6 +488,29 @@ def test_source_rejects_matching_blobs_without_final_report_proof():
         source.next_event()
 
 
+def test_issue_1317_without_completion_artifact_yields_no_event():
+    target = PinnedRun(17, 1, 19, 1317, "fixture-batch", "a" * 40)
+    api = "https://api.github.com/repos/trung-via/ai-commerce"
+    responses = {
+        api + "/actions/runs/17": {
+            "id": 17, "run_attempt": 1, "workflow_id": 19, "event": "issues",
+            "status": "completed", "repository": {"full_name": "trung-via/ai-commerce"},
+        },
+        api + "/actions/runs/17/artifacts?per_page=100": {"total_count": 0, "artifacts": []},
+    }
+
+    def reject_artifact(*args, **kwargs):
+        pytest.fail("Issue alone supplied no artifact to read or verify")
+
+    reader = r.GitHubExactRunReader(token_provider=lambda: "fixture-token",
+                                   read_json=lambda url, _: responses[url],
+                                   read_archive=reject_artifact)
+    authority = SimpleNamespace(verify_artifact=reject_artifact)
+    source = r.GitHubEventSource(reader, target, authority)
+    assert source.next_event() is None
+    assert source.verified_event is None
+
+
 @pytest.mark.parametrize("raw,code", [
     (b'{"schema":"WakeHubRuntimeJournal.v1","events":{}}', "JOURNAL_MIGRATION_REQUIRED"),
     (b"", "JOURNAL_CORRUPT"), (b"not a database", "JOURNAL_CORRUPT"),
@@ -1832,6 +1855,14 @@ def test_r3b2_bridge_preserves_exact_message_and_detached_scope(r3b2_claims):
         "chrome_profile_id": p.origin.chrome_profile_id,
         "context_ref": p.origin.context_ref, "tab_ref": p.origin.tab_ref,
         "composer_ref": p.origin.composer_ref, "cdp_endpoint": "http://127.0.0.1:9444"}
+    assert asdict(mapped.scope.registered_context) == {
+        "chat_url": p.registration.binding.chat_url,
+        "windows_sid": p.origin.windows_sid,
+        "windows_session_id": p.origin.windows_session_id,
+        "windows_logon_id": p.origin.windows_logon_id,
+        "desktop": p.origin.desktop,
+        "event_payload_sha256": p.event.payload_sha256,
+    }
     with pytest.raises(FrozenInstanceError):
         mapped.scope.event_id = "changed"
     assert "native-looking" not in repr(mapped) and "fixture:" not in repr(mapped)
@@ -1903,6 +1934,23 @@ def test_r3b2_observed_identity_never_overrides_expected_pins(r3b2_claims, field
     assert sender.owner.adapter.allow_submit is False
 
 
+@pytest.mark.parametrize("change", ["windows_sid", "windows_session_id", "windows_logon_id",
+                                    "event_payload"])
+def test_r3b2_private_claims_cannot_rebind_to_changed_runner_context(r3b2_claims, change):
+    f = r3b2_claims
+    event, origin = f.p.event, f.p.origin
+    if change == "event_payload":
+        event = replace(event, payload_sha256="e" * 64)
+    else:
+        values = {"windows_sid": "S-1-5-21-111-222-333-1002", "windows_session_id": 8,
+                  "windows_logon_id": "0000000000000002"}
+        origin = replace(origin, **{change: values[change]})
+    assert r.DoorbellRequest.for_event(event, f.p.registration) == f.p.request
+    with pytest.raises(r.DependencyHold, match="^DOORBELL_SCOPE_MISMATCH$"):
+        r.NativeTurnAuthority().preflight(f.p.request, registration=f.p.registration,
+            event=event, origin=origin, evidence=f.evidence, now=f.now)
+
+
 @pytest.mark.parametrize("part,changes,code", [
     ("observation", None, "OBSERVATION_MISSING"),
     ("observation", {"context_count": 2}, "SURFACE_NOT_EXCLUSIVE"),
@@ -1956,7 +2004,7 @@ def test_r3b2_complete_native_looking_claims_still_lack_private_provider(r3b2_cl
         return gate
 
     monkeypatch.setattr(r.cdp_turn, "pre_send", observe)
-    with pytest.raises(r.DependencyHold, match="^DOORBELL_AUTHENTICATED_TURN_REF_UNAVAILABLE$"):
+    with pytest.raises(r.DependencyHold, match="^NATIVE_PRIVATE_PROVIDER_UNAVAILABLE$"):
         if boundary == "readiness":
             r.NativeSender(f.p.root, f.p.registration).require_turn_reference(f.p.request,
                 event=f.p.event, origin=f.p.origin, evidence=f.evidence, now=f.now)

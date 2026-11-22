@@ -15,6 +15,7 @@ import subprocess
 import pytest
 
 from ai_commerce import wakehub_cdp as cdp
+from ai_commerce.wakehub_cdp.authenticated_turn import RegisteredTurnContext
 
 
 NOW = 100
@@ -32,16 +33,23 @@ def offline(monkeypatch):
 
 @pytest.fixture
 def claims():
+    conversation_id = "00000000-0000-0000-0000-000000000001"
     pins = cdp.OriginPins(
-        account_id="fixture-account-a", conversation_id="fixture-chat-a",
+        account_id="fixture-account-a", conversation_id=conversation_id,
         session_ref="fixture-session", route_generation=1,
         registration_marker="fixture-marker", browser_custody_ref="fixture-custody",
         chrome_profile_id="fixture-profile", context_ref="fixture-context",
         tab_ref="fixture-tab", composer_ref="fixture-composer",
     )
+    context = RegisteredTurnContext(
+        chat_url="https://chatgpt.com/c/" + conversation_id,
+        windows_sid="S-1-5-21-111-222-333-1001", windows_session_id=7,
+        windows_logon_id="fixture-logon", desktop=r"WinSta0\Default",
+        event_payload_sha256="b" * 64,
+    )
     message = "fixture exact wake message\r\nTiếng Việt".encode("utf-8")
     scope = cdp.TurnScope(pins, "ef02-completion-v1:" + "a" * 64,
-                          hashlib.sha256(message).hexdigest())
+                          hashlib.sha256(message).hexdigest(), registered_context=context)
     request = cdp.WakeRequest(scope, message)
     grant = cdp.SignedWakeGrant(scope, "fixture-grant", "fixture-issuer", "fixture-key",
                                 b"NOT-A-REAL-SIGNATURE", 80, 120)
@@ -88,14 +96,15 @@ def assert_rejected_both(request, evidence, turn, code):
                   cdp.GateStatus.UNKNOWN_EFFECT, code, cdp.AttestationPhase.POST_SEND)
 
 
-def test_missing_real_provider_never_approves_matching_fixture(claims):
+def test_replaying_matching_event_and_grant_claims_never_becomes_authority(claims):
     request, evidence, turn = claims
-    assert_closed(cdp.pre_send(request, evidence, now=NOW), cdp.GateStatus.UNAVAILABLE,
-                  cdp.GateCode.NATIVE_PRIVATE_PROVIDER_UNAVAILABLE, cdp.AttestationPhase.PRE_SEND)
-    assert_closed(cdp.post_send(request, post_evidence(evidence), now=NOW,
-                               outcome=cdp.SendOutcome.CLICK_REPORTED, user_turn=turn),
-                  cdp.GateStatus.UNKNOWN_EFFECT, cdp.GateCode.NATIVE_PRIVATE_PROVIDER_UNAVAILABLE,
-                  cdp.AttestationPhase.POST_SEND)
+    for _ in range(2):
+        assert_closed(cdp.pre_send(request, evidence, now=NOW), cdp.GateStatus.UNAVAILABLE,
+                      cdp.GateCode.NATIVE_PRIVATE_PROVIDER_UNAVAILABLE, cdp.AttestationPhase.PRE_SEND)
+        assert_closed(cdp.post_send(request, post_evidence(evidence), now=NOW,
+                                   outcome=cdp.SendOutcome.CLICK_REPORTED, user_turn=turn),
+                      cdp.GateStatus.UNKNOWN_EFFECT, cdp.GateCode.NATIVE_PRIVATE_PROVIDER_UNAVAILABLE,
+                      cdp.AttestationPhase.POST_SEND)
 
 
 @pytest.mark.parametrize("owner,code", [
@@ -139,6 +148,37 @@ def test_event_and_exact_digest_bound_to_each_claim(claims, owner, code, field, 
     request, evidence, turn = claims
     candidate = replace(getattr(evidence, owner), scope=replace(request.scope, **{field: value}))
     assert_rejected_both(request, replace(evidence, **{owner: candidate}), turn, code)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("chat_url", "https://chatgpt.com/g/g-fixture/c/00000000-0000-0000-0000-000000000001"),
+    ("windows_sid", "S-1-5-21-111-222-333-1002"),
+    ("windows_session_id", 8), ("windows_logon_id", "other-logon"),
+    ("desktop", r"WinSta0\Other"), ("event_payload_sha256", "c" * 64),
+])
+def test_copied_marker_cannot_cover_registered_context_drift(claims, field, value):
+    request, evidence, turn = claims
+    context = replace(request.scope.registered_context, **{field: value})
+    scope = replace(request.scope, registered_context=context)
+    changed = replace(evidence, observation=replace(evidence.observation, scope=scope))
+    assert_rejected_both(request, changed, turn, cdp.GateCode.SCOPE_MISMATCH)
+
+
+def test_registered_url_must_name_the_expected_conversation(claims):
+    request, evidence, turn = claims
+    context = replace(request.scope.registered_context,
+                      chat_url="https://chatgpt.com/c/00000000-0000-0000-0000-000000000002")
+    request = replace(request, scope=replace(request.scope, registered_context=context))
+    assert_rejected_both(request, evidence, turn, cdp.GateCode.INVALID_REQUEST)
+
+
+def test_post_send_user_turn_cannot_omit_registered_context(claims):
+    request, evidence, turn = claims
+    turn = replace(turn, scope=replace(turn.scope, registered_context=None))
+    assert_closed(cdp.post_send(request, post_evidence(evidence), now=NOW,
+                               outcome=cdp.SendOutcome.CLICK_REPORTED, user_turn=turn),
+                  cdp.GateStatus.UNKNOWN_EFFECT, cdp.GateCode.USER_TURN_SCOPE_MISMATCH,
+                  cdp.AttestationPhase.POST_SEND)
 
 
 @pytest.mark.parametrize("message", [b"different", b"fixture exact wake message\nTieng Viet", b" "])
@@ -366,11 +406,13 @@ def test_no_callback_or_provider_flag_can_open_the_boundary(claims):
 def test_inputs_are_frozen_and_diagnostics_do_not_disclose_private_claims(claims):
     request, evidence, turn = claims
     result = cdp.pre_send(request, evidence, now=NOW)
-    values = (request.scope.origin, request.scope, request, evidence.observation,
+    values = (request.scope.origin, request.scope.registered_context, request.scope,
+              request, evidence.observation,
               evidence.grant, evidence.reservation, evidence.attestation, evidence, turn, result)
     private_tokens = (request.scope.origin.account_id, request.scope.origin.session_ref,
                       request.scope.origin.registration_marker, "NOT-A-REAL-SIGNATURE",
-                      "NOT-A-REAL-ATTESTATION", "fixture exact wake message", turn.user_turn_id)
+                      "NOT-A-REAL-ATTESTATION", "fixture exact wake message", turn.user_turn_id,
+                      request.scope.registered_context.chat_url)
     for value in values:
         field = fields(value)[0]
         with pytest.raises(FrozenInstanceError):

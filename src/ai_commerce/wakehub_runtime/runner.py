@@ -253,12 +253,10 @@ class DoorbellRequest:
 
 def _turn_request(registration: Registration, event: Event, request: DoorbellRequest,
                   origin: NativeOriginPins | None) -> cdp_turn.WakeRequest:
-    """Map exact frozen runner pins into unverified R3B2A claims, never proof.
+    """Bind the registered URL, Windows session and completion artifact to the claims.
 
-    Account/session/custody references must come from the separate native owner;
-    none can be inferred from registration, URL, DOM or signed operation scope.
-    This mapper also accepts offline negative fixtures, but cannot enroll them.
-    The conversation ID is only an expected route selector, not authentication.
+    The runtime independently verifies the completion artifact at ingress.
+    Account, session and custody still require an independently enrolled owner.
     """
     if (type(registration) is not Registration or type(event) is not Event
             or registration.evidence_type != "GITHUB_AUTHENTICATED"
@@ -282,9 +280,16 @@ def _turn_request(registration: Registration, event: Event, request: DoorbellReq
         chrome_profile_id=origin.chrome_profile_id,
         context_ref=origin.context_ref, tab_ref=origin.tab_ref,
         composer_ref=origin.composer_ref, cdp_endpoint=registration.binding.cdp_endpoint)
-    return cdp_turn.WakeRequest(
-        cdp_turn.TurnScope(pins, event.event_id, bytes_digest(request.canonical_bytes)),
-        request.canonical_bytes)
+    context = cdp_turn.RegisteredTurnContext(
+        chat_url=registration.binding.chat_url,
+        windows_sid=origin.windows_sid,
+        windows_session_id=origin.windows_session_id,
+        windows_logon_id=origin.windows_logon_id,
+        desktop=origin.desktop,
+        event_payload_sha256=event.payload_sha256)
+    scope = cdp_turn.TurnScope(pins, event.event_id, bytes_digest(request.canonical_bytes),
+                              registered_context=context)
+    return cdp_turn.WakeRequest(scope, request.canonical_bytes)
 
 
 @dataclass(frozen=True, repr=False)
@@ -346,11 +351,12 @@ class NativeTurnAuthority:
             raise DependencyHold("DOORBELL_AUTHENTICATED_TURN_REF_UNAVAILABLE") from None
         if (type(gate) is cdp_turn.GateResult
                 and gate.phase is cdp_turn.AttestationPhase.PRE_SEND
-                and gate.status is cdp_turn.GateStatus.HOLD
                 and type(gate.code) is cdp_turn.GateCode):
-            raise DependencyHold("DOORBELL_" + gate.code.value)
-        # UNAVAILABLE is not readiness, even with a native-looking signature.
-        # An unexpected/duck-typed result also cannot open this fixed boundary.
+            if gate.status is cdp_turn.GateStatus.HOLD:
+                raise DependencyHold("DOORBELL_" + gate.code.value)
+            if (gate.status is cdp_turn.GateStatus.UNAVAILABLE
+                    and gate.code is cdp_turn.GateCode.NATIVE_PRIVATE_PROVIDER_UNAVAILABLE):
+                raise DependencyHold(gate.code.value)
         raise DependencyHold("DOORBELL_AUTHENTICATED_TURN_REF_UNAVAILABLE")
 
     def authenticate(self, request: DoorbellRequest,
