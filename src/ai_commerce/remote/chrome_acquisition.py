@@ -3498,8 +3498,17 @@ try {
 
 
 _CLEAN_9444_TASK_RECONCILE_SCRIPT = _CLEAN_9444_TASK_INSPECTION + _CLEAN_9444_D5_ATTESTATION + r"""
+$recoveryPreflight = $env:AI_COMMERCE_TASK_RECOVERY_PREFLIGHT -ceq '1'
+
+function Test-RecoveryTaskIdentity($task, $taskName) {
+    $path = '\' + $taskName
+    return $task.Name -ceq $taskName -and $task.Path -ceq $path -and
+        $task.Definition.RegistrationInfo.URI -ceq $path
+}
+
 function Get-ReconcileRegistrationBaseStatus($reg) {
     if (!$reg) { return 'CONFLICT' }
+    if ($recoveryPreflight -and !(Test-RecoveryTaskIdentity $reg $name)) { return 'FOREIGN_CANDIDATE' }
     try {
         $acl = [Security.AccessControl.RawSecurityDescriptor]::new($reg.GetSecurityDescriptor(7))
         $want = [Security.AccessControl.RawSecurityDescriptor]::new($sddl)
@@ -4009,11 +4018,14 @@ function Test-ReconcileRollbackMetadata($rbVal) {
     return 'VALID'
 }
 
-function Get-ReconcileJournalState {
+function Get-ReconcileJournalState([ref]$pending) {
     $key = $null
     try {
         $key = Open-MigrationState $false
-        if (!$key) { return 'FRESH' }
+        if (!$key) {
+            if ($recoveryPreflight) { $pending.Value = 'NONE' }
+            return 'FRESH'
+        }
         if ($key.PSObject.Properties['SubKeyCount'] -and $key.SubKeyCount -gt 0) {
             return 'UNVERIFIED'
         }
@@ -4023,6 +4035,22 @@ function Get-ReconcileJournalState {
             if ($n -isnot [string] -or $n -cnotin $knownNames) {
                 return 'MISMATCH'
             }
+        }
+        if ($recoveryPreflight) {
+            $markerNames = @($names | Where-Object { $_ -cin @('AutostartPending', 'LaunchPending') })
+            foreach ($marker in $markerNames) {
+                if ($key.GetValueKind($marker) -ne [Microsoft.Win32.RegistryValueKind]::DWord) {
+                    return 'UNVERIFIED'
+                }
+                $value = $key.GetValue($marker)
+                if ($value -isnot [int] -or $value -ne 1) {
+                    return 'UNVERIFIED'
+                }
+            }
+            $pending.Value = if ($markerNames.Count -eq 2) { 'BOTH_PENDING' }
+                elseif ('AutostartPending' -cin $markerNames) { 'AUTOSTART_PENDING' }
+                elseif ('LaunchPending' -cin $markerNames) { 'LAUNCH_PENDING' }
+                else { 'NONE' }
         }
         $hasRollback = 'DemandMigrationRollback' -cin $names
         $hasComplete = 'DemandMigrationComplete' -cin $names
@@ -4066,7 +4094,8 @@ function Get-ReconcileRelevantTasks {
 
 $taskState = 'UNAVAILABLE'
 $d5State = 'UNVERIFIED'
-$journalState = Get-ReconcileJournalState
+$pendingState = 'MARKER_UNVERIFIED'
+$journalState = Get-ReconcileJournalState ([ref]$pendingState)
 
 try {
     $allTasks = Get-ReconcileRelevantTasks
@@ -4154,6 +4183,8 @@ try {
         $d5State = 'UNVERIFIED_MOVED'
     } elseif (!$d5Task) {
         $d5State = 'ABSENT'
+    } elseif ($recoveryPreflight -and !(Test-RecoveryTaskIdentity $d5Task 'AI-Commerce-D5-CDP-AtLogon')) {
+        $d5State = 'UNVERIFIED_MOVED'
     } elseif ($d5Task.Enabled) {
         $d5Res = Get-D5AttestationResult $d5Task $false
         if ($d5Res.ok) { $d5State = 'ENABLED_ATTESTED' }
@@ -4179,7 +4210,9 @@ if ($afterSid -cne $sid -or $afterSession -le 0 -or $afterSession -ne $session) 
     exit
 }
 
-@{ task = $taskState; journal = $journalState; d5 = $d5State } | ConvertTo-Json -Compress
+$observation = @{ task = $taskState; journal = $journalState; d5 = $d5State }
+if ($recoveryPreflight) { $observation.pending = $pendingState }
+$observation | ConvertTo-Json -Compress
 """
 
 
@@ -4258,13 +4291,23 @@ _CLEAN_RECONCILE_D5_VALUES = frozenset({
     "UNVERIFIED_TRIGGER", "UNVERIFIED_ACTION", "UNVERIFIED_EXE",
     "UNVERIFIED_CUSTODY", "UNVERIFIED_SCRIPT",
 })
+_CLEAN_RECONCILE_PENDING_VALUES = frozenset({
+    "NONE", "AUTOSTART_PENDING", "LAUNCH_PENDING", "BOTH_PENDING", "MARKER_UNVERIFIED",
+})
+
+
+def _unique_reconcile_fields(pairs):
+    fields = dict(pairs)
+    if len(fields) != len(pairs):
+        raise ValueError("Duplicate native receipt field")
+    return fields
 
 
 def _clean_reconcile_read(owner: tuple[Path, int, str], target: _ChromeTarget,
-                          candidates: tuple[Path, ...]) -> dict[str, str]:
+                          candidates: tuple[Path, ...], *, recovery_preflight: bool = False) -> dict[str, str]:
     """Read-only post-UNKNOWN reconciler for WakeHub 9444 task, journal and D5."""
     trusted = _trusted_powershells()
-    if len(trusted) == 1:
+    if recovery_preflight or len(trusted) == 1:
         powershell = trusted[0]
     else:
         try:
@@ -4275,11 +4318,15 @@ def _clean_reconcile_read(owner: tuple[Path, int, str], target: _ChromeTarget,
             powershell = trusted[0]
     child_env = _clean_task_environment(owner, target, candidates, powershell,
                                         trusted=trusted, include_legacy=True)
+    if recovery_preflight:
+        child_env["AI_COMMERCE_TASK_RECOVERY_PREFLIGHT"] = "1"
     stdin_runner = (
         "[Console]::InputEncoding=[Text.UTF8Encoding]::new(); "
         "& ([ScriptBlock]::Create([Console]::In.ReadToEnd()))"
     )
     fallback = {"task": "UNAVAILABLE", "journal": "UNVERIFIED", "d5": "UNVERIFIED"}
+    if recovery_preflight:
+        fallback = {"error": "INVALID_NATIVE_RECEIPT"}
     try:
         result = subprocess.run(
             [str(powershell), "-NoProfile", "-NonInteractive", "-Command", stdin_runner],
@@ -4293,16 +4340,18 @@ def _clean_reconcile_read(owner: tuple[Path, int, str], target: _ChromeTarget,
         raw = result.stdout.decode("utf-8").strip()
         if raw == "WINDOWS_OWNER_CONTEXT_UNVERIFIED":
             return {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}
-        data = json.loads(raw)
+        data = json.loads(raw, object_pairs_hook=_unique_reconcile_fields)
         if type(data) is not dict:
             return fallback
         if data == {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}:
             return {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}
-        if (set(data) == {"task", "journal", "d5"}
-                and data["task"] in _CLEAN_RECONCILE_TASK_VALUES
-                and data["journal"] in _CLEAN_RECONCILE_JOURNAL_VALUES
-                and data["d5"] in _CLEAN_RECONCILE_D5_VALUES):
-            return {"task": data["task"], "journal": data["journal"], "d5": data["d5"]}
+        fields = {"task": _CLEAN_RECONCILE_TASK_VALUES, "journal": _CLEAN_RECONCILE_JOURNAL_VALUES,
+                  "d5": _CLEAN_RECONCILE_D5_VALUES}
+        if recovery_preflight:
+            fields["pending"] = _CLEAN_RECONCILE_PENDING_VALUES
+        if set(data) == fields.keys() and all(type(data[k]) is str and data[k] in values
+                                               for k, values in fields.items()):
+            return data
     except (OSError, subprocess.TimeoutExpired, UnicodeError, ValueError):
         pass
     return fallback

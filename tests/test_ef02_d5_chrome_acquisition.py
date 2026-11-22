@@ -3118,7 +3118,8 @@ function Get-AuthenticodeSignature($LiteralPath) {
 def test_clean_9444_reconcile_read_is_strictly_readonly_and_sanitized(clean_9444, monkeypatch):
     for forbidden in (
         ".RegisterTaskDefinition(", ".RunEx(", ".CreateSubKey(",
-        ".SetValue(", ".DeleteValue(", ".DeleteTask(", "Open-MigrationState $true",
+        ".SetValue(", ".DeleteValue(", ".DeleteTask(", ".SetSecurityDescriptor(",
+        "Open-MigrationState $true",
     ):
         assert forbidden not in ca._CLEAN_9444_TASK_RECONCILE_SCRIPT
 
@@ -3181,8 +3182,45 @@ def test_clean_9444_reconcile_read_is_strictly_readonly_and_sanitized(clean_9444
     assert all(len(s["demand_sha256"]) == 64 for s in specs)
 
 
+@pytest.mark.parametrize("raw, valid", [
+    (b'{"task":"DEMAND_READY","journal":"FRESH","d5":"ENABLED_ATTESTED","pending":"NONE"}', True),
+    (b'{"task":"DEMAND_READY","journal":"FRESH","d5":"ENABLED_ATTESTED"}', False),
+    (b'{"task":"DEMAND_READY","journal":"FRESH","d5":"ENABLED_ATTESTED","pending":"NONE","pending":"NONE"}', False),
+    (b'{"task":"DEMAND_READY","journal":"FRESH","d5":"ENABLED_ATTESTED","pending":[]}', False),
+])
+def test_clean_9444_recovery_preflight_requires_exact_receipt(clean_9444, monkeypatch, raw, valid):
+    owner = clean_9444
+    target, candidates = ca._clean_target(owner)
+    trusted = (owner[0] / "pwsh.exe", owner[0] / "7.7" / "pwsh.exe")
+    monkeypatch.setattr(ca, "_trusted_powershells", lambda: trusted)
+    monkeypatch.setattr(ca, "_historical_legacy_workdir", lambda: None)
+
+    def unexpected_probe():
+        raise AssertionError("Recovery should inspect task and journal in one native session")
+
+    monkeypatch.setattr(ca, "_powershell", unexpected_probe)
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        assert args[0] == str(trusted[0])
+        assert kwargs["env"]["AI_COMMERCE_TASK_RECOVERY_PREFLIGHT"] == "1"
+        assert kwargs["input"] == ca._CLEAN_9444_TASK_RECONCILE_SCRIPT.encode("utf-8")
+        return SimpleNamespace(returncode=0, stdout=raw)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    expected = json.loads(raw) if valid else {"error": "INVALID_NATIVE_RECEIPT"}
+    assert ca._clean_reconcile_read(owner, target, candidates, recovery_preflight=True) == expected
+    assert len(calls) == 1
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell post-UNKNOWN reconciler")
 @pytest.mark.parametrize("case, expected_task, expected_journal, expected_d5", [
+    ("recovery_clean", "DEMAND_READY", "COMPLETE", "ENABLED_ATTESTED"),
+    ("recovery_reported_hold", "CONFLICT_BASE_ACL", "FRESH", "UNVERIFIED_EXE"),
+    ("recovery_partial_journal", "DEMAND_READY", "ROLLBACK_ONLY", "ENABLED_ATTESTED"),
+    ("recovery_invalid_marker", "DEMAND_READY", "UNVERIFIED", "ENABLED_ATTESTED"),
+    ("recovery_wrong_identity", "FOREIGN_CANDIDATE", "FRESH", "UNVERIFIED_MOVED"),
     ("demand_ready_complete_d5_pwsh7_enabled", "DEMAND_READY", "COMPLETE", "ENABLED_ATTESTED"),
     ("demand_ready_77_complete_d5_disabled", "DEMAND_READY", "COMPLETE", "DISABLED_ATTESTED"),
     ("demand_ready_fresh_d5_absent", "DEMAND_READY", "FRESH", "ABSENT"),
@@ -3409,9 +3447,11 @@ function New-FakeWakeTask($demand, $argsText = 'demand-args-0', $enabled = $true
     $triggers | Add-Member ScriptMethod Item { $this.Entry }
     $settings = $expected.Settings.PSObject.Copy()
     $settings.Enabled = $enabled
-    $task = [pscustomobject]@{ Name = $taskName; Enabled = $enabled; State = $state; Instances = $instances
+    $task = [pscustomobject]@{ Name = $taskName; Path = ('\' + $taskName)
+        Enabled = $enabled; State = $state; Instances = $instances
         Xml = '<Task><URI>\' + $taskName + '</URI></Task>'; Sddl = $sddl
         Definition = [pscustomobject]@{ Principal = $expected.Principal.PSObject.Copy()
+            RegistrationInfo = [pscustomobject]@{ URI = ('\' + $taskName) }
             Settings = $settings; Actions = $actions; Triggers = $triggers } }
     $task | Add-Member ScriptMethod GetSecurityDescriptor { $this.Sddl }
     $task | Add-Member ScriptMethod GetInstances { [pscustomobject]@{ Count = $this.Instances } }
@@ -3433,9 +3473,11 @@ function New-FakeD5Task($enabled = $true, $state = 3, $exePath = $chromePath, $a
     $triggers = [pscustomobject]@{ Count = 1; Entry = $t }
     $triggers | Add-Member ScriptMethod Item { $this.Entry }
     $principal = [pscustomobject]@{ Id = 'D5Owner'; UserId = $sid; LogonType = 3; RunLevel = 0; GroupId = $null }
-    $task = [pscustomobject]@{ Name = $taskName; Enabled = $enabled; State = $state; Instances = $instances
+    $task = [pscustomobject]@{ Name = $taskName; Path = ('\' + $taskName)
+        Enabled = $enabled; State = $state; Instances = $instances
         Xml = '<Task><RegistrationInfo><URI>\' + $taskName + '</URI></RegistrationInfo></Task>'
         Sddl = $d5Sddl; Definition = [pscustomobject]@{ Principal = $principal
+            RegistrationInfo = [pscustomobject]@{ URI = ('\' + $taskName) }
             Settings = [pscustomobject]@{}; Actions = $actions; Triggers = $triggers } }
     $task | Add-Member ScriptMethod GetSecurityDescriptor { $this.Sddl }
     $task | Add-Member ScriptMethod GetInstances { [pscustomobject]@{ Count = $this.Instances } }
@@ -3452,6 +3494,22 @@ $script:subFolderTasks = @()
 $script:values = @{ DemandMigrationRollback = $validRollback; DemandMigrationComplete = 1 }
 
 switch ($case) {
+    'recovery_reported_hold' {
+        $script:current.Sddl = $sddl.Replace('(A;;GA;;;' + $sid + ')', '(A;;GR;;;' + $sid + ')')
+        $script:d5.Definition.Actions.Entry.Path = 'C:\Untrusted\pwsh.exe'
+        $script:values = @{ AutostartPending = 1 }
+    }
+    'recovery_partial_journal' {
+        $script:values = @{ AutostartPending = 1; LaunchPending = 1; DemandMigrationRollback = $validRollback }
+    }
+    'recovery_invalid_marker' {
+        $script:values = @{ LaunchPending = '1' }
+    }
+    'recovery_wrong_identity' {
+        $script:current.Definition.RegistrationInfo.URI = '\OtherTask'
+        $script:d5.Path = '\OtherFolder\AI-Commerce-D5-CDP-AtLogon'
+        $script:values = @{}
+    }
     'demand_ready_77_complete_d5_disabled' {
         $script:current = New-FakeWakeTask $true 'demand-args-1'
         $script:d5 = New-FakeD5Task -enabled $false -state 1
@@ -3758,6 +3816,11 @@ switch ($case) {
 $registry = [pscustomobject]@{}
 $registry | Add-Member ScriptMethod GetValueNames { $script:values.Keys }
 $registry | Add-Member ScriptMethod GetValue { param($k) $script:values[$k] }
+$registry | Add-Member ScriptMethod GetValueKind {
+    param($k)
+    if ($script:values[$k] -is [int]) { return [Microsoft.Win32.RegistryValueKind]::DWord }
+    return [Microsoft.Win32.RegistryValueKind]::String
+}
 $registry | Add-Member ScriptMethod SetValue { $script:regWrites++; throw 'Never write registry' }
 $registry | Add-Member ScriptMethod DeleteValue { $script:regWrites++; throw 'Never delete registry' }
 $registry | Add-Member ScriptMethod Dispose {}
@@ -3852,6 +3915,7 @@ function Get-AttestedPathCustodySddl($path, $allowedOwners, $expectFile = $false
         functions = functions.replace(seam, overrides + seam, 1)
         env = ca._child_environment()
         env.update(
+            AI_COMMERCE_TASK_RECOVERY_PREFLIGHT="1" if case.startswith("recovery_") else "0",
             AI_COMMERCE_TASK_TRUSTED_POWERSHELLS=specs,
             AI_COMMERCE_TASK_HISTORICAL_WORKDIR=str(historical_dir),
             TEST_HISTORICAL_WORKDIR=str(historical_dir),
@@ -3877,8 +3941,15 @@ function Get-AttestedPathCustodySddl($path, $allowedOwners, $expectFile = $false
         shutil.rmtree(raw_root, ignore_errors=True)
     assert result.returncode == 0 and not result.stderr, result.stderr
     observed = json.loads(result.stdout)
+    expected = {"task": expected_task, "journal": expected_journal, "d5": expected_d5}
+    if case.startswith("recovery_"):
+        expected["pending"] = {
+            "recovery_reported_hold": "AUTOSTART_PENDING",
+            "recovery_partial_journal": "BOTH_PENDING",
+            "recovery_invalid_marker": "MARKER_UNVERIFIED",
+        }.get(case, "NONE")
     assert observed == {
-        "out": {"task": expected_task, "journal": expected_journal, "d5": expected_d5},
+        "out": expected,
         "writes": 0, "regWrites": 0, "runCalls": 0,
     }
 

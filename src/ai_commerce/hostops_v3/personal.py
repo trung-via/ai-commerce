@@ -52,6 +52,7 @@ MAX_READ = 8192
 MAX_WRITE = 2048
 _CLEAN_AUTOSTART = "install_clean_9444_autostart"
 _CLEAN_DEMAND_MIGRATION = "migrate_clean_9444_demand_task"
+_CLEAN_DEMAND_RECOVERY = "recover_clean_9444_demand_task"
 _CLEAN_RUNTIME_PROBE = "clean_9444_runtime_probe"
 _A10_READINESS = "a10_codex_native_readiness"
 _A10_READINESS_SCHEMA = "A10CodexHostReadiness.v1"
@@ -225,7 +226,7 @@ def parse_event(event, mode):
         else:
             deny("READ_OPERATION_DENIED")
     else:
-        if operation in (_CLEAN_AUTOSTART, _CLEAN_DEMAND_MIGRATION):
+        if operation in (_CLEAN_AUTOSTART, _CLEAN_DEMAND_MIGRATION, _CLEAN_DEMAND_RECOVERY):
             if params:
                 deny("INVALID_PARAMETERS")
         elif operation == "git_sync_main":
@@ -778,25 +779,87 @@ def _observe_clean_runtime(sha: str) -> str:
     )
     if after_state != marker_state:
         return "PENDING_STATE_CHANGED"
-    if read_error:
-        base = "TASK_UNAVAILABLE_JOURNAL_UNVERIFIED_D5_UNVERIFIED"
-        return base if marker_state is None else f"{marker_state}_{base}"
-    if (type(reconciled) is not dict or set(reconciled) != {"task", "journal", "d5"}
-            or any(type(reconciled[k]) is not str for k in ("task", "journal", "d5"))):
+    if not read_error:
+        observation = _clean_runtime_observation(reconciled, marker_state)
+        if observation is not None:
+            return observation
         if marker_state is None:
             return "UNKNOWN"
-        return f"{marker_state}_TASK_UNAVAILABLE_JOURNAL_UNVERIFIED_D5_UNVERIFIED"
+    base = "TASK_UNAVAILABLE_JOURNAL_UNVERIFIED_D5_UNVERIFIED"
+    return base if marker_state is None else f"{marker_state}_{base}"
+
+
+def _clean_runtime_observation(reconciled, marker_state) -> str | None:
+    if (type(reconciled) is not dict or set(reconciled) != {"task", "journal", "d5"}
+            or any(type(reconciled[k]) is not str for k in ("task", "journal", "d5"))):
+        return None
     task_code = _CLEAN_RECONCILE_TASK_MAP.get(reconciled["task"])
     journal_code = _CLEAN_RECONCILE_JOURNAL_MAP.get(reconciled["journal"])
     d5_code = _CLEAN_RECONCILE_D5_MAP.get(reconciled["d5"])
     if task_code is None or journal_code is None or d5_code is None:
-        if marker_state is None:
-            return "UNKNOWN"
-        return f"{marker_state}_TASK_UNAVAILABLE_JOURNAL_UNVERIFIED_D5_UNVERIFIED"
+        return None
     if journal_code == "JOURNAL_COMPLETE" and not task_code.startswith("DEMAND_"):
         journal_code = "JOURNAL_MISMATCH"
     reconciled_code = f"{task_code}_{journal_code}_{d5_code}"
     return reconciled_code if marker_state is None else f"{marker_state}_{reconciled_code}"
+
+
+def _recover_protected_clean_demand_task(event):
+    """Inspect the fixed recovery target and hold for authenticated historical evidence."""
+    result = {
+        "status": "HOLD", "code": "PROTECTED_HOSTOPS_ONLY", "operation": _CLEAN_DEMAND_RECOVERY,
+        "exact_chat_verified": False, "wake_sent": False,
+        "arbitrary_shell_enabled": False, "remote_shell_enabled": False,
+    }
+    if not (result.keys() | {"source_sha", "approval_channel"}) <= PERSONAL_PUBLIC_FIELDS:
+        deny("PUBLIC_TRANSPORT_GAP")
+    try:
+        _require_protected_clean_runner("issue_comment")
+        if parse_event(event, "write")["operation"] != _CLEAN_DEMAND_RECOVERY:
+            deny("PROTECTED_HOSTOPS_ONLY")
+        sha = _protected_clean_workflow_sha(write=True)
+    except Denied:
+        return result
+
+    result["approval_channel"] = "OWNER_GITHUB_COMMENT"
+    from ai_commerce.remote import chrome_acquisition as acquisition
+
+    try:
+        _persistent_clean_source(acquisition, sha)
+    except Denied:
+        return {**result, "code": "SOURCE_CUSTODY_UNVERIFIED"}
+    result["source_sha"] = sha
+
+    owner_hold = "NATIVE_HOLD_WINDOWS_OWNER_CONTEXT_UNVERIFIED"
+    try:
+        owner = acquisition._native_operator()
+        session, elevated, token_sid, interactive_sid = _exec_v1_interactive_token()
+        if elevated or token_sid != interactive_sid or owner[1:] != (session, interactive_sid):
+            return {**result, "code": owner_hold}
+    except Exception:
+        return {**result, "code": owner_hold}
+    try:
+        target, candidates = acquisition._clean_target(owner)
+        native = acquisition._clean_reconcile_read(owner, target, candidates, recovery_preflight=True)
+        if acquisition._native_operator() != owner or native == {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}:
+            return {**result, "code": owner_hold}
+    except acquisition._Clean9444Hold as exc:
+        code = "PROFILE_UNAVAILABLE" if str(exc) == "PROFILE_UNAVAILABLE" else "TARGET_READ_UNVERIFIED"
+        return {**result, "code": f"NATIVE_HOLD_{code}"}
+    except Exception as exc:
+        return {**result, "code": f"NATIVE_HOLD_{_clean_probe_exception_code(exc)}"}
+
+    if type(native) is dict and set(native) == {"task", "journal", "d5", "pending"}:
+        observation = {key: native[key] for key in ("task", "journal", "d5")}
+        pending = native["pending"]
+        if type(pending) is str and (pending == "NONE" or pending in _CLEAN_RUNTIME_PENDING_PREFIXES):
+            code = _clean_runtime_observation(observation, None if pending == "NONE" else pending)
+            if code is not None:
+                # HKCU values describe present state. None binds #1270's effect or
+                # an owner-approved pre-repair backup to this host and task.
+                result["code"] = f"NATIVE_HOLD_OWNER_1270_EFFECT_RECEIPT_AND_XML_ACL_BACKUP_REQUIRED_{code}"
+                return result
+    return {**result, "code": "NATIVE_HOLD_INVALID_NATIVE_RECEIPT"}
 
 
 def _probe_protected_clean_runtime(event=None):
@@ -5174,6 +5237,8 @@ def perform(request):
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
         return _a10_readiness_receipt(request.get("issue_number"))
+    if op == _CLEAN_DEMAND_RECOVERY:
+        deny("PROTECTED_HOSTOPS_ONLY")
     if op in (_CLEAN_AUTOSTART, _CLEAN_DEMAND_MIGRATION):
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
@@ -5314,6 +5379,8 @@ def main():
             result = _protected_a10_readiness(request["issue_number"])
         elif request["operation"] == _CLEAN_RUNTIME_PROBE:
             result = _probe_protected_clean_runtime(event)
+        elif request["operation"] == _CLEAN_DEMAND_RECOVERY:
+            result = _recover_protected_clean_demand_task(event)
         else:
             if request["operation"] == _CLEAN_AUTOSTART:
                 outcome = _install_protected_clean_autostart(event)

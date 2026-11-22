@@ -3385,6 +3385,87 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         with patch.dict(self.env, GITHUB_EVENT_NAME="issues"):
             return self.invoke(payload or event("read", "clean_9444_runtime_probe", {}), mode="read")
 
+    def test_recovery_requires_exact_protected_write_and_pinned_source(self):
+        op = "recover_clean_9444_demand_task"
+        exact = event("write", op, {})
+        foreign_issue = event("write", op, {})
+        foreign_issue["issue"]["user"]["login"] = "foreign"
+        foreign_sender = event("write", op, {})
+        foreign_sender["sender"]["login"] = "foreign"
+        foreign_comment = event("write", op, {})
+        foreign_comment["comment"]["user"]["login"] = "foreign"
+        for payload, code in (
+            (foreign_issue, "ISSUE_OWNER_OR_STATE_DENIED"),
+            (foreign_sender, "NON_OWNER_EVENT"),
+            (foreign_comment, "EXACT_WRITE_APPROVAL_REQUIRED"),
+            (event("write", op, {}, comment="APPROVE WRITE #1270"), "EXACT_WRITE_APPROVAL_REQUIRED"),
+            (event("write", op, {"task": "PRIVATE"}), "INVALID_PARAMETERS"),
+        ):
+            with self.subTest(code=code):
+                self.assertEqual(self.invoke(payload)["code"], code)
+        self.assertEqual(self.invoke_probe(event("read", op, {}))["code"], "READ_OPERATION_DENIED")
+        with self.assertRaisesRegex(hostops.Denied, "PROTECTED_HOSTOPS_ONLY"):
+            hostops.perform(hostops.parse_event(exact, "write"))
+        for override in ({"GITHUB_WORKFLOW_SHA": "b" * 40}, {"GITHUB_RUN_ATTEMPT": "2"},
+                         {"AI_COMMERCE_GIT_GUARD_ACTIVE": "1"}):
+            with self.subTest(override=override), patch.dict(self.env, override):
+                receipt = self.invoke(exact)
+                self.assertEqual(receipt["code"], "PROTECTED_HOSTOPS_ONLY")
+                self.assertNotIn("source_sha", receipt)
+        self.source.assert_not_called()
+        self.source.side_effect = hostops.Denied("SOURCE_BYTES_MISMATCH")
+        receipt = self.invoke(exact)
+        self.assertEqual(receipt["code"], "SOURCE_CUSTODY_UNVERIFIED")
+        self.assertNotIn("source_sha", receipt)
+        self.session.assert_not_called()
+        self.reconcile.assert_not_called()
+
+    def test_recovery_preflight_holds_for_history_and_backup_even_with_clean_present_state(self):
+        op = "recover_clean_9444_demand_task"
+        self.mock(hostops, "_exec_v1_interactive_token", return_value=(7, False, self.sid, self.sid))
+        prefix = "NATIVE_HOLD_OWNER_1270_EFFECT_RECEIPT_AND_XML_ACL_BACKUP_REQUIRED_"
+        clean = {"task": "DEMAND_READY", "journal": "COMPLETE", "d5": "ENABLED_ATTESTED", "pending": "NONE"}
+        current_hold = {"task": "CONFLICT_BASE_ACL", "journal": "FRESH", "d5": "UNVERIFIED_EXE",
+                        "pending": "AUTOSTART_PENDING"}
+        for native, code in (
+            (current_hold, prefix + "AUTOSTART_PENDING_TASK_CONFLICT_ACL_JOURNAL_FRESH_D5_UNVERIFIED_EXE"),
+            (clean, prefix + "DEMAND_READY_JOURNAL_COMPLETE_D5_ENABLED"),
+            ({**clean, "pending": "LAUNCH_PENDING", "journal": "ROLLBACK_ONLY"},
+             prefix + "LAUNCH_PENDING_DEMAND_READY_ROLLBACK_ONLY_D5_ENABLED"),
+            ({**clean, "task": "PRIVATE", "pending": "BOTH_PENDING"}, "NATIVE_HOLD_INVALID_NATIVE_RECEIPT"),
+            ({**clean, "pending": ["PRIVATE"]}, "NATIVE_HOLD_INVALID_NATIVE_RECEIPT"),
+            ({**clean, "extra": "PRIVATE"}, "NATIVE_HOLD_INVALID_NATIVE_RECEIPT"),
+        ):
+            with self.subTest(code=code), patch.dict(self.env, GITHUB_WORKFLOW_SHA=""):
+                self.reconcile.return_value = native
+                self.reconcile.reset_mock()
+                receipt = self.invoke(event("write", op, {}))
+                self.assertEqual(receipt, {
+                    "status": "HOLD", "code": code, "operation": op, "source_sha": self.sha,
+                    "approval_channel": "OWNER_GITHUB_COMMENT", "exact_chat_verified": False,
+                    "wake_sent": False, "arbitrary_shell_enabled": False, "remote_shell_enabled": False,
+                })
+                self.reconcile.assert_called_once_with(self.owner, self.target, self.candidates,
+                                                       recovery_preflight=True)
+        self.record.assert_not_called()
+        self.task.assert_not_called()
+        self.launch_pending.assert_not_called()
+        self.probe.assert_not_called()
+
+    def test_recovery_rejects_wrong_owner_or_session_before_task_access(self):
+        op = "recover_clean_9444_demand_task"
+        token = self.mock(hostops, "_exec_v1_interactive_token")
+        for identity in ((8, False, self.sid, self.sid), (7, False, self.sid, self.sid + "0"),
+                         (7, True, self.sid, self.sid)):
+            with self.subTest(identity=identity):
+                token.return_value = identity
+                self.assertEqual(self.invoke(event("write", op, {}))["code"],
+                                 "NATIVE_HOLD_WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+        self.target_read.assert_not_called()
+        self.reconcile.assert_not_called()
+        self.record.assert_not_called()
+        self.task.assert_not_called()
+
     def test_runtime_probe_rejects_unapproved_events_and_nonempty_parameters(self):
         op = "clean_9444_runtime_probe"
         request = hostops.parse_event(event("read", op, {}), "read")
