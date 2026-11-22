@@ -685,8 +685,9 @@ CLI_MAX_BYTES = 1024 * 1024
 
 
 class _CLIStopped(Exception):
-    def __init__(self, code: str):
+    def __init__(self, code: str, *, capture_issue: Literal["TIMEOUT", "LIMIT"] | None = None):
         self.code = code
+        self.capture_issue = capture_issue
 
 
 def _need(condition: bool, code: str = "CONFIGURATION_MISMATCH") -> None:
@@ -699,17 +700,24 @@ def _known_native_identity(value: str | None) -> bool:
 
 
 def _bounded_cli_process(argv: list[str], *, input: bytes, cwd: str, timeout: float,
-                         max_bytes: int) -> subprocess.CompletedProcess:
+                         max_bytes: int, detach_terminal: bool = False) -> subprocess.CompletedProcess:
     """Drain both pipes concurrently, killing on overflow/timeout without retry.
 
     communicate()/capture_output alone would buffer unbounded provider output.
     The writer is also concurrent so blocked stdin cannot evade the deadline.
     """
     _need(len(input) <= max_bytes)
+    terminal_options = {}
+    if detach_terminal:
+        terminal_options = ({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt"
+                            else {"start_new_session": True})
+    started = time.monotonic()
     process = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, shell=False, cwd=cwd)
+                               stderr=subprocess.PIPE, shell=False, cwd=cwd, **terminal_options)
     buffers = [bytearray(), bytearray()]
     failed = threading.Event()
+    overflow = threading.Event()
+    write_failed = threading.Event()
 
     def drain(pipe, buffer):
         try:
@@ -717,7 +725,7 @@ def _bounded_cli_process(argv: list[str], *, input: bytes, cwd: str, timeout: fl
                 remaining = max_bytes - len(buffer)
                 buffer.extend(chunk[:remaining])
                 if len(chunk) > remaining:
-                    failed.set()
+                    overflow.set()
                     process.kill()
                     break
         except (OSError, ValueError):
@@ -727,30 +735,38 @@ def _bounded_cli_process(argv: list[str], *, input: bytes, cwd: str, timeout: fl
 
     def write():
         try:
-            process.stdin.write(input)
-            process.stdin.close()
+            try:
+                process.stdin.write(input)
+            finally:
+                process.stdin.close()
         except (OSError, ValueError):
-            failed.set()
+            write_failed.set()
 
     threads = [threading.Thread(target=drain, args=(process.stdout, buffers[0]), daemon=True),
                threading.Thread(target=drain, args=(process.stderr, buffers[1]), daemon=True),
                threading.Thread(target=write, daemon=True)]
-    started = time.monotonic()
     for thread in threads:
         thread.start()
     try:
-        process.wait(timeout=timeout)
+        process.wait(timeout=max(0, timeout - (time.monotonic() - started)))
         for thread in threads:
             thread.join(timeout=max(0, timeout - (time.monotonic() - started)))
-        if failed.is_set() or any(t.is_alive() for t in threads):
+        if overflow.is_set():
+            raise _CLIStopped("UNKNOWN_EFFECT", capture_issue="LIMIT")
+        if any(t.is_alive() for t in threads):
+            raise _CLIStopped("UNKNOWN_EFFECT", capture_issue="TIMEOUT")
+        # A headless CLI can reject startup before reading stdin and still
+        # close both output pipes with a diagnostic and a determinate exit.
+        if failed.is_set() or (write_failed.is_set() and (not detach_terminal or not process.returncode)):
             raise _CLIStopped("UNKNOWN_EFFECT")
-    except (subprocess.TimeoutExpired, _CLIStopped):
-        process.kill()
+    except (subprocess.TimeoutExpired, _CLIStopped) as exc:
         try:
+            process.kill()
             process.wait(timeout=1)
-        except subprocess.TimeoutExpired:
+        except (OSError, subprocess.TimeoutExpired):
             pass
-        raise _CLIStopped("UNKNOWN_EFFECT") from None
+        issue = "TIMEOUT" if isinstance(exc, subprocess.TimeoutExpired) else exc.capture_issue
+        raise _CLIStopped("UNKNOWN_EFFECT", capture_issue=issue) from None
     return subprocess.CompletedProcess(argv, process.returncode, bytes(buffers[0]), bytes(buffers[1]))
 
 
@@ -800,13 +816,16 @@ def _agy_conversation_id(value: object, expected: str | None) -> str:
     return conversation_id
 
 
-def _agy_terminal(stdout: bytes, schema_json: bytes) -> tuple[dict[str, Any], bool]:
+def _agy_terminal(stdout: bytes, schema_json: bytes, *, cwd: str | None) -> tuple[dict[str, Any], bool]:
     """Read one turn from a bounded, closed AGY stream-json stdout capture."""
     seen_init = False
     init_schema_matches = True
     conversation_id = None
     terminal = None
+    active: dict[int, str] = {}
     done: set[int] = set()
+    user_step = None
+    tool_activity = False
     tool_error = False
     for count, raw in enumerate(BytesIO(stdout), 1):
         _need(count <= _AGY_MAX_EVENTS and len(raw) <= _AGY_MAX_LINE_BYTES, "AGY_STREAM_LIMIT_EXCEEDED")
@@ -826,6 +845,10 @@ def _agy_terminal(stdout: bytes, schema_json: bytes) -> tuple[dict[str, Any], bo
                 conversation_id = _agy_conversation_id(event["conversation_id"], conversation_id)
             if "conversation_id" in payload:
                 conversation_id = _agy_conversation_id(payload["conversation_id"], conversation_id)
+            if cwd is not None and "cwd" in payload:
+                _need(Path(require_text(payload["cwd"], "AGY cwd")) == Path(cwd), "AGY_STREAM_SCOPE_MISMATCH")
+            if cwd is not None and "permission_mode" in payload:
+                _need(payload["permission_mode"] in ("request-review", "strict"), "AGY_STREAM_SCOPE_MISMATCH")
             if "json_schema" in payload:
                 reported_schema = payload["json_schema"]
                 init_schema_matches = (
@@ -840,23 +863,34 @@ def _agy_terminal(stdout: bytes, schema_json: bytes) -> tuple[dict[str, Any], bo
             continue
         index, state, step_type = payload.get("step_index"), payload.get("state"), payload.get("step_type")
         _need(type(index) is int and 0 <= index <= 1000000 and index not in done
-              and state in ("ACTIVE", "DONE") and isinstance(step_type, str) and step_type.strip(),
+              and state in ("ACTIVE", "DONE") and isinstance(step_type, str) and step_type.strip()
+              and active.get(index, step_type) == step_type,
               "AGY_STREAM_INVALID")
+        if step_type == "user_input":
+            _need(user_step in (None, index), "AGY_STREAM_INVALID")
+            user_step = index
+        tool_activity |= (step_type == "tool" or payload.get("tool_info") is not None
+                          or payload.get("subagent_info") is not None)
         if step_type == "tool":
             info = payload.get("tool_info")
             _need(info is None or isinstance(info, dict), "AGY_STREAM_INVALID")
             tool_error |= payload.get("tool_name") == "ask_permission" or (
                 info is not None and (info.get("name") == "ask_permission" or info.get("error") is not None))
         if state == "DONE":
+            active.pop(index, None)
             done.add(index)
             duration = payload.get("duration_seconds")
             _need(duration is None or (type(duration) in (int, float) and 0 <= duration <= 86400),
                   "AGY_STREAM_INVALID")
+        else:
+            active[index] = step_type
     _need(terminal is not None, "AGY_STREAM_INCOMPLETE")
     _need(not tool_error, "AGY_STREAM_TOOL_ERROR")
+    _need(cwd is None or not tool_activity, "AGY_STREAM_TOOL_ACTIVITY")
     status, turns = terminal.get("status"), terminal.get("num_turns")
     _need(status in ("SUCCESS", "ERROR") and isinstance(terminal.get("response"), str)
-          and type(turns) is int and turns >= (1 if status == "SUCCESS" else 0), "AGY_STREAM_INVALID")
+          and type(turns) is int and turns in ((1,) if status == "SUCCESS" else (0, 1)), "AGY_STREAM_INVALID")
+    _need(cwd is None or status == "ERROR" or (user_step in done and not active), "AGY_STREAM_INCOMPLETE")
     if status == "ERROR":
         require_text(terminal.get("error"), "AGY terminal error")
     else:
@@ -902,8 +936,10 @@ class AntigravityCliTurn:
 
     task: AIReasoningTask
     pinned_executable_sha256: str
+    _pinned_executable: str | None = field(default=None, repr=False)
     task_sha256: str = field(init=False)
     stream_nonce: str = field(init=False, default_factory=lambda: uuid4().hex)
+    _output_schema_sha256: str = field(init=False, repr=False)
     _capture_claim: threading.Lock = field(init=False, default_factory=threading.Lock, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -916,6 +952,7 @@ class AntigravityCliTurn:
         require_digest(self.pinned_executable_sha256)
         object.__setattr__(self, "task", task)
         object.__setattr__(self, "task_sha256", task.digest)
+        object.__setattr__(self, "_output_schema_sha256", sha256_bytes(canonical_bytes(self.output_schema)))
 
     @property
     def output_schema(self) -> dict[str, Any]:
@@ -943,6 +980,26 @@ class AntigravityCliTurn:
         self, stdout: bytes, *, returncode: int | None, capture_complete: bool, timed_out: bool = False,
     ) -> AntigravityCliTerminalReceipt:
         """Check one supplied capture without launching, storing or trusting a process."""
+        if not self._capture_claim.acquire(blocking=False):
+            return self._receipt("AGY_STREAM_REPLAY")
+        return self._check_claimed_terminal(stdout, returncode=returncode, capture_complete=capture_complete,
+                                            timed_out=timed_out)
+
+    def _receipt(
+        self, code: str, status: Literal["SUCCESS", "ERROR", "UNKNOWN"] = "UNKNOWN",
+        *, stdout_sha256: str | None = None,
+    ) -> AntigravityCliTerminalReceipt:
+        job = self.task.job
+        return AntigravityCliTerminalReceipt(
+            self.task_sha256, job.digest, job.source_brief_digest, job.attempt,
+            sha256_bytes(canonical_bytes(job.configuration.to_dict())), self.pinned_executable_sha256,
+            self.stream_nonce, self._output_schema_sha256, stdout_sha256, status, code,
+        )
+
+    def _check_claimed_terminal(
+        self, stdout: bytes, *, returncode: int | None, capture_complete: bool, timed_out: bool = False,
+        cwd: str | None = None, stderr: bytes = b"",
+    ) -> AntigravityCliTerminalReceipt:
         schema = self.output_schema
         schema_json = canonical_bytes(schema)
         stdout_sha256 = None
@@ -950,37 +1007,40 @@ class AntigravityCliTurn:
         def receipt(
             code: str, status: Literal["SUCCESS", "ERROR", "UNKNOWN"] = "UNKNOWN",
         ) -> AntigravityCliTerminalReceipt:
-            job = self.task.job
-            return AntigravityCliTerminalReceipt(
-                self.task_sha256, job.digest, job.source_brief_digest, job.attempt,
-                sha256_bytes(canonical_bytes(job.configuration.to_dict())), self.pinned_executable_sha256,
-                self.stream_nonce, sha256_bytes(schema_json), stdout_sha256, status, code,
-            )
+            return self._receipt(code, status, stdout_sha256=stdout_sha256)
 
-        # Claim once even if the capture timed out or could not be verified.
-        if not self._capture_claim.acquire(blocking=False):
-            return receipt("AGY_STREAM_REPLAY")
+        if sha256_bytes(schema_json) != self._output_schema_sha256:
+            return receipt("AGY_TERMINAL_SCHEMA_INVALID")
         if timed_out is True:
             return receipt("AGY_STREAM_TIMEOUT")
         if timed_out is not False or capture_complete is not True or type(returncode) is not int:
             return receipt("AGY_STREAM_INCOMPLETE")
-        if type(stdout) is not bytes:
+        if type(stdout) is not bytes or type(stderr) is not bytes:
             return receipt("AGY_STREAM_INVALID")
-        if len(stdout) > CLI_MAX_BYTES:
+        if max(len(stdout), len(stderr)) > CLI_MAX_BYTES:
             return receipt("AGY_STREAM_LIMIT_EXCEEDED")
         stdout_sha256 = sha256_bytes(stdout)
+        if returncode < 0 or (os.name == "nt" and returncode >= 0x80000000):
+            return receipt("AGY_STREAM_INCOMPLETE")
+        if re.search(rb"permission.{0,120}(?:denied|required|blocked|approval|allow)|"
+                     rb"(?:denied|required|blocked|approval|allow).{0,120}permission", stderr, re.IGNORECASE):
+            return receipt("AGY_STREAM_TOOL_ERROR")
         try:
-            terminal, init_schema_matches = _agy_terminal(stdout, schema_json)
+            terminal, init_schema_matches = _agy_terminal(stdout, schema_json, cwd=cwd)
         except _CLIStopped as exc:
+            if cwd is not None and returncode and exc.code in ("AGY_STREAM_INCOMPLETE", "AGY_STREAM_INVALID"):
+                return receipt("AGY_PROCESS_NONZERO_EXIT")
             return receipt(exc.code)
         except (ValueError, RecursionError):
-            return receipt("AGY_STREAM_INVALID")
+            return receipt("AGY_PROCESS_NONZERO_EXIT" if cwd is not None and returncode else "AGY_STREAM_INVALID")
         if terminal["status"] == "ERROR":
             if not init_schema_matches:
                 return receipt("AGY_TERMINAL_SCHEMA_INVALID")
             return receipt("AGY_TERMINAL_ERROR", "ERROR")
         if returncode != 0:
-            return receipt("AGY_STREAM_INVALID")
+            return receipt("AGY_PROCESS_NONZERO_EXIT" if cwd is not None else "AGY_STREAM_INVALID")
+        if stderr.strip():
+            return receipt("AGY_PROCESS_DIAGNOSTICS")
         try:
             envelope = exact_fields(terminal.get("structured_output"), {"task_sha256", "stream_nonce", "output"})
             # The schemas also carry the nonce, so a replay can fail both checks.
@@ -1011,12 +1071,11 @@ class AntigravityCliPreflight:
 
 @dataclass(frozen=True, slots=True)
 class AntigravityCliCreativeClient:
-    """Probe an operator-pinned AGY binary with an explicit A03 task grant.
+    """Privately run one pinned AGY headless turn under an explicit A03 grant.
 
-    AGY help advertises structured print output. The available interfaces lack
-    a read-only account/scope check and a native terminal record binding the
-    authenticated session, actual model and effort to the exact task. Keep this
-    client outside the authenticated receipt registry until those are proven.
+    The private caller owns the effect grant and host/session custody. Headless
+    flags and output cannot authenticate the account or actual model and effort.
+    This client stays outside the authenticated receipt registry.
     """
 
     executable: str
@@ -1033,7 +1092,7 @@ class AntigravityCliCreativeClient:
 
     def prepare_turn(self, task: AIReasoningTask) -> AntigravityCliTurn:
         """Prepare an offline capture challenge; no executable is accessed."""
-        return AntigravityCliTurn(task, self.executable_sha256)
+        return AntigravityCliTurn(task, self.executable_sha256, self.executable)
 
     def preflight(self, task: AIReasoningTask) -> AntigravityCliPreflight:
         """Run only version/help, with no prompt, schema, login or session inputs."""
@@ -1044,23 +1103,46 @@ class AntigravityCliCreativeClient:
         problem = _agy_task_requirement(task)
         if problem is not None:
             return AntigravityCliPreflight(task_sha256, *problem)
+        return self._preflight(task_sha256, Path(self.executable).parent)[0]
 
+    def _verify_executable(self) -> tuple[int, ...]:
         executable = Path(self.executable)
-        try:
-            name = "agy.exe" if os.name == "nt" else "agy"
-            _need(executable.is_absolute() and not executable.drive.startswith("\\\\")
-                  and executable.name.lower() == name, "AGY_CLI_EXECUTABLE_UNVERIFIED")
+        name = "agy.exe" if os.name == "nt" else "agy"
+        _need(executable.is_absolute() and not executable.drive.startswith("\\\\")
+              and executable.name.lower() == name, "AGY_CLI_EXECUTABLE_UNVERIFIED")
+        _need(executable.resolve(strict=True) == executable and executable.is_file(),
+              "AGY_CLI_EXECUTABLE_UNVERIFIED")
 
-            def verify_executable() -> None:
-                _need(executable.resolve(strict=True) == executable and executable.is_file(),
-                      "AGY_CLI_EXECUTABLE_UNVERIFIED")
-                _need(_binary_digest(executable) == self.executable_sha256, "AGY_CLI_EXECUTABLE_UNVERIFIED")
+        def identity() -> tuple[int, ...]:
+            stat = executable.stat()
+            return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+        before = identity()
+        _need(_binary_digest(executable) == self.executable_sha256 and identity() == before,
+              "AGY_CLI_EXECUTABLE_UNVERIFIED")
+        return before
+
+    def _preflight(
+        self, task_sha256: str, cwd: Path, *, detach_terminal: bool = False,
+    ) -> tuple[AntigravityCliPreflight, frozenset[bytes], tuple[int, ...] | None]:
+        def failed(
+            status: Literal["BLOCK", "UNAVAILABLE"], code: str,
+            version: str | None = None, help_sha256: str | None = None,
+        ) -> tuple[AntigravityCliPreflight, frozenset[bytes], None]:
+            return AntigravityCliPreflight(task_sha256, status, code, version, help_sha256), frozenset(), None
+
+        try:
+            pinned_identity = self._verify_executable()
 
             def probe(flag: str) -> bytes:
-                verify_executable()
-                result = _bounded_cli_process([str(executable), flag], input=b"",
-                                              cwd=str(executable.parent), timeout=15, max_bytes=CLI_MAX_BYTES)
-                _need(result.returncode == 0 and bool(result.stdout) != bool(result.stderr),
+                result = _bounded_cli_process([self.executable, flag], input=b"", cwd=str(cwd), timeout=15,
+                                              max_bytes=CLI_MAX_BYTES,
+                                              **({"detach_terminal": True} if detach_terminal else {}))
+                _need(self._verify_executable() == pinned_identity, "AGY_CLI_EXECUTABLE_UNVERIFIED")
+                _need(type(result.returncode) is int and result.returncode == 0
+                      and type(result.stdout) is bytes and type(result.stderr) is bytes
+                      and max(len(result.stdout), len(result.stderr)) <= CLI_MAX_BYTES
+                      and bool(result.stdout) != bool(result.stderr),
                       "AGY_CLI_PROBE_UNAVAILABLE")
                 return result.stdout or result.stderr
 
@@ -1068,23 +1150,116 @@ class AntigravityCliCreativeClient:
             _need(re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?", version) is not None,
                   "AGY_CLI_PROBE_UNAVAILABLE")
             help_output = probe("--help")
-            verify_executable()
         except FileNotFoundError:
-            return AntigravityCliPreflight(task_sha256, "UNAVAILABLE", "AGY_CLI_UNAVAILABLE")
+            return failed("UNAVAILABLE", "AGY_CLI_UNAVAILABLE")
         except _CLIStopped as exc:
             if exc.code in ("CONFIGURATION_MISMATCH", "AGY_CLI_EXECUTABLE_UNVERIFIED"):
-                return AntigravityCliPreflight(task_sha256, "BLOCK", "AGY_CLI_EXECUTABLE_UNVERIFIED")
-            return AntigravityCliPreflight(task_sha256, "UNAVAILABLE", "AGY_CLI_PROBE_UNAVAILABLE")
+                return failed("BLOCK", "AGY_CLI_EXECUTABLE_UNVERIFIED")
+            return failed("UNAVAILABLE", "AGY_CLI_PROBE_UNAVAILABLE")
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
-            return AntigravityCliPreflight(task_sha256, "UNAVAILABLE", "AGY_CLI_PROBE_UNAVAILABLE")
+            return failed("UNAVAILABLE", "AGY_CLI_PROBE_UNAVAILABLE")
 
         help_sha256 = sha256_bytes(help_output)
         flags = dict(re.findall(rb"^[ \t]+(--[a-z][a-z-]*)[ \t]+([^\r\n]+)", help_output, re.MULTILINE))
         if (not {b"--print", b"--model", b"--effort", b"--json-schema"} <= flags.keys()
                 or any(b"stream-json" not in flags.get(flag, b"") for flag in (b"--input-format", b"--output-format"))):
-            return AntigravityCliPreflight(task_sha256, "UNAVAILABLE", "AGY_CLI_CAPABILITY_UNAVAILABLE",
-                                          version, help_sha256)
-        return AntigravityCliPreflight(task_sha256, "HOLD", _AGY_SESSION_UNAVAILABLE, version, help_sha256)
+            return failed("UNAVAILABLE", "AGY_CLI_CAPABILITY_UNAVAILABLE", version, help_sha256)
+        report = AntigravityCliPreflight(task_sha256, "HOLD", _AGY_SESSION_UNAVAILABLE, version, help_sha256)
+        return report, frozenset(flags), pinned_identity
+
+    def invoke_native_turn(
+        self, turn: AntigravityCliTurn, *, authorization: InvocationAuthorization,
+    ) -> AntigravityCliPreflight | AntigravityCliTerminalReceipt:
+        """Consume a local challenge and make at most one private native invocation."""
+        if type(turn) is not AntigravityCliTurn:
+            raise CreativeValidationError("AGY invocation requires a prepared turn")
+
+        def block(code: str) -> AntigravityCliPreflight:
+            return AntigravityCliPreflight(turn.task_sha256, "BLOCK", code)
+
+        if (type(authorization) is not InvocationAuthorization
+                or authorization != turn.task.authorization
+                or authorization.allow_network is not True or authorization.allow_spend is not True
+                or not authorization.authorization_ref):
+            return block("UNAUTHORIZED")
+        try:
+            task = AIReasoningTask(turn.task.job, authorization)
+            if (task.route != _AGY_ROUTE or task.digest != turn.task_sha256
+                    or turn.pinned_executable_sha256 != self.executable_sha256
+                    or turn._pinned_executable != self.executable):
+                return block("AGY_TURN_BINDING_MISMATCH")
+            problem = _agy_task_requirement(task)
+            if problem is not None:
+                return AntigravityCliPreflight(turn.task_sha256, *problem)
+            config = task.job.configuration
+            if (re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", config.model) is None
+                    or config.effort not in ("low", "medium", "high", "xhigh", "max")):
+                return block("UNVERIFIED_MODEL_CONFIGURATION")
+            schema_json = canonical_bytes(turn.output_schema)
+            if sha256_bytes(schema_json) != turn._output_schema_sha256:
+                return block("AGY_TERMINAL_SCHEMA_INVALID")
+            packet = canonical_bytes({"event": "user", "message": {
+                "content": turn.canonical_payload.decode("utf-8"),
+            }}) + b"\n"
+            if len(packet) > CLI_MAX_BYTES:
+                return block("AGY_INPUT_LIMIT_EXCEEDED")
+        except (ValueError, TypeError, AttributeError, RecursionError):
+            return block("AGY_TURN_BINDING_MISMATCH")
+
+        # Share the capture claim with the offline checker. An attempted process,
+        # including an ambiguous one, cannot be relaunched or rebound to a capture.
+        if not turn._capture_claim.acquire(blocking=False):
+            return turn._receipt("AGY_STREAM_REPLAY")
+
+        invoked = False
+        try:
+            temp_root = Path(tempfile.gettempdir()).resolve(strict=True)
+            if any((parent / ".git").exists() for parent in (temp_root, *temp_root.parents)):
+                return block("AGY_CLI_PRIVATE_CWD_UNAVAILABLE")
+            with tempfile.TemporaryDirectory(prefix="a03-agy-", dir=temp_root) as directory:
+                cwd = Path(directory)
+                report, flags, identity = self._preflight(task.digest, cwd, detach_terminal=True)
+                if identity is None:
+                    return report
+                if not {b"--mode", b"--sandbox"} <= flags:
+                    return replace(report, status="UNAVAILABLE", error_code="AGY_CLI_CAPABILITY_UNAVAILABLE")
+                if cwd.resolve(strict=True) != cwd or any(cwd.iterdir()):
+                    return block("AGY_CLI_PRIVATE_CWD_UNAVAILABLE")
+                # Pin the supported planning mode and terminal sandbox per process.
+                # Stream input itself selects headless mode, without a print prompt.
+                argv = [self.executable, "--input-format", "stream-json", "--output-format", "stream-json",
+                        "--model", config.model, "--effort", config.effort,
+                        "--json-schema", schema_json.decode("utf-8"), "--mode", "plan", "--sandbox"]
+                if b"--disable-slash-commands" in flags:
+                    argv.append("--disable-slash-commands")
+                try:
+                    _need(self._verify_executable() == identity, "AGY_CLI_EXECUTABLE_UNVERIFIED")
+                except (OSError, ValueError, RuntimeError, _CLIStopped):
+                    return block("AGY_CLI_EXECUTABLE_UNVERIFIED")
+                invoked = True
+                try:
+                    process = _bounded_cli_process(argv, input=packet, cwd=directory, timeout=120,
+                                                   max_bytes=CLI_MAX_BYTES, detach_terminal=True)
+                finally:
+                    try:
+                        _need(self._verify_executable() == identity, "AGY_CLI_EXECUTABLE_CHANGED")
+                    except (OSError, ValueError, RuntimeError, _CLIStopped):
+                        raise _CLIStopped("AGY_CLI_EXECUTABLE_CHANGED") from None
+                return turn._check_claimed_terminal(process.stdout, returncode=process.returncode,
+                                                    capture_complete=True, cwd=directory, stderr=process.stderr)
+        except subprocess.TimeoutExpired:
+            return turn._check_claimed_terminal(b"", returncode=None, capture_complete=False, timed_out=True)
+        except _CLIStopped as exc:
+            if exc.capture_issue == "TIMEOUT":
+                return turn._check_claimed_terminal(b"", returncode=None, capture_complete=False, timed_out=True)
+            if exc.capture_issue == "LIMIT":
+                return turn._receipt("AGY_STREAM_LIMIT_EXCEEDED")
+            code = "AGY_CLI_EXECUTABLE_CHANGED" if exc.code == "AGY_CLI_EXECUTABLE_CHANGED" else "AGY_STREAM_INCOMPLETE"
+            return turn._receipt(code)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            if not invoked:
+                return block("AGY_CLI_PRIVATE_CWD_UNAVAILABLE")
+            return turn._receipt("AGY_STREAM_INCOMPLETE")
 
 
 @dataclass(frozen=True, slots=True)
