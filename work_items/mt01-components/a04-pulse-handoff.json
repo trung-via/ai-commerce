@@ -1,0 +1,24 @@
+{
+  "schema_version": "MT01ComponentOwner.v1",
+  "component": "a04-pulse-handoff",
+  "sources": [
+    "src/ai_commerce/a04_pulse_handoff/__init__.py",
+    "src/ai_commerce/a04_pulse_handoff/handoff.py"
+  ],
+  "tests": [
+    "tests/test_a04_pulse_handoff.py"
+  ],
+  "acs": [
+    "A04PULSE.P0.authenticated-offline-handoff-contract"
+  ],
+  "consumers": [
+    "src/ai_commerce/media/generation.py",
+    "src/ai_commerce/production_runtime/contracts.py",
+    "src/ai_commerce/production_runtime/state_machine.py",
+    "src/ai_commerce/production_runtime/attended_worker.py",
+    "src/ai_commerce/production_runtime/handoff.py"
+  ],
+  "contracts": [
+    "contracts/CreativeDirective.v1.schema.json"
+  ]
+}
