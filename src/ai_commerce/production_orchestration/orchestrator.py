@@ -16,7 +16,7 @@ import time
 from typing import Literal
 
 from ai_commerce.creative.briefs import brief_digest, intake_brief
-from ai_commerce.creative import briefs as creative_briefs, verified_model_transport
+from ai_commerce.creative import briefs as creative_briefs, verified_reasoning_receipt
 from ai_commerce.creative._validation import read_json as read_strict_json
 from ai_commerce.creative.sidecars import CreativeSidecarStore
 from ai_commerce.creative.store import CreativeStore
@@ -414,21 +414,15 @@ class ProductionPipelineOrchestrator:
             target_pkg.package_id, target_pkg.revision, origin_result_digest=prod.digest,
         )
         require(origin == prod and verified_pkg == target_pkg, "PRODUCER_RESULT_MISMATCH")
-        for checked in (origin.package, verified_pkg):
-            require(verified_model_transport(checked.configuration, checked.observation, checked.execution,
-                                             authorization=origin.authorization) is not None
-                    and checked.lineage.cycle_status == "CREATIVE_COMPLETE",
-                    "PRODUCER_NOT_COMPLETE")
+        require(verified_reasoning_receipt(origin.stage, authorization=origin.authorization) is not None
+                and verified_pkg.lineage.cycle_status == "CREATIVE_COMPLETE", "PRODUCER_NOT_COMPLETE")
         cycle = sidecars.load_cycle_by_digest(
             verified_pkg.lineage.cycle_job_digest, verified_pkg.lineage.cycle_result_digest,
         )
         require(cycle.status == "CREATIVE_COMPLETE" and cycle.job.seed.purpose == "PRODUCTION",
                 "PRODUCER_NOT_COMPLETE")
         for step in cycle.steps:
-            result = step.reasoning
-            require(step.status == "CREATIVE_COMPLETE"
-                    and verified_model_transport(result.configuration, result.observation, result.execution,
-                                                 authorization=cycle.authorization) is not None,
+            require(verified_reasoning_receipt(step, authorization=cycle.authorization) is not None,
                     "PRODUCER_NOT_COMPLETE")
         require(verified_pkg.factual_status == "UNVERIFIED"
                 and verified_pkg.rights_status in ("UNKNOWN", "EVIDENCE_BOUND")

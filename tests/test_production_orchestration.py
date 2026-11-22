@@ -877,6 +877,42 @@ def test_r4_incomplete_native_attestation_creates_no_completion_or_dispatch(a03_
     assert not owner._state_dir.exists()
 
 
+@pytest.mark.parametrize(("provider", "failure"), [
+    ("antigravity-cli", "AGY_AUTHENTICATED_CLI_SESSION_UNAVAILABLE"),
+    ("chatgpt-brain-cdp", "BRAIN_CDP_ORIGIN_AND_TURN_AUTHORITY_UNAVAILABLE"),
+])
+def test_c1_unavailable_r3_provider_cannot_publish_a04_handoff(a03_r3_case, monkeypatch, provider, failure):
+    from ai_commerce.creative import ModelConfiguration, run_creative_production
+    from ai_commerce.media import generation as mg
+
+    monkeypatch.setattr(mg, "accept_creative_production_package", lambda **_: pytest.fail("A04 invoked"))
+    sidecars = a03_r3_case["sidecars"]
+    owner = a03_r3_case["make_owner"]()
+    job = replace(a03_r3_case["job"], attempt=2, configuration=ModelConfiguration(provider))
+    grant = a03_r3_case["cli_grant"]
+    # The existing Codex client must never be tried as a fallback.
+    reasoner = a03_r3_case["reasoner"]
+    result = run_creative_production(job, sidecars, reasoner, authorization=grant, production=owner)
+    assert (result.status, result.failure, result.package, result.stage) == ("HOLD", failure, None, None)
+    assert run_creative_production(job, sidecars, reasoner, authorization=grant, production=owner) == result
+    assert a03_r3_case["cli"].calls == [] and owner.last_result is None
+    with pytest.raises(OrchestrationError, match="PRODUCER_NOT_COMPLETE"):
+        owner.complete_a03(result, store=sidecars)
+
+    # Rebinding a simulated Codex response and execution metadata cannot
+    # introduce a verifier for either new provider.
+    wire = a03_r3_case["result"].to_dict()
+    reasoning = wire["stage"]["reasoning"]
+    response = json.loads(reasoning["response_json"])
+    reasoning["configuration"]["provider"] = provider
+    reasoning["observation"]["provider"] = provider
+    response["observation"]["provider"] = provider
+    reasoning["response_json"] = json.dumps(response)
+    with pytest.raises(OrchestrationError, match="PRODUCER_CONTRACT_INVALID"):
+        owner.complete_a03(wire, store=sidecars)
+    assert not owner._state_dir.exists()
+
+
 def test_r4_run_creative_production_opt_in_seam_and_no_reinference_replay(a03_r3_case, tmp_path, monkeypatch):
     from ai_commerce.creative import CreativeValidationError, run_creative_cycle, run_creative_production
     from ai_commerce.media import generation as mg
