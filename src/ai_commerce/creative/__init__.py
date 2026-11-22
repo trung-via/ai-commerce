@@ -40,7 +40,8 @@ from .v2 import (
     evaluate_benchmark_structure, observe_benchmark_run,
 )
 from .live import (
-    AIReasoningTask, CodexCliCapability, CodexCliCreativeClient, InvocationAuthorization,
+    AIReasoningTask, AntigravityCliCreativeClient, AntigravityCliPreflight,
+    CodexCliCapability, CodexCliCreativeClient, InvocationAuthorization,
     LiveCreativeReasoner, ModelConfiguration, ReasoningProviderRoute, StructuredCreativeClient,
     StructuredModelRequest, StructuredModelResponse, assess_brain_cdp_turn, codex_creative_argv,
     select_reasoning_provider, verified_model_transport, verified_reasoning_receipt,
@@ -55,6 +56,7 @@ __all__ += [
     "StructuredModelRequest", "StructuredModelResponse", "UsageObservation", "capture_intent", "reason_v2",
     "run_creative_stage",
     "CLIExecutionObservation", "CodexCliCapability", "CodexCliCreativeClient", "codex_creative_argv",
+    "AntigravityCliCreativeClient", "AntigravityCliPreflight",
     "AIReasoningTask", "ReasoningProviderRoute", "assess_brain_cdp_turn",
     "select_reasoning_provider", "verified_model_transport", "verified_reasoning_receipt",
     "A03CreativeCycleJob", "A03CreativeCycleResult", "CreativeCycleContext",

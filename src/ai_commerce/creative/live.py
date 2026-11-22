@@ -7,8 +7,9 @@ adapter performs no call; tests inject an explicitly labeled fake client.
 
 from __future__ import annotations
 
-import json
 import base64
+import json
+import os
 import re
 import subprocess
 import tempfile
@@ -18,7 +19,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Literal, Protocol
+from typing import Any, Callable, ClassVar, Literal, Protocol
 from uuid import uuid4
 
 from ai_commerce.core.provenance import canonical_bytes, sha256_bytes
@@ -63,9 +64,9 @@ _REASONING_OPERATIONS = frozenset({
     "EXPLORE", "CRITIQUE", "SELECT", "DEVELOP", "PRODUCE_PACKAGE", "REVISE_PACKAGE",
 })
 _CODEX_ROUTE = ReasoningProviderRoute("codex-cli", "codex-exec-jsonl", _REASONING_OPERATIONS)
+_AGY_SESSION_UNAVAILABLE = "AGY_AUTHENTICATED_CLI_SESSION_UNAVAILABLE"
 _AGY_ROUTE = ReasoningProviderRoute(
-    "antigravity-cli", "antigravity-cli-session", _REASONING_OPERATIONS,
-    "AGY_AUTHENTICATED_CLI_SESSION_UNAVAILABLE",
+    "antigravity-cli", "antigravity-cli-session", _REASONING_OPERATIONS, _AGY_SESSION_UNAVAILABLE,
 )
 _BRAIN_ROUTE = ReasoningProviderRoute(
     "chatgpt-brain-cdp", "wakehub-chrome-cdp-9444", _REASONING_OPERATIONS,
@@ -758,7 +759,7 @@ def _bounded_file(path: Path, limit: int = CLI_MAX_BYTES) -> bytes:
 
 
 def _binary_digest(path: Path) -> str:
-    # Native Codex binaries are larger than the message limit; never buffer one.
+    # Native CLI binaries are larger than the message limit; never buffer one.
     import hashlib
     result, size = hashlib.sha256(), 0
     with path.open("rb") as stream:
@@ -767,6 +768,97 @@ def _binary_digest(path: Path) -> str:
             _need(size <= 512 * CLI_MAX_BYTES)
             result.update(chunk)
     return result.hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class AntigravityCliPreflight:
+    """Read-only CLI observations for one task. This carries no turn evidence."""
+
+    task_sha256: str
+    status: Literal["HOLD", "BLOCK", "UNAVAILABLE"]
+    error_code: str
+    version: str | None = None
+    help_sha256: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AntigravityCliCreativeClient:
+    """Probe an operator-pinned AGY binary with an explicit A03 task grant.
+
+    AGY help advertises structured print output. The available interfaces lack
+    a read-only account/scope check and a native terminal record binding the
+    authenticated session, actual model and effort to the exact task. Keep this
+    client outside the authenticated receipt registry until those are proven.
+    """
+
+    executable: str
+    executable_sha256: str
+    capabilities: ClassVar[ProviderCapabilities] = ProviderCapabilities(_AGY_ROUTE.provider, ("concept",), True, True)
+    execution_mode: ClassVar[Literal["UNKNOWN"]] = "UNKNOWN"
+
+    def __post_init__(self) -> None:
+        require_text(self.executable, "AGY executable")
+        require_digest(self.executable_sha256)
+
+    def complete(self, request: StructuredModelRequest) -> StructuredModelResponse:
+        return StructuredModelResponse("ERROR", error_code="UNAUTHORIZED")
+
+    def preflight(self, task: AIReasoningTask) -> AntigravityCliPreflight:
+        """Run only version/help, with no prompt, schema, login or session inputs."""
+        if type(task) is not AIReasoningTask:
+            raise CreativeValidationError("AGY preflight requires an AIReasoningTask")
+        task = AIReasoningTask(task.job, task.authorization)
+        task_sha256 = task.digest
+        grant, config = task.authorization, task.job.configuration
+        if task.route != _AGY_ROUTE or config is None:
+            return AntigravityCliPreflight(task_sha256, "BLOCK", "CONFIGURATION_MISMATCH")
+        if not (grant.allow_network and grant.allow_spend and grant.authorization_ref):
+            return AntigravityCliPreflight(task_sha256, "BLOCK", "UNAUTHORIZED")
+        if not _known_native_identity(config.model):
+            return AntigravityCliPreflight(task_sha256, "HOLD", "MODEL_SELECTION_REQUIRED")
+        if not _known_native_identity(config.effort):
+            return AntigravityCliPreflight(task_sha256, "HOLD", "UNVERIFIED_MODEL_CONFIGURATION")
+
+        executable = Path(self.executable)
+        try:
+            name = "agy.exe" if os.name == "nt" else "agy"
+            _need(executable.is_absolute() and not executable.drive.startswith("\\\\")
+                  and executable.name.lower() == name, "AGY_CLI_EXECUTABLE_UNVERIFIED")
+
+            def verify_executable() -> None:
+                _need(executable.resolve(strict=True) == executable and executable.is_file(),
+                      "AGY_CLI_EXECUTABLE_UNVERIFIED")
+                _need(_binary_digest(executable) == self.executable_sha256, "AGY_CLI_EXECUTABLE_UNVERIFIED")
+
+            def probe(flag: str) -> bytes:
+                verify_executable()
+                result = _bounded_cli_process([str(executable), flag], input=b"",
+                                              cwd=str(executable.parent), timeout=15, max_bytes=CLI_MAX_BYTES)
+                _need(result.returncode == 0 and bool(result.stdout) != bool(result.stderr),
+                      "AGY_CLI_PROBE_UNAVAILABLE")
+                return result.stdout or result.stderr
+
+            version = probe("--version").decode("utf-8").strip()
+            _need(re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.+-]+)?", version) is not None,
+                  "AGY_CLI_PROBE_UNAVAILABLE")
+            help_output = probe("--help")
+            verify_executable()
+        except FileNotFoundError:
+            return AntigravityCliPreflight(task_sha256, "UNAVAILABLE", "AGY_CLI_UNAVAILABLE")
+        except _CLIStopped as exc:
+            if exc.code in ("CONFIGURATION_MISMATCH", "AGY_CLI_EXECUTABLE_UNVERIFIED"):
+                return AntigravityCliPreflight(task_sha256, "BLOCK", "AGY_CLI_EXECUTABLE_UNVERIFIED")
+            return AntigravityCliPreflight(task_sha256, "UNAVAILABLE", "AGY_CLI_PROBE_UNAVAILABLE")
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            return AntigravityCliPreflight(task_sha256, "UNAVAILABLE", "AGY_CLI_PROBE_UNAVAILABLE")
+
+        help_sha256 = sha256_bytes(help_output)
+        flags = dict(re.findall(rb"^[ \t]+(--[a-z][a-z-]*)[ \t]+([^\r\n]+)", help_output, re.MULTILINE))
+        if (not {b"--print", b"--model", b"--effort", b"--json-schema"} <= flags.keys()
+                or any(b"stream-json" not in flags.get(flag, b"") for flag in (b"--input-format", b"--output-format"))):
+            return AntigravityCliPreflight(task_sha256, "UNAVAILABLE", "AGY_CLI_CAPABILITY_UNAVAILABLE",
+                                          version, help_sha256)
+        return AntigravityCliPreflight(task_sha256, "HOLD", _AGY_SESSION_UNAVAILABLE, version, help_sha256)
 
 
 @dataclass(frozen=True, slots=True)

@@ -5,6 +5,7 @@ from dataclasses import FrozenInstanceError, replace
 from datetime import datetime
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import threading
@@ -17,7 +18,8 @@ from ai_commerce.creative import live as creative_live
 from ai_commerce.creative import v2 as creative_v2
 from ai_commerce.creative import (
     A03CreativeJob, A03CreativeStageResult, AIInferenceBinding, AIReasoningTask,
-    ActorDecision, ActorRef, CodexCliCapability, CodexCliCreativeClient,
+    ActorDecision, ActorRef, AntigravityCliCreativeClient, AntigravityCliPreflight,
+    CodexCliCapability, CodexCliCreativeClient,
     ConceptDraft, ConceptRecord, ConceptSelection, CreativeJobProvenance,
     CreativeIntent, CreativeSidecarStore, CreativeStore, CreativeValidationError,
     HumanSelectionEvent, IntentField, InvocationAuthorization, LiveCreativeReasoner,
@@ -1552,6 +1554,104 @@ def test_c1_explicit_model_and_effort_cannot_enable_unverified_provider(provider
     assert result.state == "ERROR"
     assert result.error_code == select_reasoning_provider(provider, "EXPLORE").unavailable_reason
     assert not client.calls and result.observation == ProviderObservation() and result.execution is None
+
+
+@pytest.fixture
+def agy_preflight_case(tmp_path):
+    executable = tmp_path.resolve() / ("agy.exe" if os.name == "nt" else "agy")
+    executable.write_bytes(b"test-only AGY probe binary")
+    client = AntigravityCliCreativeClient(str(executable), sha256_bytes(executable.read_bytes()))
+    config = ModelConfiguration("antigravity-cli", "explicit-model", "explicit-effort")
+    cycle = cycle_job(seed_options={"purpose": "PRODUCTION", "configuration": config})
+    request = creative_v2._cycle_request(cycle, "explore", "EXPLORE")
+    job = creative_v2._cycle_stage_job(cycle, request)
+    return client, cycle, AIReasoningTask(job, InvocationAuthorization(True, True, "fixture:agy-grant"))
+
+
+AGY_HELP = b"""Usage of agy:
+  --print           Run a single prompt
+  --model           Model for the session
+  --effort          Reasoning effort
+  --json-schema     Enforce structured output
+  --input-format    text, stream-json
+  --output-format   text, json, stream-json
+"""
+
+
+def test_agy_read_only_preflight_is_task_bound_and_cannot_admit_r2(agy_preflight_case, tmp_path, monkeypatch):
+    client, cycle, task = agy_preflight_case
+    calls = []
+
+    def probe(argv, *, input, cwd, timeout, max_bytes):
+        assert argv[0] == client.executable and input == b"" and cwd == str(Path(client.executable).parent)
+        assert 0 < timeout <= 15 and max_bytes == creative_live.CLI_MAX_BYTES
+        calls.append(tuple(argv[1:]))
+        return (subprocess.CompletedProcess(argv, 0, b"2.41.0-rc.2\r\n", b"") if argv[1:] == ["--version"]
+                else subprocess.CompletedProcess(argv, 0, b"", AGY_HELP))
+
+    monkeypatch.setattr(creative_live, "_bounded_cli_process", probe)
+    config, request = task.job.configuration, task.job.request
+    reasoner = LiveCreativeReasoner(config, client, authorization=task.authorization)
+    assert client.complete(StructuredModelRequest(config, request)).error_code == "UNAUTHORIZED"
+    result = run_creative_cycle(cycle, tmp_path / "store", reasoner, authorization=task.authorization)
+    hold = "AGY_AUTHENTICATED_CLI_SESSION_UNAVAILABLE"
+    assert (result.status, result.failure, result.steps) == ("HOLD", hold, ())
+    assert not calls
+
+    assert client.preflight(task) == AntigravityCliPreflight(task.digest, "HOLD", hold, "2.41.0-rc.2",
+                                                           sha256_bytes(AGY_HELP))
+    assert calls == [("--version",), ("--help",)]
+    assert run_creative_cycle(cycle, tmp_path / "store", reasoner, authorization=task.authorization) == result
+    assert reason_v2(request, reasoner).error_code == hold
+    assert calls == [("--version",), ("--help",)]
+
+
+def test_agy_preflight_blocks_wrong_route_grants_selection_and_changed_binary(agy_preflight_case, monkeypatch):
+    client, _, task = agy_preflight_case
+    monkeypatch.setattr(creative_live, "_bounded_cli_process", lambda *a, **kw: pytest.fail("AGY process launched"))
+    for grant in (InvocationAuthorization(True, False, "fixture:network-only"),
+                  InvocationAuthorization(False, True, "fixture:spend-only"), InvocationAuthorization()):
+        ungranted = replace(task, authorization=grant)
+        assert client.preflight(ungranted) == AntigravityCliPreflight(ungranted.digest, "BLOCK", "UNAUTHORIZED")
+    for config, status, code in (
+        (ModelConfiguration("chatgpt-brain-cdp", "explicit-model", "explicit-effort"), "BLOCK", "CONFIGURATION_MISMATCH"),
+        (ModelConfiguration("codex-cli", "explicit-model", "explicit-effort"), "BLOCK", "CONFIGURATION_MISMATCH"),
+        (ModelConfiguration("antigravity-cli"), "HOLD", "MODEL_SELECTION_REQUIRED"),
+        (ModelConfiguration("antigravity-cli", "explicit-model"), "HOLD", "UNVERIFIED_MODEL_CONFIGURATION"),
+    ):
+        changed = replace(task, job=replace(task.job, configuration=config))
+        assert client.preflight(changed) == AntigravityCliPreflight(changed.digest, status, code)
+
+    path = Path(client.executable)
+    path.write_bytes(b"replaced after pinning")
+    assert client.preflight(task) == AntigravityCliPreflight(task.digest, "BLOCK", "AGY_CLI_EXECUTABLE_UNVERIFIED")
+    path.unlink()
+    assert client.preflight(task) == AntigravityCliPreflight(task.digest, "UNAVAILABLE", "AGY_CLI_UNAVAILABLE")
+
+
+@pytest.mark.parametrize(("failure", "code"), [
+    ("wrong-version-output", "AGY_CLI_PROBE_UNAVAILABLE"),
+    ("unsupported-schema", "AGY_CLI_CAPABILITY_UNAVAILABLE"),
+    ("timeout", "AGY_CLI_PROBE_UNAVAILABLE"),
+])
+def test_agy_preflight_stops_on_unverified_native_capability(agy_preflight_case, monkeypatch, failure, code):
+    client, _, task = agy_preflight_case
+    calls = []
+
+    def probe(argv, **kwargs):
+        calls.append(argv[1])
+        if argv[1:] == ["--version"]:
+            version = b'{"status":"SUCCESS","authenticated":true}' if failure == "wrong-version-output" else b"3.7.5"
+            return subprocess.CompletedProcess(argv, 0, version, b"")
+        assert argv[1:] == ["--help"]
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        return subprocess.CompletedProcess(argv, 0, AGY_HELP.replace(b"--json-schema", b"--other-flag"), b"")
+
+    monkeypatch.setattr(creative_live, "_bounded_cli_process", probe)
+    result = client.preflight(task)
+    assert (result.task_sha256, result.status, result.error_code) == (task.digest, "UNAVAILABLE", code)
+    assert calls == (["--version"] if failure == "wrong-version-output" else ["--version", "--help"])
 
 
 def test_c1_brain_cdp_claims_bind_task_and_exact_origin_without_permitting_send():
