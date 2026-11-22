@@ -1,6 +1,7 @@
 """A03 v1.1 contract tests. All structured-client responses are explicit fakes."""
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError, asdict, replace
 from datetime import datetime
 import io
@@ -1654,36 +1655,63 @@ def test_agy_preflight_stops_on_unverified_native_capability(agy_preflight_case,
     assert calls == (["--version"] if failure == "wrong-version-output" else ["--version", "--help"])
 
 
-def agy_terminal_fixture(turn):
+AGY_CONVERSATION_ID = "7360adbd-24de-49de-b3dc-56b844b96da3"
+AGY_USAGE = {"input_tokens": 13, "output_tokens": 3, "thinking_tokens": 2,
+             "cache_read_tokens": 8, "total_tokens": 16}
+
+
+def agy_terminal_fixture(turn, *, streamed_prompt=False):
+    # Match the headless reference's single-prompt stream and first stdin
+    # turn, with the documented --json-schema fields on the result.
     job = turn.task.job
     output = CycleFakeClient().complete(StructuredModelRequest(job.configuration, job.request))
     envelope = {"task_sha256": turn.task.digest, "stream_nonce": turn.stream_nonce,
                 "output": json.loads(output.output_json)}
+
+    def step(index, step_type, *, state="DONE", **metadata):
+        return {"event": "step_update", "step_update": {"conversation_id": AGY_CONVERSATION_ID,
+                "step_index": index, "step_type": step_type, "state": state, **metadata}}
+
+    response = json.dumps(envelope) + "\n"
     events = [
-        {"event": "init", "init": {"authenticated": True, "account": "private-account",
-                                 "session": "private-session"}},
-        {"event": "step_update", "step_update": {
-            "step_index": 0, "state": "ACTIVE", "step_type": "agent_response",
-            "text_delta": "private-step-text",
+        {"event": "init", "conversation_id": AGY_CONVERSATION_ID, "init": {
+            "cwd": "/fixture/project", "tools": ["ask_permission", "run_command", "write_to_file"],
+            "permission_mode": "request-review", "json_schema": turn.output_schema,
         }},
-        {"event": "step_update", "step_update": {
-            "step_index": 0, "state": "DONE", "step_type": "agent_response", "duration_seconds": 0.1,
-        }},
-        {"event": "result", "result": {"status": "SUCCESS", "response": json.dumps(envelope)}},
+        step(0, "user_input"),
     ]
+    if streamed_prompt:
+        events.extend([
+            step(2, "agent_response", state="ACTIVE", text_delta=response[:-1]),
+            step(2, "agent_response", text_delta="\n", duration_seconds=0.1, usage=AGY_USAGE),
+        ])
+    else:
+        events.extend([
+            step(3, "agent_response", text_delta=response, duration_seconds=0.1, usage=AGY_USAGE),
+            step(4, "checkpoint", duration_seconds=0.01, usage=AGY_USAGE),
+        ])
+    events.append({"event": "result", "result": {
+        "conversation_id": AGY_CONVERSATION_ID, "status": "SUCCESS", "response": response,
+        "num_turns": 1, "duration_seconds": 0.11, "usage": dict(AGY_USAGE),
+        "structured_output": envelope, "json_schema": turn.output_schema,
+    }})
     return events, envelope
 
 
-def agy_stdout(events):
-    return b"".join(canonical_bytes(event) + b"\r\n" for event in events)
+def agy_stdout(events, newline=b"\r\n"):
+    return b"".join(canonical_bytes(event) + newline for event in events)
 
 
-def test_agy_structural_success_is_private_task_bound_hold_and_one_shot(agy_preflight_case, monkeypatch):
+@pytest.mark.parametrize(("streamed_prompt", "newline"), [(False, b"\r\n"), (True, b"\n")])
+def test_agy_structural_success_is_private_task_bound_hold_and_one_shot(
+    agy_preflight_case, monkeypatch, streamed_prompt, newline,
+):
     client, _, task = agy_preflight_case
     monkeypatch.setattr(creative_live, "_bounded_cli_process", lambda *a, **kw: pytest.fail("AGY process launched"))
     turn = client.prepare_turn(task)
-    events, envelope = agy_terminal_fixture(turn)
-    raw = agy_stdout(events)
+    events, envelope = agy_terminal_fixture(turn, streamed_prompt=streamed_prompt)
+    events[0]["init"].update(authenticated=True, account="private-account", session="private-session")
+    raw = agy_stdout(events, newline)
     packet = json.loads(turn.canonical_payload)
     assert packet["request"] == task.job.request.to_dict()
     assert (packet["task_sha256"], packet["stream_nonce"]) == (task.digest, turn.stream_nonce)
@@ -1705,8 +1733,8 @@ def test_agy_structural_success_is_private_task_bound_hold_and_one_shot(agy_pref
     assert receipt.stdout_sha256 == sha256_bytes(raw) and receipt.stream_nonce == envelope["stream_nonce"]
     public = json.dumps(asdict(receipt))
     assert all(value not in public for value in (
-        TEXT, task.authorization.authorization_ref, "private-account", "private-session", "private-step-text",
-        envelope["output"]["drafts"][0]["title"],
+        TEXT, task.authorization.authorization_ref, "private-account", "private-session", AGY_CONVERSATION_ID,
+        "/fixture/project", envelope["output"]["drafts"][0]["title"],
     ))
     with pytest.raises(FrozenInstanceError):
         receipt.status = "OK"
@@ -1714,6 +1742,77 @@ def test_agy_structural_success_is_private_task_bound_hold_and_one_shot(agy_pref
     fresh = client.prepare_turn(task)
     assert fresh.stream_nonce != turn.stream_nonce
     assert fresh.check_terminal(raw, returncode=0, capture_complete=True).error_code == "AGY_TERMINAL_BINDING_MISMATCH"
+
+
+def test_agy_correlates_nested_ids_when_init_omits_id(agy_preflight_case):
+    client, _, task = agy_preflight_case
+    turn = client.prepare_turn(task)
+    events, _ = agy_terminal_fixture(turn)
+    del events[0]["conversation_id"]
+    del events[-1]["result"]["usage"]
+    receipt = turn.check_terminal(agy_stdout(events), returncode=0, capture_complete=True)
+    assert (receipt.status, receipt.terminal_status) == ("HOLD", "SUCCESS")
+
+
+def test_agy_rejects_two_results_in_one_capture(agy_preflight_case):
+    client, _, task = agy_preflight_case
+    turn = client.prepare_turn(task)
+    events, _ = agy_terminal_fixture(turn, streamed_prompt=True)
+    second_step = {**events[1]["step_update"], "step_index": 3}
+    second_result = {**events[-1]["result"], "num_turns": 2}
+    events.extend([{"event": "step_update", "step_update": second_step},
+                   {"event": "result", "result": second_result}])
+    receipt = turn.check_terminal(agy_stdout(events), returncode=0, capture_complete=True)
+    assert (receipt.status, receipt.terminal_status, receipt.error_code) == ("HOLD", "UNKNOWN", "AGY_STREAM_INVALID")
+
+
+@pytest.mark.parametrize(("index", "where", "value"), [
+    (0, None, "different-init-id"),
+    (0, None, "   "),
+    (0, None, False),
+    (0, "init", "conflicting-nested-init-id"),
+    (1, "step_update", "different-step-id"),
+    (1, "step_update", None),
+    (-1, "result", "different-result-id"),
+    (-1, "result", "bad\nresult-id"),
+    (-1, "result", None),
+])
+def test_agy_rejects_conflicting_or_malformed_conversation_ids(agy_preflight_case, index, where, value):
+    client, _, task = agy_preflight_case
+    turn = client.prepare_turn(task)
+    events, _ = agy_terminal_fixture(turn)
+    location = events[index][where] if where else events[index]
+    if value is None:
+        del location["conversation_id"]
+    else:
+        location["conversation_id"] = value
+    receipt = turn.check_terminal(agy_stdout(events), returncode=0, capture_complete=True)
+    assert (receipt.status, receipt.terminal_status, receipt.error_code) == ("HOLD", "UNKNOWN", "AGY_STREAM_INVALID")
+
+
+def test_agy_concurrent_capture_can_only_be_claimed_once(agy_preflight_case, monkeypatch):
+    client, _, task = agy_preflight_case
+    turn = client.prepare_turn(task)
+    events, _ = agy_terminal_fixture(turn)
+    raw = agy_stdout(events)
+    parsing, release = threading.Event(), threading.Event()
+    parse = creative_live._agy_terminal
+
+    def wait_for_second_claim(*args):
+        parsing.set()
+        assert release.wait(timeout=5)
+        return parse(*args)
+
+    monkeypatch.setattr(creative_live, "_agy_terminal", wait_for_second_claim)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        first = executor.submit(turn.check_terminal, raw, returncode=0, capture_complete=True)
+        try:
+            assert parsing.wait(timeout=5)
+            second = turn.check_terminal(raw, returncode=0, capture_complete=True)
+            assert (second.status, second.terminal_status, second.error_code) == ("HOLD", "UNKNOWN", "AGY_STREAM_REPLAY")
+        finally:
+            release.set()
+        assert first.result(timeout=5).terminal_status == "SUCCESS"
 
 
 @pytest.mark.parametrize("changed_field", ["attempt", "source", "model", "effort"])
@@ -1730,7 +1829,6 @@ def test_agy_fresh_challenge_rejects_rebound_task(agy_preflight_case, changed_fi
     events, envelope = agy_terminal_fixture(turn)
     assert turn.task.digest != task.digest
     envelope["task_sha256"] = task.digest
-    events[-1]["result"]["response"] = json.dumps(envelope)
     receipt = turn.check_terminal(agy_stdout(events), returncode=0, capture_complete=True)
     assert (receipt.status, receipt.terminal_status, receipt.error_code) == (
         "HOLD", "UNKNOWN", "AGY_TERMINAL_BINDING_MISMATCH",
@@ -1770,8 +1868,11 @@ def test_agy_rejects_invalid_event_order_and_cardinality(agy_preflight_case, cha
 @pytest.mark.parametrize(("failure", "expected"), [
     ("partial-line", "AGY_STREAM_INCOMPLETE"),
     ("capture-incomplete", "AGY_STREAM_INCOMPLETE"),
+    ("unknown-exit", "AGY_STREAM_INCOMPLETE"),
     ("timeout", "AGY_STREAM_TIMEOUT"),
     ("exit", "AGY_STREAM_INVALID"),
+    ("blank-line", "AGY_STREAM_INVALID"),
+    ("bare-cr", "AGY_STREAM_INVALID"),
     ("duplicate-key", "AGY_STREAM_INVALID"),
     ("invalid-utf8", "AGY_STREAM_INVALID"),
     ("stream-limit", "AGY_STREAM_LIMIT_EXCEEDED"),
@@ -1779,9 +1880,16 @@ def test_agy_rejects_invalid_event_order_and_cardinality(agy_preflight_case, cha
     ("event-limit", "AGY_STREAM_LIMIT_EXCEEDED"),
     ("error", "AGY_TERMINAL_ERROR"),
     ("unknown-status", "AGY_STREAM_INVALID"),
+    ("zero-turns", "AGY_STREAM_INVALID"),
+    ("invalid-usage", "AGY_STREAM_INVALID"),
     ("tool-error", "AGY_STREAM_TOOL_ERROR"),
-    ("missing-envelope", "AGY_TERMINAL_SCHEMA_INVALID"),
+    ("tool-permission", "AGY_STREAM_TOOL_ERROR"),
+    ("text-only-envelope", "AGY_TERMINAL_SCHEMA_INVALID"),
+    ("bogus-envelope", "AGY_TERMINAL_SCHEMA_INVALID"),
     ("extra-envelope-field", "AGY_TERMINAL_SCHEMA_INVALID"),
+    ("missing-schema", "AGY_TERMINAL_SCHEMA_INVALID"),
+    ("wrong-init-schema", "AGY_TERMINAL_SCHEMA_INVALID"),
+    ("wrong-schema", "AGY_TERMINAL_SCHEMA_INVALID"),
     ("invalid-output", "AGY_TERMINAL_SCHEMA_INVALID"),
 ])
 def test_agy_rejects_unresolved_or_invalid_terminal_evidence(agy_preflight_case, monkeypatch, failure, expected):
@@ -1790,35 +1898,55 @@ def test_agy_rejects_unresolved_or_invalid_terminal_evidence(agy_preflight_case,
     events, envelope = agy_terminal_fixture(turn)
     result = events[-1]["result"]
     if failure in ("error", "timeout"):
-        result.update(status="ERROR", response="private-provider-error: quota")
+        result.update(status="ERROR", response="", error="private-provider-error: quota", num_turns=0)
+        del result["structured_output"]
+        del result["json_schema"]
     elif failure == "unknown-status":
         result["status"] = "FAILED"
+    elif failure == "zero-turns":
+        result["num_turns"] = 0
+    elif failure == "invalid-usage":
+        result["usage"]["input_tokens"] = True
     elif failure == "tool-error":
-        events[2]["step_update"].update(step_type="tool", tool_info={"error": "private-tool-error"})
-    elif failure == "missing-envelope":
-        result.pop("response")
+        events[2]["step_update"].update(step_type="tool", tool_name="run_command", tool_info={
+            "name": "run_command", "error": {"type": "PERMISSION_DENIED", "message": "private-tool-error"},
+        })
+    elif failure == "tool-permission":
+        events[2]["step_update"].update(step_type="tool", tool_name="ask_permission")
+    elif failure == "text-only-envelope":
+        del result["structured_output"]
+    elif failure == "bogus-envelope":
+        result["structured_output"] = result["response"]
     elif failure == "extra-envelope-field":
-        result["response"] = json.dumps({**envelope, "authenticated": True})
+        envelope["authenticated"] = True
+    elif failure == "missing-schema":
+        del result["json_schema"]
+    elif failure == "wrong-init-schema":
+        events[0]["init"]["json_schema"]["additionalProperties"] = True
+    elif failure == "wrong-schema":
+        result["json_schema"]["additionalProperties"] = True
     elif failure == "invalid-output":
         envelope["output"]["drafts"][0]["assumptions"] = [False]
-        result["response"] = json.dumps(envelope)
     elif failure == "event-limit":
         monkeypatch.setattr(creative_live, "_AGY_MAX_EVENTS", len(events) - 1)
     raw = agy_stdout(events)
     raw = {
         "partial-line": lambda: raw[:-1],
+        "blank-line": lambda: b"\r\n" + raw,
+        "bare-cr": lambda: raw.replace(b'{"conversation_id"', b'{\r"conversation_id"', 1),
         "duplicate-key": lambda: raw.replace(b'"event":"init"', b'"event":"init","event":"init"'),
         "invalid-utf8": lambda: b"\xff" + raw,
         "stream-limit": lambda: b" " * (creative_live.CLI_MAX_BYTES + 1),
         "line-limit": lambda: b" " * creative_live._AGY_MAX_LINE_BYTES + b"\n",
     }.get(failure, lambda: raw)()
-    receipt = turn.check_terminal(raw, returncode=1 if failure in ("error", "exit") else 0,
+    returncode = {"error": 1, "exit": 1, "unknown-exit": None}.get(failure, 0)
+    receipt = turn.check_terminal(raw, returncode=returncode,
                                   capture_complete=failure != "capture-incomplete", timed_out=failure == "timeout")
     status = "ERROR" if failure == "error" else "UNKNOWN"
     assert (receipt.status, receipt.effect, receipt.terminal_status, receipt.error_code) == (
         "HOLD", "UNKNOWN_EFFECT", status, expected,
     )
-    assert "quota" not in repr(receipt)
+    assert "quota" not in repr(receipt) and "private-tool-error" not in repr(receipt)
     assert turn.check_terminal(raw, returncode=0, capture_complete=True).error_code == "AGY_STREAM_REPLAY"
 
 

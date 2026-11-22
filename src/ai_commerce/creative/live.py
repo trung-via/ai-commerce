@@ -788,11 +788,23 @@ def _agy_task_requirement(task: AIReasoningTask) -> tuple[Literal["BLOCK", "HOLD
 
 _AGY_MAX_EVENTS = 12000
 _AGY_MAX_LINE_BYTES = 512 * 1024
+_AGY_USAGE_FIELDS = frozenset({
+    "input_tokens", "output_tokens", "thinking_tokens", "cache_read_tokens", "total_tokens",
+})
 
 
-def _agy_terminal(stdout: bytes) -> dict[str, Any]:
-    """Read the EF01 stream event format from a bounded, closed stdout capture."""
+def _agy_conversation_id(value: object, expected: str | None) -> str:
+    conversation_id = require_text(value, "AGY conversation_id")
+    _need(conversation_id.isprintable() and not any(char.isspace() for char in conversation_id)
+          and expected in (None, conversation_id), "AGY_STREAM_INVALID")
+    return conversation_id
+
+
+def _agy_terminal(stdout: bytes, schema_json: bytes) -> tuple[dict[str, Any], bool]:
+    """Read one turn from a bounded, closed AGY stream-json stdout capture."""
     seen_init = False
+    init_schema_matches = True
+    conversation_id = None
     terminal = None
     done: set[int] = set()
     tool_error = False
@@ -800,29 +812,41 @@ def _agy_terminal(stdout: bytes) -> dict[str, Any]:
         _need(count <= _AGY_MAX_EVENTS and len(raw) <= _AGY_MAX_LINE_BYTES, "AGY_STREAM_LIMIT_EXCEEDED")
         _need(raw.endswith(b"\n"), "AGY_STREAM_INCOMPLETE")
         _need(terminal is None, "AGY_STREAM_INVALID")
-        event = read_json(raw.decode("utf-8"))
+        line = raw[:-1].removesuffix(b"\r")
+        _need(b"\r" not in line, "AGY_STREAM_INVALID")
+        event = read_json(line.decode("utf-8"))
         _need(isinstance(event, dict), "AGY_STREAM_INVALID")
         kind = event.get("event")
-        _need(kind in ("init", "step_update", "result") and event.keys() == {"event", kind}
-              and isinstance(event[kind], dict), "AGY_STREAM_INVALID")
+        _need(kind in ("init", "step_update", "result") and isinstance(event.get(kind), dict),
+              "AGY_STREAM_INVALID")
         payload = event[kind]
         if kind == "init":
-            _need(count == 1, "AGY_STREAM_INVALID")
+            _need(count == 1 and event.keys() <= {"event", "init", "conversation_id"}, "AGY_STREAM_INVALID")
+            if "conversation_id" in event:
+                conversation_id = _agy_conversation_id(event["conversation_id"], conversation_id)
+            if "conversation_id" in payload:
+                conversation_id = _agy_conversation_id(payload["conversation_id"], conversation_id)
+            if "json_schema" in payload:
+                reported_schema = payload["json_schema"]
+                init_schema_matches = (
+                    isinstance(reported_schema, dict) and canonical_bytes(reported_schema) == schema_json
+                )
             seen_init = True
             continue
-        _need(seen_init, "AGY_STREAM_INVALID")
+        _need(seen_init and event.keys() == {"event", kind}, "AGY_STREAM_INVALID")
+        conversation_id = _agy_conversation_id(payload.get("conversation_id"), conversation_id)
         if kind == "result":
-            _need(payload.get("status") in ("SUCCESS", "ERROR"), "AGY_STREAM_INVALID")
             terminal = payload
             continue
         index, state, step_type = payload.get("step_index"), payload.get("state"), payload.get("step_type")
         _need(type(index) is int and 0 <= index <= 1000000 and index not in done
-              and state in ("ACTIVE", "DONE") and isinstance(step_type, str), "AGY_STREAM_INVALID")
+              and state in ("ACTIVE", "DONE") and isinstance(step_type, str) and step_type.strip(),
+              "AGY_STREAM_INVALID")
         if step_type == "tool":
             info = payload.get("tool_info")
             _need(info is None or isinstance(info, dict), "AGY_STREAM_INVALID")
             tool_error |= payload.get("tool_name") == "ask_permission" or (
-                info is not None and info.get("error") is not None)
+                info is not None and (info.get("name") == "ask_permission" or info.get("error") is not None))
         if state == "DONE":
             done.add(index)
             duration = payload.get("duration_seconds")
@@ -830,7 +854,21 @@ def _agy_terminal(stdout: bytes) -> dict[str, Any]:
                   "AGY_STREAM_INVALID")
     _need(terminal is not None, "AGY_STREAM_INCOMPLETE")
     _need(not tool_error, "AGY_STREAM_TOOL_ERROR")
-    return terminal
+    status, turns = terminal.get("status"), terminal.get("num_turns")
+    _need(status in ("SUCCESS", "ERROR") and isinstance(terminal.get("response"), str)
+          and type(turns) is int and turns >= (1 if status == "SUCCESS" else 0), "AGY_STREAM_INVALID")
+    if status == "ERROR":
+        require_text(terminal.get("error"), "AGY terminal error")
+    else:
+        _need("error" not in terminal, "AGY_STREAM_INVALID")
+    if "duration_seconds" in terminal:
+        duration = terminal["duration_seconds"]
+        _need(type(duration) in (int, float) and 0 <= duration < float("inf"), "AGY_STREAM_INVALID")
+    if "usage" in terminal:
+        usage = terminal["usage"]
+        _need(isinstance(usage, dict) and all(type(usage[key]) is int and usage[key] >= 0
+              for key in _AGY_USAGE_FIELDS & usage.keys()), "AGY_STREAM_INVALID")
+    return terminal, init_schema_matches
 
 
 @dataclass(frozen=True, slots=True)
@@ -856,10 +894,10 @@ class AntigravityCliTerminalReceipt:
 class AntigravityCliTurn:
     """One local capture challenge for the exact task and requested configuration.
 
-    The nonce is echoed inside the A03 output schema carried in AGY's response
-    field. A matching echo only correlates the bytes structurally. The native
-    owner still needs to attest process custody, account/session, actual
-    model/effort and durable replay protection before MODEL admission.
+    The nonce is echoed in the schema-backed structured_output field of AGY's
+    terminal result. A matching echo only correlates the bytes structurally.
+    The native owner still needs to attest process custody, account/session,
+    actual model/effort and durable replay protection before MODEL admission.
     """
 
     task: AIReasoningTask
@@ -906,6 +944,7 @@ class AntigravityCliTurn:
     ) -> AntigravityCliTerminalReceipt:
         """Check one supplied capture without launching, storing or trusting a process."""
         schema = self.output_schema
+        schema_json = canonical_bytes(schema)
         stdout_sha256 = None
 
         def receipt(
@@ -915,7 +954,7 @@ class AntigravityCliTurn:
             return AntigravityCliTerminalReceipt(
                 self.task_sha256, job.digest, job.source_brief_digest, job.attempt,
                 sha256_bytes(canonical_bytes(job.configuration.to_dict())), self.pinned_executable_sha256,
-                self.stream_nonce, sha256_bytes(canonical_bytes(schema)), stdout_sha256, status, code,
+                self.stream_nonce, sha256_bytes(schema_json), stdout_sha256, status, code,
             )
 
         # Claim once even if the capture timed out or could not be verified.
@@ -931,20 +970,26 @@ class AntigravityCliTurn:
             return receipt("AGY_STREAM_LIMIT_EXCEEDED")
         stdout_sha256 = sha256_bytes(stdout)
         try:
-            terminal = _agy_terminal(stdout)
+            terminal, init_schema_matches = _agy_terminal(stdout, schema_json)
         except _CLIStopped as exc:
             return receipt(exc.code)
-        except (CreativeValidationError, UnicodeError):
+        except (ValueError, RecursionError):
             return receipt("AGY_STREAM_INVALID")
         if terminal["status"] == "ERROR":
+            if not init_schema_matches:
+                return receipt("AGY_TERMINAL_SCHEMA_INVALID")
             return receipt("AGY_TERMINAL_ERROR", "ERROR")
         if returncode != 0:
             return receipt("AGY_STREAM_INVALID")
         try:
-            raw = require_text(terminal.get("response"), "AGY response")
-            envelope = exact_fields(read_json(raw), {"task_sha256", "stream_nonce", "output"})
+            envelope = exact_fields(terminal.get("structured_output"), {"task_sha256", "stream_nonce", "output"})
+            # The schemas also carry the nonce, so a replay can fail both checks.
             if (envelope["task_sha256"], envelope["stream_nonce"]) != (self.task_sha256, self.stream_nonce):
                 return receipt("AGY_TERMINAL_BINDING_MISMATCH")
+            reported_schema = terminal.get("json_schema")
+            if (not init_schema_matches or not isinstance(reported_schema, dict)
+                    or canonical_bytes(reported_schema) != schema_json):
+                return receipt("AGY_TERMINAL_SCHEMA_INVALID")
             if not Draft202012Validator(schema).is_valid(envelope):
                 return receipt("AGY_TERMINAL_SCHEMA_INVALID")
             parse_creative_output(self.task.job.request, canonical_bytes(envelope["output"]).decode("utf-8"))
