@@ -8,12 +8,15 @@ supply its own identity facts, authority factory, executor, command or URL.
 """
 from __future__ import annotations
 
+import argparse
 import ctypes
 from ctypes import wintypes as wt
 from dataclasses import asdict, dataclass
+import json
 import os
 from pathlib import Path
 import re
+import sys
 import threading
 import time
 from uuid import UUID, uuid4
@@ -643,4 +646,126 @@ class G3PartialStatusEvidence:
             "origin_attested": False,
             "missing_owners": list(self.missing_owners),
         }
+
+
+def sign_broker_challenge(handle: int, challenge: observer.Challenge, *,
+                          deadline: observer._StatusDeadline | None = None,
+                          clock=time.time) -> bytes:
+    """Service-only broker challenge signer; never shares keys with observer/operator.
+
+    Re-authenticates kernel pipe endpoints, Session 0 service primary token SID,
+    live SCM process, image hashes, protected DACLs, ServiceCustody on the
+    enrolled private key, and the five-second challenge nonce before signing.
+    Returns only the short-lived canonical signed challenge payload.
+    """
+    auth.windows_only()
+    if type(handle) is not int or handle <= 0 or type(challenge) is not observer.Challenge:
+        deny()
+    if challenge.request_sha256 is None:
+        deny()
+    if deadline is not None and type(deadline) is not observer._StatusDeadline:
+        deny()
+    anchor, config, server, client, source, target = _context(handle)
+    current = broker.read_process_identity(os.getpid())
+    if current != server or server.user_sid != broker.service_sid() or server.session_id != 0:
+        deny()
+    if ((challenge.source, challenge.generation, challenge.journal_id, challenge.server,
+            challenge.client, challenge.target, challenge.logon_id)
+            != (source, config["generation"], config["journal_id"], server, client, target,
+                config["logon_id"])):
+        deny()
+    now = clock()
+    challenge.fresh(now)
+    remaining = challenge.expires_at - now
+    if deadline is not None:
+        remaining = min(remaining, deadline.check())
+    if not 0 < remaining <= 5.0:
+        deny()
+    key_path = broker.ServiceCustody().check(anchor["private_key_path"])
+    verifier_path = WindowsPathCustody().check(anchor["authority"]["verifier"]["path"])
+    signers_path = WindowsPathCustody().check(config["broker_signers"]["path"])
+    body = challenge.body()
+    signed = broker.sign_with_enrolled_key(
+        auth.signing_bytes(body),
+        key_path=key_path,
+        verifier_path=verifier_path,
+        signers_path=signers_path,
+        identity=observer.BROKER_IDENTITY,
+        namespace=observer.CHALLENGE_NAMESPACE,
+        expected_body=body,
+        timeout=remaining,
+    )
+    # Re-authenticate pipe/SCM/pins and freshness after signing.
+    after_anchor, after_config, after_server, after_client, after_source, after_target = _context(handle)
+    if (auth._digest(canonical([after_anchor, after_config])) != auth._digest(canonical([anchor, config]))
+            or (after_server, after_client, after_source, after_target) != (server, client, source, target)):
+        deny()
+    challenge.fresh(clock())
+    if deadline is not None:
+        deadline.check()
+    return signed
+
+
+class BrokerStatusOwner:
+    """Concrete Windows-native service-side STATUS owner on a connected HANDLE.
+
+    Wires ConnectedStatusIO and service-only broker challenge signing into one
+    single-shot, bounded five-second handoff. Never installs a service, opens a
+    listener, retries an UNKNOWN reservation, or touches interactive GUI.
+    """
+    def __init__(self, *, clock=time.time, monotonic=time.monotonic):
+        self._io = ConnectedStatusIO(clock=clock, monotonic=monotonic)
+        self._lock = threading.Lock()
+        self._used = False
+
+    def execute(self, handle: int, signed_request: bytes) -> op.PublicReceipt:
+        if not self._lock.acquire(blocking=False):
+            return op.PublicReceipt(op.Operation.STATUS, op.Decision.HOLD, op.Reason.DUPLICATE)
+        try:
+            if self._used:
+                return op.PublicReceipt(op.Operation.STATUS, op.Decision.HOLD, op.Reason.DUPLICATE)
+            self._used = True
+            reserved = False
+            try:
+                challenge = self._io.begin(handle, signed_request)
+                reserved = True
+                signed_challenge = sign_broker_challenge(
+                    handle,
+                    challenge,
+                    deadline=self._io._exchange._deadline,
+                    clock=self._io._exchange.clock,
+                )
+                return self._io.exchange(signed_challenge)
+            except Exception:
+                if reserved:
+                    self._io.abandon()
+                    return _unknown()
+                return op.PublicReceipt(op.Operation.STATUS, op.Decision.HOLD, op.Reason.AUTHORITY_REQUIRED)
+        finally:
+            self._lock.release()
+
+    def abandon(self) -> op.PublicReceipt:
+        with self._lock:
+            self._used = True
+            return self._io.abandon()
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Windows-callable fail-closed service host CLI entrypoint."""
+    parser = argparse.ArgumentParser(prog="python -m ai_commerce.wakehub.g3_service_host")
+    parser.add_argument("--mode", choices=("preflight", "scm"), default="preflight")
+    args = parser.parse_args(argv)
+    if args.mode == "scm":
+        try:
+            staged_scm_entrypoint()
+            return 0
+        except Exception:
+            sys.stdout.write(json.dumps(HostOpsStatusPreflightReport().to_sanitized_dict(), sort_keys=True) + "\n")
+            return 2
+    sys.stdout.write(json.dumps(HostOpsStatusPreflightReport().to_sanitized_dict(), sort_keys=True) + "\n")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
 

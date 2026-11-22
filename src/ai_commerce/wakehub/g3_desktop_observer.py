@@ -6,14 +6,19 @@ The service verifies the signed response against its OWN pending challenge.
 """
 from __future__ import annotations
 
+import argparse
+import base64
 import ctypes
 from ctypes import wintypes as wt
 from dataclasses import asdict, dataclass
 from enum import Enum
+import json
 import math
+import ntpath
 import os
 from pathlib import Path
 import re
+import sys
 import threading
 import time
 from uuid import UUID
@@ -22,13 +27,15 @@ from ai_commerce.wakehub import native_authority as auth
 from ai_commerce.wakehub import native_broker as broker
 from ai_commerce.wakehub import native_inventory as inv
 from ai_commerce.wakehub import private_operator as op
-from ai_commerce.wakehub.g3_enrollment import TASK_PARENT, STATUS_FRAME_BODY_LIMIT
-from ai_commerce.wakehub.native_journal import canonical, decode, deny, shape, WindowsPathCustody
+from ai_commerce.wakehub.g3_enrollment import G3_ANCHOR, TASK_PARENT, STATUS_FRAME_BODY_LIMIT
+from ai_commerce.wakehub.native_journal import canonical, decode, deny, shape, WindowsPathCustody, OS_TRUSTED_SIDS
 
 
 CHALLENGE_NAMESPACE = "wakehub-g3-9444-broker-challenge@ai-commerce"
 STATUS_NAMESPACE = "wakehub-g3-9444-desktop-status@ai-commerce"
 BROKER_IDENTITY = "wakehub-g3-broker"
+OBSERVER_SIGNER_ANCHOR_VALUE = "ObserverSigner"
+OBSERVER_SIGNER_IMAGE = r"C:\Program Files\AI-Commerce\WakeHubG3\WakeHubObserverSigner.exe"
 
 
 def _number(value):
@@ -309,12 +316,12 @@ class _StatusPipeIO:
             if self._pending is None:
                 self._api("CloseHandle", [wt.HANDLE], wt.BOOL)(event)
 
-    def read_frame(self):
-        if self._read_done:
+    def read_message(self, validator):
+        if self._read_done or not callable(validator):
             deny()
         self._read_done = True
         raw = self._transfer()
-        StatusFrame._parse(raw, StatusRole.OBSERVER if self.side is _PipeSide.SERVER else StatusRole.BROKER)
+        validator(raw)
         # Reject already queued second messages without starting another read.
         available = wt.DWORD()
         if (not self._api("PeekNamedPipe", [wt.HANDLE, ctypes.c_void_p, wt.DWORD, ctypes.c_void_p,
@@ -324,12 +331,27 @@ class _StatusPipeIO:
         self.deadline.check()
         return raw
 
-    def write_frame(self, raw: bytes):
-        if self._write_done:
+    def write_message(self, raw: bytes, validator):
+        if self._write_done or not callable(validator):
             deny()
         self._write_done = True
-        StatusFrame._parse(raw, StatusRole.BROKER if self.side is _PipeSide.SERVER else StatusRole.OBSERVER)
+        validator(raw)
         self._transfer(raw)
+
+    def read_frame(self):
+        return self.read_message(
+            lambda raw: StatusFrame._parse(
+                raw, StatusRole.OBSERVER if self.side is _PipeSide.SERVER else StatusRole.BROKER
+            )
+        )
+
+    def write_frame(self, raw: bytes):
+        self.write_message(
+            raw,
+            lambda value: StatusFrame._parse(
+                value, StatusRole.BROKER if self.side is _PipeSide.SERVER else StatusRole.OBSERVER
+            ),
+        )
 
     def close(self):
         if not self.closed:
@@ -561,6 +583,8 @@ class ConnectedDesktopStatusIO:
                     broker_signers=Path(config["broker_signers"]["path"]),
                     verifier=Path(anchor["authority"]["verifier"]["path"]), source=source,
                     generation=config["generation"], clock=self._clock)
+                self._signed_challenge = frame.signed_payload
+                self._observation = _decode_transcript_body(self._transcript)
                 self._recheck()
                 self._state = "OBSERVED"
                 return self._transcript
@@ -621,3 +645,457 @@ def verify_status(raw: bytes, *, expected: Challenge, anchor: dict, now: float) 
             or value["logon_id"] != expected.logon_id):
         deny()
     return value
+
+
+def _decode_transcript_body(transcript: bytes) -> dict:
+    """Recover the exact canonical observation dict from auth.signing_bytes()."""
+    if type(transcript) is not bytes or not 0 < len(transcript) <= STATUS_FRAME_BODY_LIMIT:
+        deny()
+    envelope = decode(transcript.rstrip(b"\n"), STATUS_FRAME_BODY_LIMIT)
+    shape(envelope, "schema payload_b64")
+    if envelope["schema"] != "WakeHubG2SignatureTranscript.v1" or type(envelope["payload_b64"]) is not str:
+        deny()
+    try:
+        raw_body = base64.b64decode(envelope["payload_b64"], validate=True)
+    except ValueError:
+        deny()
+    body = decode(raw_body, STATUS_FRAME_BODY_LIMIT)
+    if auth.signing_bytes(body) != transcript:
+        deny()
+    return body
+
+
+def _read_observer_signer_anchor() -> dict:
+    """Read the admin-protected observer signer anchor from HKLM."""
+    auth.windows_only()
+    import winreg
+    for suffix in (r"SOFTWARE", r"SOFTWARE\AI-Commerce", G3_ANCHOR):
+        WindowsPathCustody.check_descriptor(
+            *WindowsPathCustody._descriptor("MACHINE\\" + suffix, 4), OS_TRUSTED_SIDS
+        )
+    broker._protected_dacl("MACHINE\\" + G3_ANCHOR, 4)
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, G3_ANCHOR, 0,
+                        winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as key:
+        raw, kind = winreg.QueryValueEx(key, OBSERVER_SIGNER_ANCHOR_VALUE)
+    if kind != winreg.REG_SZ or type(raw) is not str:
+        deny()
+    return decode(raw.encode("utf-8"), 32768)
+
+
+def _validate_observer_signer_anchor(signer_cfg: dict, anchor: dict, config: dict) -> dict:
+    """Validate independent observer-SID signer pins against broker/G3 anchors."""
+    shape(signer_cfg, "schema task_parent pipe observer_sid observer_executable observer_sha256 observer_key_path")
+    sid = signer_cfg["observer_sid"]
+    if (signer_cfg["schema"] != "WakeHubG3ObserverSignerAnchor.v1"
+            or signer_cfg["task_parent"] != TASK_PARENT
+            or signer_cfg["pipe"] != broker.OBSERVER_SIGNER_PIPE
+            or type(sid) is not str
+            or not re.fullmatch(r"S-1-5-21-(?:[0-9]+-){3}[0-9]+", sid)
+            or sid in {*OS_TRUSTED_SIDS, broker.service_sid(), anchor["authority"]["operator_sid"],
+                       *anchor["authority"]["runner_sids"]}
+            or type(signer_cfg["observer_sha256"]) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", signer_cfg["observer_sha256"])
+            or type(signer_cfg["observer_executable"]) is not str or not signer_cfg["observer_executable"]
+            or type(signer_cfg["observer_key_path"]) is not str or not signer_cfg["observer_key_path"]):
+        deny()
+    exe = WindowsPathCustody().check(signer_cfg["observer_executable"])
+    if auth._digest(exe.read_bytes()) != signer_cfg["observer_sha256"]:
+        deny()
+    broker_private = {
+        ntpath.normcase(p) for p in (
+            anchor["private_key_path"], anchor["authority"]["journal_path"],
+            anchor["requests_path"], anchor["desktop_path"], config["challenges_path"],
+        )
+    }
+    if ntpath.normcase(signer_cfg["observer_key_path"]) in broker_private:
+        deny()
+    return signer_cfg
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class ObserverSignRequestFrame:
+    """Bounded single-frame request from interactive peer to observer-SID signer.
+
+    Carries the broker-signed challenge, the exact G3 desktop observation body,
+    and the SHA-256 digest of auth.signing_bytes(observation). The observer
+    signer independently verifies every field, signature, kernel peer identity,
+    and five-second nonce before signing.
+    """
+    signed_challenge: bytes
+    observation: dict
+    transcript_sha256: str
+
+    def _validate(self):
+        if (type(self.signed_challenge) is not bytes
+                or not 0 < len(self.signed_challenge) <= STATUS_FRAME_BODY_LIMIT
+                or type(self.observation) is not dict
+                or type(self.transcript_sha256) is not str
+                or not re.fullmatch(r"[0-9a-f]{64}", self.transcript_sha256)):
+            deny()
+        sc = decode(self.signed_challenge, STATUS_FRAME_BODY_LIMIT)
+        shape(sc, "body signature")
+        if (type(sc["body"]) is not dict or type(sc["signature"]) is not str
+                or not sc["signature"] or canonical(sc) != self.signed_challenge):
+            deny()
+        challenge_from(sc["body"])
+        shape(self.observation, "schema task_parent challenge state observed_at process logon_id")
+        if (self.observation["schema"] != "WakeHubG3DesktopStatus.v1"
+                or self.observation["task_parent"] != TASK_PARENT
+                or canonical(self.observation["challenge"]) != canonical(sc["body"])):
+            deny()
+        transcript = auth.signing_bytes(self.observation)
+        if auth._digest(transcript) != self.transcript_sha256:
+            deny()
+        return sc
+
+    def to_bytes(self) -> bytes:
+        sc = self._validate()
+        raw = canonical(dict(
+            schema="WakeHubG3ObserverSignRequest.v1",
+            operation="STATUS",
+            signed_challenge=sc,
+            observation=self.observation,
+            transcript_sha256=self.transcript_sha256,
+        ))
+        if len(raw) > STATUS_FRAME_BODY_LIMIT:
+            deny()
+        return len(raw).to_bytes(4, "big") + raw
+
+    @classmethod
+    def from_bytes(cls, raw: bytes) -> ObserverSignRequestFrame:
+        if (type(raw) is not bytes or not 4 < len(raw) <= STATUS_FRAME_BODY_LIMIT + 4
+                or int.from_bytes(raw[:4], "big") != len(raw) - 4):
+            deny()
+        value = decode(raw[4:], STATUS_FRAME_BODY_LIMIT)
+        shape(value, "schema operation signed_challenge observation transcript_sha256")
+        if (canonical(value) != raw[4:]
+                or value["schema"] != "WakeHubG3ObserverSignRequest.v1"
+                or value["operation"] != "STATUS"
+                or type(value["signed_challenge"]) is not dict
+                or type(value["observation"]) is not dict):
+            deny()
+        frame = cls(canonical(value["signed_challenge"]), value["observation"], value["transcript_sha256"])
+        frame._validate()
+        return frame
+
+
+def _observe_observer_signer_connection(handle: int, side: _PipeSide, *,
+                                        observer_sid: str, operator_sid: str) -> dict:
+    """Kernel endpoint observation for the protected observer-SID signing pipe."""
+    auth.windows_only()
+    if type(handle) is not int or handle <= 0 or type(side) is not _PipeSide:
+        deny()
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    thread = broker._api(kernel, "GetCurrentThread", [], wt.HANDLE)()
+    token = wt.HANDLE()
+    if broker._api(adv, "OpenThreadToken", [wt.HANDLE, wt.DWORD, wt.BOOL,
+            ctypes.POINTER(wt.HANDLE)], wt.BOOL)(thread, 8, True, ctypes.byref(token)):
+        broker._api(kernel, "CloseHandle", [wt.HANDLE], wt.BOOL)(token)
+        deny()
+    if ctypes.get_last_error() != 1008:
+        deny()
+    flags = wt.DWORD()
+    if (not broker._api(kernel, "GetNamedPipeInfo", [wt.HANDLE, ctypes.POINTER(wt.DWORD),
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p], wt.BOOL)(
+            handle, ctypes.byref(flags), None, None, None)
+            or bool(flags.value & 1) != (side is _PipeSide.SERVER)):
+        deny()
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [("length", wt.USHORT), ("maximum", wt.USHORT), ("buffer", ctypes.c_void_p)]
+    buffer, needed = ctypes.create_string_buffer(4096), wt.ULONG()
+    if broker._api(ctypes.WinDLL("ntdll"), "NtQueryObject", [wt.HANDLE, wt.ULONG, ctypes.c_void_p,
+            wt.ULONG, ctypes.POINTER(wt.ULONG)], wt.LONG)(
+            handle, 1, buffer, len(buffer), ctypes.byref(needed)) != 0:
+        deny()
+    name = ctypes.cast(buffer, ctypes.POINTER(UnicodeString)).contents
+    if not name.buffer or ctypes.wstring_at(name.buffer, name.length // 2) != broker.OBSERVER_SIGNER_PIPE:
+        deny()
+    facts = {}
+    for end in ("Client", "Server"):
+        for facet in ("ProcessId", "SessionId"):
+            value = wt.ULONG()
+            if not broker._api(kernel, "GetNamedPipe" + end + facet, [wt.HANDLE,
+                    ctypes.POINTER(wt.ULONG)], wt.BOOL)(handle, ctypes.byref(value)):
+                deny()
+            facts[end + facet] = value.value
+    expected_self = facts["ServerProcessId"] if side is _PipeSide.SERVER else facts["ClientProcessId"]
+    if expected_self != os.getpid():
+        deny()
+    broker._check_observer_signer_pipe_acl(handle, observer_sid, operator_sid)
+    server = broker.read_process_identity(facts["ServerProcessId"])
+    client = broker.read_process_identity(facts["ClientProcessId"])
+    if (server.session_id != facts["ServerSessionId"]
+            or client.session_id != facts["ClientSessionId"]
+            or client.session_id <= 0
+            or server.pid == client.pid
+            or server.user_sid != observer_sid
+            or client.user_sid != operator_sid
+            or server.user_sid == client.user_sid):
+        deny()
+    return dict(server=asdict(server), client=asdict(client), scm=broker._scm_process())
+
+
+def _observer_signer_context(handle: int, side: _PipeSide):
+    """Authenticate both endpoints of the observer signing IPC pipe.
+
+    SERVER side (running under observer_sid) verifies ObserverCustody on the
+    enrolled observer private key. CLIENT side (running under operator_sid)
+    NEVER opens or reads observer_key_path.
+    """
+    from ai_commerce.wakehub import g3_service_host as host
+
+    auth.windows_only()
+    if type(side) is not _PipeSide:
+        deny()
+    anchor = broker._read_broker_anchor()
+    config = host._read_g3_config()
+    signer_cfg = _read_observer_signer_anchor()
+    auth._validate_anchor_material(anchor["authority"])
+    source, target = host._validate_config(config, anchor)
+    _validate_observer_signer_anchor(signer_cfg, anchor, config)
+    facts = _observe_observer_signer_connection(
+        handle, side, observer_sid=signer_cfg["observer_sid"],
+        operator_sid=anchor["authority"]["operator_sid"],
+    )
+    signer_server = inv.ProcessIdentity(**facts["server"])
+    client = inv.ProcessIdentity(**facts["client"])
+    broker_server, pinned_client = broker.validate_peer(
+        anchor, dict(server=anchor["service"]["process"], client=facts["client"], scm=facts["scm"])
+    )
+    for pin in (anchor["service"], anchor["desktop_peer"]):
+        exe = WindowsPathCustody().check(pin["process"]["executable"])
+        if auth._digest(exe.read_bytes()) != pin["sha256"]:
+            deny()
+    if (signer_server.user_sid != signer_cfg["observer_sid"]
+            or ntpath.normcase(signer_server.executable) != ntpath.normcase(signer_cfg["observer_executable"])
+            or client != pinned_client
+            or client.user_sid != target.user_sid
+            or client.session_id != target.session_id
+            or client.user_sid != anchor["authority"]["operator_sid"]
+            or read_logon_id(client.pid) != config["logon_id"]
+            or broker.service_sid() in (client.user_sid, signer_server.user_sid, *anchor["authority"]["runner_sids"])
+            or set(anchor["authority"]["runner_sids"]) & OS_TRUSTED_SIDS):
+        deny()
+    if side is _PipeSide.SERVER:
+        broker.ObserverCustody(signer_cfg["observer_sid"]).check(signer_cfg["observer_key_path"])
+    return anchor, config, signer_cfg, signer_server, broker_server, client, source, target
+
+
+class ConnectedObserverSignerHost:
+    """Windows-native observer-SID signing host on an authenticated server HANDLE.
+
+    Runs ONLY under the separately enrolled observer SID (distinct from the
+    interactive operator SID and Session 0 broker service SID). Verifies the
+    kernel pipe endpoints, protected DACL, pinned image hashes, live logon LUID,
+    broker challenge signature, source/generation, five-second nonce, and exact
+    transcript hash before signing, and returns ONLY the short-lived signed
+    StatusFrame.
+    """
+    def __init__(self, *, clock=time.time, monotonic=time.monotonic):
+        self._clock = clock
+        self._monotonic = monotonic
+        self._lock = threading.Lock()
+        self._spent_nonces: set[str] = set()
+
+    def handle_connection(self, handle: int) -> DesktopStatusOutcome:
+        pipe = None
+        try:
+            deadline = _StatusDeadline(self._monotonic)
+            context = _observer_signer_context(handle, _PipeSide.SERVER)
+            anchor, config, signer_cfg, signer_server, broker_server, client, source, target = context
+            pins_digest = auth._digest(canonical([anchor, config, signer_cfg]))
+            pipe = _StatusPipeIO(handle, _PipeSide.SERVER, deadline)
+            raw_req = pipe.read_message(ObserverSignRequestFrame.from_bytes)
+            req = ObserverSignRequestFrame.from_bytes(raw_req)
+            challenge_body = _verify(
+                req.signed_challenge,
+                config["broker_signers"]["path"],
+                anchor["authority"]["verifier"]["path"],
+                BROKER_IDENTITY,
+                CHALLENGE_NAMESPACE,
+            )
+            challenge = challenge_from(challenge_body)
+            if (challenge.request_sha256 is None
+                    or (challenge.source, challenge.generation, challenge.journal_id,
+                        challenge.server, challenge.client, challenge.target, challenge.logon_id)
+                    != (source, config["generation"], config["journal_id"],
+                        broker_server, client, target, config["logon_id"])):
+                deny()
+            now = self._clock()
+            challenge.fresh(now)
+            deadline.constrain(challenge, now)
+            with self._lock:
+                if challenge.nonce in self._spent_nonces:
+                    return DesktopStatusOutcome.DUPLICATE
+                self._spent_nonces.add(challenge.nonce)
+            observed_at = req.observation["observed_at"]
+            if not _number(observed_at) or observed_at > now:
+                deny()
+            live_logon = read_logon_id(client.pid)
+            expected_obs = observation_body(
+                challenge, now=observed_at, process=client,
+                logon_id=live_logon, source=source, generation=config["generation"],
+            )
+            if canonical(req.observation) != canonical(expected_obs):
+                deny()
+            transcript = auth.signing_bytes(expected_obs)
+            if auth._digest(transcript) != req.transcript_sha256:
+                deny()
+            # Re-verify kernel endpoints, pins, logon LUID, and ObserverCustody before signing.
+            recheck = _observer_signer_context(handle, _PipeSide.SERVER)
+            if (auth._digest(canonical(list(recheck[:3]))) != pins_digest
+                    or recheck[3:] != (signer_server, broker_server, client, source, target)):
+                deny()
+            key_path = broker.ObserverCustody(signer_cfg["observer_sid"]).check(signer_cfg["observer_key_path"])
+            verifier_path = WindowsPathCustody().check(anchor["authority"]["verifier"]["path"])
+            signers_path = WindowsPathCustody().check(anchor["authority"]["observer_signers"]["path"])
+            signed_status = broker.sign_with_enrolled_key(
+                transcript,
+                key_path=key_path,
+                verifier_path=verifier_path,
+                signers_path=signers_path,
+                identity=auth.IDENTITIES["observer"],
+                namespace=STATUS_NAMESPACE,
+                expected_body=expected_obs,
+                timeout=deadline.check(),
+            )
+            verify_status(signed_status, expected=challenge, anchor=anchor["authority"], now=self._clock())
+            response_frame = StatusFrame(StatusRole.OBSERVER, signed_status)
+            response_frame.check_binding(challenge)
+            response_bytes = response_frame.to_bytes()
+            recheck2 = _observer_signer_context(handle, _PipeSide.SERVER)
+            if (auth._digest(canonical(list(recheck2[:3]))) != pins_digest
+                    or recheck2[3:] != (signer_server, broker_server, client, source, target)):
+                deny()
+            challenge.fresh(self._clock())
+            deadline.check()
+            pipe.write_message(
+                response_bytes,
+                lambda raw: StatusFrame.from_bytes(raw, expected=challenge, role=StatusRole.OBSERVER),
+            )
+            return DesktopStatusOutcome.RESPONSE_WRITTEN
+        except Exception:
+            return DesktopStatusOutcome.UNKNOWN
+        finally:
+            if pipe is not None:
+                pipe.close()
+
+
+class ConnectedObserverSignClient:
+    """Interactive-peer client for the separate observer-SID signing IPC pipe.
+
+    Runs under operator_sid and NEVER reads the observer private signing key.
+    Authenticates the observer signer's kernel pipe endpoint, SID, image hash,
+    and protected DACL, sends the exact challenge+observation request, and
+    independently verifies the returned short-lived signature frame.
+    """
+    def __init__(self, *, clock=time.time):
+        self._clock = clock
+
+    def request_signature(self, handle: int, *, signed_challenge: bytes,
+                          observation: dict, expected: Challenge,
+                          deadline: _StatusDeadline) -> bytes:
+        if (type(expected) is not Challenge or expected.request_sha256 is None
+                or type(deadline) is not _StatusDeadline):
+            deny()
+        pipe = None
+        try:
+            deadline.check()
+            context = _observer_signer_context(handle, _PipeSide.CLIENT)
+            anchor, config, signer_cfg, signer_server, broker_server, client, source, target = context
+            pins_digest = auth._digest(canonical([anchor, config, signer_cfg]))
+            if ((expected.source, expected.generation, expected.journal_id,
+                    expected.server, expected.client, expected.target, expected.logon_id)
+                    != (source, config["generation"], config["journal_id"],
+                        broker_server, client, target, config["logon_id"])):
+                deny()
+            transcript = auth.signing_bytes(observation)
+            req = ObserverSignRequestFrame(signed_challenge, observation, auth._digest(transcript))
+            req_bytes = req.to_bytes()
+            pipe = _StatusPipeIO(handle, _PipeSide.CLIENT, deadline)
+            pipe.write_message(req_bytes, ObserverSignRequestFrame.from_bytes)
+            reply_raw = pipe.read_message(
+                lambda raw: StatusFrame.from_bytes(raw, expected=expected, role=StatusRole.OBSERVER)
+            )
+            recheck = _observer_signer_context(handle, _PipeSide.CLIENT)
+            if (auth._digest(canonical(list(recheck[:3]))) != pins_digest
+                    or recheck[3:] != (signer_server, broker_server, client, source, target)):
+                deny()
+            frame = StatusFrame.from_bytes(reply_raw, expected=expected, role=StatusRole.OBSERVER)
+            verified_body = verify_status(
+                frame.signed_payload, expected=expected, anchor=anchor["authority"], now=self._clock()
+            )
+            if auth.signing_bytes(verified_body) != transcript:
+                deny()
+            deadline.check()
+            return frame.signed_payload
+        finally:
+            if pipe is not None:
+                pipe.close()
+
+
+class DesktopStatusOwner:
+    """Interactive desktop peer owner wiring broker pipe + observer-SID signing IPC.
+
+    Receives the broker's signed challenge on broker_handle, observes the live
+    unlocked interactive desktop under operator_sid, delegates signing to the
+    separate observer-SID signer over signer_handle (sharing the same five-second
+    monotonic budget), and writes the verified observer StatusFrame back to the
+    broker. Never touches observer private key material.
+    """
+    def __init__(self, *, clock=time.time, monotonic=time.monotonic):
+        self._peer = ConnectedDesktopStatusIO(clock=clock, monotonic=monotonic)
+        self._signer_client = ConnectedObserverSignClient(clock=clock)
+        self._lock = threading.Lock()
+        self._used = False
+
+    def execute(self, broker_handle: int, signer_handle: int) -> DesktopStatusOutcome:
+        if not self._lock.acquire(blocking=False):
+            return DesktopStatusOutcome.DUPLICATE
+        try:
+            if self._used:
+                return DesktopStatusOutcome.DUPLICATE
+            self._used = True
+            try:
+                self._peer.receive(broker_handle)
+                signed_status = self._signer_client.request_signature(
+                    signer_handle,
+                    signed_challenge=self._peer._signed_challenge,
+                    observation=self._peer._observation,
+                    expected=self._peer._challenge,
+                    deadline=self._peer._deadline,
+                )
+                return self._peer.respond(signed_status)
+            except Exception:
+                self._peer.abandon()
+                return DesktopStatusOutcome.UNKNOWN
+        finally:
+            self._lock.release()
+
+    def abandon(self) -> DesktopStatusOutcome:
+        with self._lock:
+            self._used = True
+            return self._peer.abandon()
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Windows-callable fail-closed observer/desktop owner CLI entrypoint."""
+    parser = argparse.ArgumentParser(prog="python -m ai_commerce.wakehub.g3_desktop_observer")
+    parser.add_argument("--mode", choices=("preflight", "signer", "desktop"), default="preflight")
+    args = parser.parse_args(argv)
+    payload = dict(
+        schema_version="WakeHubG3ObserverOwnerPublic.v1",
+        mode=args.mode,
+        status="HOLD_DEPENDENCY",
+        authority="SOURCE_ONLY",
+        native_effect="NOT_ATTEMPTED",
+        start="DENY",
+        reuse="DENY",
+    )
+    sys.stdout.write(json.dumps(payload, sort_keys=True) + "\n")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
