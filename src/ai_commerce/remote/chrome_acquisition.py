@@ -4009,11 +4009,14 @@ function Test-ReconcileRollbackMetadata($rbVal) {
     return 'VALID'
 }
 
-function Get-ReconcileJournalState {
+function Get-ReconcileJournalState($backup = $null) {
     $key = $null
     try {
         $key = Open-MigrationState $false
-        if (!$key) { return 'FRESH' }
+        if (!$key) {
+            if ($backup) { $backup.Value = 'JOURNAL_ABSENT' }
+            return 'FRESH'
+        }
         if ($key.PSObject.Properties['SubKeyCount'] -and $key.SubKeyCount -gt 0) {
             return 'UNVERIFIED'
         }
@@ -4026,18 +4029,26 @@ function Get-ReconcileJournalState {
         }
         $hasRollback = 'DemandMigrationRollback' -cin $names
         $hasComplete = 'DemandMigrationComplete' -cin $names
-        if (!$hasRollback -and !$hasComplete) { return 'FRESH' }
+        if (!$hasRollback -and !$hasComplete) {
+            if ($backup) { $backup.Value = 'JOURNAL_ABSENT' }
+            return 'FRESH'
+        }
         if (!$hasRollback -and $hasComplete) { return 'COMPLETE_ONLY' }
+        $completeKindValid = $true
         if ($key.PSObject.Methods['GetValueKind']) {
             if ($key.GetValueKind('DemandMigrationRollback') -ne [Microsoft.Win32.RegistryValueKind]::String) {
                 return 'UNVERIFIED'
             }
             if ($hasComplete -and $key.GetValueKind('DemandMigrationComplete') -ne [Microsoft.Win32.RegistryValueKind]::DWord) {
-                return 'UNVERIFIED'
+                if (!$backup) { return 'UNVERIFIED' }
+                $completeKindValid = $false
             }
         }
         $rbVal = $key.GetValue('DemandMigrationRollback')
         $rbStatus = Test-ReconcileRollbackMetadata $rbVal
+        # The journal stores XML and an ACL without an attempt identity.
+        if ($backup -and $rbStatus -ceq 'VALID') { $backup.Value = 'VALID_BUT_UNBOUND' }
+        if (!$completeKindValid) { return 'UNVERIFIED' }
         if ($rbStatus -cne 'VALID') { return $rbStatus }
         if (!$hasComplete) { return 'ROLLBACK_ONLY' }
         $cmVal = $key.GetValue('DemandMigrationComplete')
@@ -4066,7 +4077,12 @@ function Get-ReconcileRelevantTasks {
 
 $taskState = 'UNAVAILABLE'
 $d5State = 'UNVERIFIED'
-$journalState = Get-ReconcileJournalState
+$backupState = 'NO_TRUSTED_1270_CUSTODY'
+$journalState = if ($readRollbackCustody) {
+    Get-ReconcileJournalState ([ref]$backupState)
+} else {
+    Get-ReconcileJournalState
+}
 
 try {
     $allTasks = Get-ReconcileRelevantTasks
@@ -4179,8 +4195,12 @@ if ($afterSid -cne $sid -or $afterSession -le 0 -or $afterSession -ne $session) 
     exit
 }
 
-@{ task = $taskState; journal = $journalState; d5 = $d5State } | ConvertTo-Json -Compress
+$receipt = @{ task = $taskState; journal = $journalState; d5 = $d5State }
+if ($readRollbackCustody) { $receipt['backup'] = $backupState }
+$receipt | ConvertTo-Json -Compress
 """
+
+_CLEAN_9444_FORENSIC_READ_SCRIPT = "$readRollbackCustody = $true\n" + _CLEAN_9444_TASK_RECONCILE_SCRIPT
 
 
 def _clean_task_environment(owner: tuple[Path, int, str], target: _ChromeTarget,
@@ -4251,6 +4271,9 @@ _CLEAN_RECONCILE_TASK_VALUES = frozenset({
 _CLEAN_RECONCILE_JOURNAL_VALUES = frozenset({
     "FRESH", "COMPLETE", "MISMATCH", "ROLLBACK_ONLY", "COMPLETE_ONLY", "UNVERIFIED",
 })
+_CLEAN_RECONCILE_BACKUP_VALUES = frozenset({
+    "NO_TRUSTED_1270_CUSTODY", "JOURNAL_ABSENT", "VALID_BUT_UNBOUND",
+})
 _CLEAN_RECONCILE_D5_VALUES = frozenset({
     "ENABLED_ATTESTED", "DISABLED_ATTESTED", "ABSENT", "UNVERIFIED",
     "UNVERIFIED_MULTIPLE", "UNVERIFIED_MOVED", "UNVERIFIED_STATE",
@@ -4260,8 +4283,15 @@ _CLEAN_RECONCILE_D5_VALUES = frozenset({
 })
 
 
+def _clean_reconcile_unique_object(pairs):
+    data = dict(pairs)
+    if len(data) != len(pairs):
+        raise ValueError("DUPLICATE_RECONCILE_KEY")
+    return data
+
+
 def _clean_reconcile_read(owner: tuple[Path, int, str], target: _ChromeTarget,
-                          candidates: tuple[Path, ...]) -> dict[str, str]:
+                          candidates: tuple[Path, ...], *, forensic: bool = False) -> dict[str, str]:
     """Read-only post-UNKNOWN reconciler for WakeHub 9444 task, journal and D5."""
     trusted = _trusted_powershells()
     if len(trusted) == 1:
@@ -4280,10 +4310,20 @@ def _clean_reconcile_read(owner: tuple[Path, int, str], target: _ChromeTarget,
         "& ([ScriptBlock]::Create([Console]::In.ReadToEnd()))"
     )
     fallback = {"task": "UNAVAILABLE", "journal": "UNVERIFIED", "d5": "UNVERIFIED"}
+    fields = {
+        "task": _CLEAN_RECONCILE_TASK_VALUES,
+        "journal": _CLEAN_RECONCILE_JOURNAL_VALUES,
+        "d5": _CLEAN_RECONCILE_D5_VALUES,
+    }
+    script = _CLEAN_9444_TASK_RECONCILE_SCRIPT
+    if forensic:
+        script = _CLEAN_9444_FORENSIC_READ_SCRIPT
+        fields["backup"] = _CLEAN_RECONCILE_BACKUP_VALUES
+        fallback["backup"] = "NO_TRUSTED_1270_CUSTODY"
     try:
         result = subprocess.run(
             [str(powershell), "-NoProfile", "-NonInteractive", "-Command", stdin_runner],
-            input=_CLEAN_9444_TASK_RECONCILE_SCRIPT.encode("utf-8"),
+            input=script.encode("utf-8"),
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             timeout=25, check=False, env=child_env,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -4293,16 +4333,14 @@ def _clean_reconcile_read(owner: tuple[Path, int, str], target: _ChromeTarget,
         raw = result.stdout.decode("utf-8").strip()
         if raw == "WINDOWS_OWNER_CONTEXT_UNVERIFIED":
             return {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}
-        data = json.loads(raw)
+        data = json.loads(raw, object_pairs_hook=_clean_reconcile_unique_object)
         if type(data) is not dict:
             return fallback
         if data == {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}:
             return {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}
-        if (set(data) == {"task", "journal", "d5"}
-                and data["task"] in _CLEAN_RECONCILE_TASK_VALUES
-                and data["journal"] in _CLEAN_RECONCILE_JOURNAL_VALUES
-                and data["d5"] in _CLEAN_RECONCILE_D5_VALUES):
-            return {"task": data["task"], "journal": data["journal"], "d5": data["d5"]}
+        if (data.keys() == fields.keys()
+                and all(type(data[key]) is str and data[key] in values for key, values in fields.items())):
+            return data
     except (OSError, subprocess.TimeoutExpired, UnicodeError, ValueError):
         pass
     return fallback
