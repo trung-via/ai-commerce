@@ -3385,6 +3385,112 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         with patch.dict(self.env, GITHUB_EVENT_NAME="issues"):
             return self.invoke(payload or event("read", "clean_9444_runtime_probe", {}), mode="read")
 
+    def invoke_forensic(self, payload=None):
+        with patch.dict(self.env, GITHUB_EVENT_NAME="issues"):
+            return self.invoke(payload or event("read", "clean_9444_1270_forensic_read", {}), mode="read")
+
+    def test_forensic_read_requires_exact_protected_owner_request(self):
+        op = "clean_9444_1270_forensic_read"
+        request = hostops.parse_event(event("read", op, {}), "read")
+        with self.assertRaisesRegex(hostops.Denied, "OPERATION_DENIED"):
+            hostops.perform(request)
+        self.assertEqual(self.invoke(event("write", op, {}))["code"], "WRITE_SCOPE_DENIED")
+        payload = event("read", op, {})
+        payload["sender"]["login"] = "another-account"
+        self.assertEqual(self.invoke_forensic(payload)["code"], "NON_OWNER_EVENT")
+        for params in (None, [], "{}"):
+            with self.subTest(params=params):
+                self.assertEqual(self.invoke_forensic(event("read", op, params))["code"], "INVALID_REQUEST")
+        for key in ("path", "registry", "command", "task", "sid", "sddl", "executable", "url", "wildcard"):
+            with self.subTest(key=key):
+                payload = event("read", op, {key: "PRIVATE"})
+                self.assertEqual(self.invoke_forensic(payload)["code"], "INVALID_PARAMETERS")
+        for key, value, expected in (
+            ("GITHUB_ACTOR", "another-account", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"),
+            ("GITHUB_WORKFLOW_SHA", "b" * 40, "SOURCE_CUSTODY_UNVERIFIED"),
+        ):
+            with self.subTest(key=key), patch.dict(self.env, {key: value}):
+                receipt = self.invoke_forensic()
+                self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", expected))
+                self.assertNotIn("source_sha", receipt)
+        self.session.assert_not_called()
+        self.source.assert_not_called()
+        self.reconcile.assert_not_called()
+
+    def test_forensic_read_checks_session_source_and_target_before_access(self):
+        self.session.side_effect = (7, 8)
+        self.assertEqual(self.invoke_forensic()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+        self.session.side_effect = None
+        self.source.side_effect = hostops.Denied("LOCAL_MAIN_SYNC_REQUIRED")
+        self.assertEqual(self.invoke_forensic()["code"], "SOURCE_CUSTODY_UNVERIFIED")
+        self.target_read.assert_not_called()
+        self.source.side_effect = None
+        self.target_read.side_effect = self.real_target
+        profile_parent = self.local / "AI-Commerce"
+        lstat = type(profile_parent).lstat
+
+        def junction(path):
+            self.assertNotIn(profile_parent, path.parents)
+            if path == profile_parent:
+                return SimpleNamespace(st_mode=stat.S_IFDIR, st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT)
+            return lstat(path)
+
+        with patch.object(type(profile_parent), "lstat", junction):
+            self.assertEqual(self.invoke_forensic()["code"], "PROFILE_UNAVAILABLE")
+        self.reconcile.assert_not_called()
+
+    def test_forensic_read_projects_backup_separately_from_history_and_runtime(self):
+        for raw, expected, status in (
+            (("DEMAND_READY", "COMPLETE", "ENABLED_ATTESTED", "VALID_BUT_UNBOUND"),
+             "VALID_BUT_UNBOUND+DEMAND_READY+D5_ENABLED+JOURNAL_COMPLETE", "OBSERVED"),
+            (("DEMAND_READY", "FRESH", "UNVERIFIED_EXE", "JOURNAL_ABSENT"),
+             "JOURNAL_ABSENT+DEMAND_READY+D5_UNVERIFIED_EXE+JOURNAL_FRESH", "HOLD"),
+            (("MULTIPLE_CANDIDATES", "ROLLBACK_ONLY", "ENABLED_ATTESTED", "VALID_BUT_UNBOUND"),
+             "VALID_BUT_UNBOUND+TASK_MULTIPLE+D5_ENABLED+ROLLBACK_ONLY", "HOLD"),
+            (("FOREIGN_CANDIDATE", "MISMATCH", "ABSENT", "NO_TRUSTED_1270_CUSTODY"),
+             "NO_TRUSTED_1270_CUSTODY+TASK_FOREIGN+D5_ABSENT+JOURNAL_MISMATCH", "HOLD"),
+            (("DEMAND_READY", "COMPLETE", "ENABLED_ATTESTED", "PRIVATE <Task />"),
+             "NO_TRUSTED_1270_CUSTODY+TASK_UNAVAILABLE+D5_UNVERIFIED+JOURNAL_UNVERIFIED", "HOLD"),
+        ):
+            with self.subTest(raw=raw):
+                self.reconcile.reset_mock()
+                self.reconcile.return_value = dict(zip(("task", "journal", "d5", "backup"), raw))
+                receipt = self.invoke_forensic()
+                self.assertEqual(receipt["status"], status)
+                self.assertEqual(receipt["code"], f"UNKNOWN_EFFECT+{expected}+PENDING_CLEAR")
+                self.assertRegex(receipt["code"], r"^[A-Z0-9_]+(?:\+[A-Z0-9_]+){5}$")
+                self.assertEqual(receipt["source_sha"], self.sha)
+                self.assertEqual(receipt["issue_number"], 17)
+                self.assertFalse(receipt["wake_sent"])
+                self.assertFalse(receipt["remote_shell_enabled"])
+                self.reconcile.assert_called_once_with(self.owner, self.target, self.candidates, forensic=True)
+        self.task.assert_not_called()
+        self.record.assert_not_called()
+        self.probe.assert_not_called()
+
+    def test_forensic_read_holds_when_pending_markers_or_owner_change(self):
+        self.reconcile.return_value = {
+            "task": "DEMAND_READY", "journal": "COMPLETE", "d5": "ENABLED_ATTESTED", "backup": "VALID_BUT_UNBOUND",
+        }
+        self.pending.add("AutostartPending")
+        receipt = self.invoke_forensic()
+        self.assertEqual(receipt["status"], "HOLD")
+        self.assertTrue(receipt["code"].endswith("+AUTOSTART_PENDING"))
+        self.launch_pending.side_effect = (False, True)
+        receipt = self.invoke_forensic()
+        self.assertEqual(receipt["status"], "HOLD")
+        self.assertEqual(receipt["code"], (
+            "UNKNOWN_EFFECT+NO_TRUSTED_1270_CUSTODY+TASK_UNAVAILABLE+D5_UNVERIFIED"
+            "+JOURNAL_UNVERIFIED+PENDING_STATE_CHANGED"
+        ))
+        self.launch_pending.side_effect = None
+        self.session.side_effect = (7, 7, 8)
+        self.assertEqual(self.invoke_forensic()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+        self.assertEqual(self.pending, {"AutostartPending"})
+        self.record.assert_not_called()
+        self.task.assert_not_called()
+        self.probe.assert_not_called()
+
     def test_runtime_probe_rejects_unapproved_events_and_nonempty_parameters(self):
         op = "clean_9444_runtime_probe"
         request = hostops.parse_event(event("read", op, {}), "read")

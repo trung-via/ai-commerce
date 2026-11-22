@@ -3120,7 +3120,12 @@ def test_clean_9444_reconcile_read_is_strictly_readonly_and_sanitized(clean_9444
         ".RegisterTaskDefinition(", ".RunEx(", ".CreateSubKey(",
         ".SetValue(", ".DeleteValue(", ".DeleteTask(", "Open-MigrationState $true",
     ):
-        assert forbidden not in ca._CLEAN_9444_TASK_RECONCILE_SCRIPT
+        assert forbidden not in ca._CLEAN_9444_FORENSIC_READ_SCRIPT
+    journal_reader = ca._CLEAN_9444_FORENSIC_READ_SCRIPT.split("function Get-ReconcileJournalState", 1)[1]
+    journal_reader = journal_reader.split("function Get-ReconcileRelevantTasks", 1)[0]
+    assert "Open-MigrationState $false" in journal_reader
+    for forbidden in ("Get-Content", "ReadAll", "OpenRead", "Get-ChildItem"):
+        assert forbidden not in journal_reader
 
     owner = clean_9444
     local = owner[0]
@@ -3136,6 +3141,7 @@ def test_clean_9444_reconcile_read_is_strictly_readonly_and_sanitized(clean_9444
         lambda: (_ for _ in ()).throw(ca.AcquisitionBlocked("POWERSHELL_UNAVAILABLE")),
     )
     monkeypatch.setattr(ca, "_historical_legacy_workdir", lambda: historical)
+    monkeypatch.setitem(ca.os.environ, "AI_COMMERCE_TASK_REGISTRY", "PRIVATE_UNTRUSTED_REGISTRY")
 
     replies = iter((
         SimpleNamespace(returncode=0, stdout=b'{"task":"DEMAND_READY","journal":"COMPLETE","d5":"ENABLED_ATTESTED"}\r\n'),
@@ -3146,6 +3152,12 @@ def test_clean_9444_reconcile_read_is_strictly_readonly_and_sanitized(clean_9444
         SimpleNamespace(returncode=0, stdout=b'{"task":"PRIVATE_LEAK","journal":"FRESH","d5":"ABSENT"}'),
         SimpleNamespace(returncode=0, stdout=b'{"task":"DEMAND_READY","journal":"FRESH","d5":"ABSENT","extra":"secret"}'),
         SimpleNamespace(returncode=1, stdout=b'{"task":"DEMAND_READY","journal":"FRESH","d5":"ABSENT"}'),
+        SimpleNamespace(returncode=0, stdout=b'{"task":"DEMAND_READY","journal":"COMPLETE","d5":"ENABLED_ATTESTED","backup":"VALID_BUT_UNBOUND"}'),
+        SimpleNamespace(returncode=0, stdout=b'{"task":"ABSENT","journal":"FRESH","d5":"ABSENT","backup":"JOURNAL_ABSENT"}'),
+        SimpleNamespace(returncode=0, stdout=b'{"task":"ABSENT","journal":"UNVERIFIED","d5":"ABSENT","backup":"C:/PRIVATE/backup.xml"}'),
+        SimpleNamespace(returncode=0, stdout=b'{"task":"ABSENT","journal":"FRESH","d5":"ABSENT","backup":"JOURNAL_ABSENT","backup":"VALID_BUT_UNBOUND"}'),
+        SimpleNamespace(returncode=0, stdout=b'{"task":"ABSENT","journal":"FRESH","d5":"ABSENT","backup":[]}'),
+        SimpleNamespace(returncode=0, stdout=b'{"task":"ABSENT","journal":"FRESH","d5":"ABSENT"}'),
     ))
     calls = []
 
@@ -3169,11 +3181,24 @@ def test_clean_9444_reconcile_read_is_strictly_readonly_and_sanitized(clean_9444
     fallback = {"task": "UNAVAILABLE", "journal": "UNVERIFIED", "d5": "UNVERIFIED"}
     for _ in range(3):
         assert ca._clean_reconcile_read(owner, target, candidates) == fallback
+    assert ca._clean_reconcile_read(owner, target, candidates, forensic=True) == {
+        "task": "DEMAND_READY", "journal": "COMPLETE", "d5": "ENABLED_ATTESTED", "backup": "VALID_BUT_UNBOUND",
+    }
+    assert ca._clean_reconcile_read(owner, target, candidates, forensic=True) == {
+        "task": "ABSENT", "journal": "FRESH", "d5": "ABSENT", "backup": "JOURNAL_ABSENT",
+    }
+    for _ in range(4):
+        assert ca._clean_reconcile_read(owner, target, candidates, forensic=True) == {
+            **fallback, "backup": "NO_TRUSTED_1270_CUSTODY",
+        }
 
     args, kwargs = calls[0]
     assert args[0] == str(pwsh_7)
     assert len(subprocess.list2cmdline(args)) < 512
     assert kwargs["input"] == ca._CLEAN_9444_TASK_RECONCILE_SCRIPT.encode("utf-8")
+    _, forensic_kwargs = calls[-1]
+    assert forensic_kwargs["input"] == ca._CLEAN_9444_FORENSIC_READ_SCRIPT.encode("utf-8")
+    assert forensic_kwargs["env"]["AI_COMMERCE_TASK_REGISTRY"] == ca._CLEAN_9444_REGISTRY
     assert kwargs["env"]["AI_COMMERCE_TASK_HISTORICAL_WORKDIR"] == str(historical)
     assert kwargs["env"]["AI_COMMERCE_TASK_LEGACY_ARGUMENTS"] != ""
     specs = json.loads(kwargs["env"]["AI_COMMERCE_TASK_TRUSTED_POWERSHELLS"])
@@ -3189,6 +3214,8 @@ def test_clean_9444_reconcile_read_is_strictly_readonly_and_sanitized(clean_9444
     ("demand_ready_rollback_only_partial", "DEMAND_READY", "ROLLBACK_ONLY", "ENABLED_ATTESTED"),
     ("demand_ready_complete_only", "DEMAND_READY", "COMPLETE_ONLY", "ENABLED_ATTESTED"),
     ("demand_ready_corrupt_journal", "DEMAND_READY", "UNVERIFIED", "ENABLED_ATTESTED"),
+    ("forensic_invalid_complete_valid_rollback", "DEMAND_READY", "UNVERIFIED", "ENABLED_ATTESTED"),
+    ("forensic_standalone_xml_in_journal", "DEMAND_READY", "UNVERIFIED", "ENABLED_ATTESTED"),
     ("rollback_valid_json_invalid_xml_and_sddl", "DEMAND_READY", "UNVERIFIED", "ENABLED_ATTESTED"),
     ("rollback_json_extra_key", "DEMAND_READY", "UNVERIFIED", "ENABLED_ATTESTED"),
     ("rollback_json_duplicate_key", "DEMAND_READY", "UNVERIFIED", "ENABLED_ATTESTED"),
@@ -3473,6 +3500,12 @@ switch ($case) {
     }
     'demand_ready_corrupt_journal' {
         $script:values = @{ DemandMigrationRollback = 'not-json'; DemandMigrationComplete = 1 }
+    }
+    'forensic_invalid_complete_valid_rollback' {
+        $script:values = @{ DemandMigrationRollback = $validRollback; DemandMigrationComplete = '1' }
+    }
+    'forensic_standalone_xml_in_journal' {
+        $script:values = @{ DemandMigrationRollback = $validLegacyXml; DemandMigrationComplete = 1 }
     }
     'rollback_valid_json_invalid_xml_and_sddl' {
         $script:values = @{
@@ -3858,8 +3891,25 @@ function Get-AttestedPathCustodySddl($path, $allowedOwners, $expectFile = $false
             TEST_D5_SCRIPT_PATH=str(d5_script),
             TEST_D5_ROOT_DIR=str(d5_root),
         )
+        forensic_backups = {
+            "demand_ready_complete_d5_pwsh7_enabled": "VALID_BUT_UNBOUND",
+            "demand_ready_rollback_only_partial": "VALID_BUT_UNBOUND",
+            "demand_ready_fresh_d5_absent": "JOURNAL_ABSENT",
+            "demand_ready_complete_only": "NO_TRUSTED_1270_CUSTODY",
+            "forensic_invalid_complete_valid_rollback": "VALID_BUT_UNBOUND",
+            "forensic_standalone_xml_in_journal": "NO_TRUSTED_1270_CUSTODY",
+            "rollback_wrong_sddl_owner": "NO_TRUSTED_1270_CUSTODY",
+            "rollback_wrong_sddl_acl": "NO_TRUSTED_1270_CUSTODY",
+            "rollback_xml_dtd_xxe": "NO_TRUSTED_1270_CUSTODY",
+            "multiple_wakehub_candidates": "VALID_BUT_UNBOUND",
+            "foreign_moved_wakehub_task": "JOURNAL_ABSENT",
+            "d5_pwsh_unverified_unsigned": "VALID_BUT_UNBOUND",
+        }
+        forensic_prefix = ""
+        if case in forensic_backups:
+            forensic_prefix = ca._CLEAN_9444_FORENSIC_READ_SCRIPT.removesuffix(ca._CLEAN_9444_TASK_RECONCILE_SCRIPT)
         harness_script = (
-            f"$case = '{case}'\n" + fixture
+            forensic_prefix + f"$case = '{case}'\n" + fixture
             + "\n$outJson = & {\nfunction Read-Registration" + functions.replace("; exit", "; return")
             + "\n}\n"
             + "@{ out = ($outJson | ConvertFrom-Json); writes = $script:writes; regWrites = $script:regWrites;"
@@ -3877,8 +3927,11 @@ function Get-AttestedPathCustodySddl($path, $allowedOwners, $expectFile = $false
         shutil.rmtree(raw_root, ignore_errors=True)
     assert result.returncode == 0 and not result.stderr, result.stderr
     observed = json.loads(result.stdout)
+    expected = {"task": expected_task, "journal": expected_journal, "d5": expected_d5}
+    if case in forensic_backups:
+        expected["backup"] = forensic_backups[case]
     assert observed == {
-        "out": {"task": expected_task, "journal": expected_journal, "d5": expected_d5},
+        "out": expected,
         "writes": 0, "regWrites": 0, "runCalls": 0,
     }
 
