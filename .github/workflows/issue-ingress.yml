@@ -572,27 +572,21 @@ jobs:
                     'https://github.com/trung-via/ai-commerce',
                     'git@github.com:trung-via/ai-commerce.git')) { throw 'SOURCE_DRIFT' }
             if (-not $env:LOCALAPPDATA) { throw 'PRIVATE_APPDATA_UNAVAILABLE' }
-            $private = Join-Path $env:LOCALAPPDATA 'AI-Commerce'
-            $candidates = @(
-              (Join-Path $private 'Chrome-Acquisition\config.json'),
-              (Join-Path $private 'chrome.json'),
-              (Join-Path $private 'chrome-acquisition.json')
-            )
-            $found = @($candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
-            if ($found.Count -ne 1) { throw 'DEDICATED_CONFIG_NOT_ENROLLED' }
             $cmd = Get-Command python.exe -ErrorAction SilentlyContinue
             if ($null -eq $cmd) { throw 'PYTHON_UNAVAILABLE' }
             $oldPath = $env:PYTHONPATH
             $env:PYTHONPATH = Join-Path $root 'src'
-            $env:AI_COMMERCE_ENSURE_9444_PRIVATE_CONFIG = [string]$found[0]
             $script = @'
           import json, os, re
           from pathlib import Path
           from ai_commerce.remote import chrome_acquisition as ca
           try:
-              env = ca.load_environment(Path(os.environ["AI_COMMERCE_ENSURE_9444_PRIVATE_CONFIG"]),
-                                        Path(os.environ["GITHUB_WORKSPACE"]),
-                                        local_app_data=Path(os.environ["LOCALAPPDATA"]))
+              local = Path(os.environ["LOCALAPPDATA"])
+              checkout = Path(os.environ["GITHUB_WORKSPACE"])
+              registry = ca._config_9444_registry(local, checkout)
+              if len(registry.present) != 1:
+                  raise ca.AcquisitionBlocked("DEDICATED_CONFIG_NOT_ENROLLED")
+              env = ca.load_environment(registry.present[0], checkout, local_app_data=local)
               if env.port != 9444 or env.endpoint != "http://127.0.0.1:9444":
                   raise ca.AcquisitionBlocked("WRONG_CDP_PORT")
               result = ca.run(env, launch=True, opt_in=True)
@@ -613,7 +607,6 @@ jobs:
               $exit = $LASTEXITCODE
             } finally {
               $env:PYTHONPATH = $oldPath
-              Remove-Item Env:AI_COMMERCE_ENSURE_9444_PRIVATE_CONFIG -ErrorAction SilentlyContinue
             }
             if ($exit -ne 0 -or $native.Count -ne 1 -or $native[0].Length -gt 512) {
               throw 'NATIVE_RESULT_UNKNOWN'
