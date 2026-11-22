@@ -7,11 +7,11 @@ provider-shaped callbacks cannot authenticate a ChatGPT account or USER turn.
 
 Local checks only reject inconsistent claims. Passing them always terminates
 in NATIVE_PRIVATE_PROVIDER_UNAVAILABLE; it never permits Send or returns proof.
-The future private owner must independently authenticate origin, grant freshness
-and atomic one-shot consumption, durable RESERVED intent, current exclusive
-surface, and the server USER-turn receipt, all bound to the exact same scope.
-R3B2B consumer integration is deliberately separate. No UNKNOWN effect may be
-replayed; absence of a receipt is never evidence that a click did not execute.
+An enrolled Windows owner must verify the scope and signed grant against its
+own trust root and atomically consume both the grant and event in a private
+journal with a durable RESERVED intent before any effect. It must verify the
+current exclusive surface and independently attest the server USER turn for
+the same scope. An UNKNOWN effect remains terminal even without a receipt.
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from enum import Enum
 import hashlib
 import re
-from typing import Literal
+from typing import Literal, TypeGuard
 
 
 class AttestationPhase(str, Enum):
@@ -101,10 +101,28 @@ class OriginPins:
 
 
 @dataclass(frozen=True, slots=True, repr=False)
+class RegisteredTurnContext:
+    """Expected registered route, interactive Windows session, and event digest.
+
+    The event digest binds the artifact selected by the runtime's independent
+    verifier. Constructing this value supplies no artifact or native proof.
+    """
+
+    chat_url: str
+    windows_sid: str
+    windows_session_id: int
+    windows_logon_id: str
+    desktop: str
+    event_payload_sha256: str
+
+
+@dataclass(frozen=True, slots=True, repr=False)
 class TurnScope:
     origin: OriginPins
     event_id: str
     message_sha256: str
+    # Registered runtime requests always supply this. Older diagnostics may omit it.
+    registered_context: RegisteredTurnContext | None = None
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -223,7 +241,7 @@ def _ref(value: object) -> bool:
             and all(33 <= ord(char) <= 126 for char in value))
 
 
-def _timestamp(value: object) -> bool:
+def _timestamp(value: object) -> TypeGuard[int]:
     return type(value) is int and value >= 0
 
 
@@ -235,6 +253,22 @@ def _fresh(issued_at: object, expires_at: object, now: int) -> bool:
 def _signature(value: object) -> bool:
     # Shape only. No key material, local signing, or signature verification.
     return type(value) is bytes and 1 <= len(value) <= 8192
+
+
+def _valid_registered_context(context: object, conversation_id: str) -> bool:
+    # The remote package imports the doorbell consumer of this module.
+    from ai_commerce.remote.conversation_binding import _CHAT
+
+    if (type(context) is not RegisteredTurnContext
+            or type(context.chat_url) is not str
+            or not _ref(context.windows_sid) or not _ref(context.windows_logon_id)
+            or type(context.windows_session_id) is not int or context.windows_session_id <= 0
+            or type(context.desktop) is not str or context.desktop != r"WinSta0\Default"
+            or type(context.event_payload_sha256) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", context.event_payload_sha256) is None):
+        return False
+    chat = _CHAT.fullmatch(context.chat_url)
+    return chat is not None and chat.group(1) == conversation_id
 
 
 def _valid_scope(scope: object) -> bool:
@@ -250,14 +284,16 @@ def _valid_scope(scope: object) -> bool:
             and type(scope.event_id) is str
             and re.fullmatch(r"ef02-completion-v1:[0-9a-f]{64}", scope.event_id) is not None
             and type(scope.message_sha256) is str
-            and re.fullmatch(r"[0-9a-f]{64}", scope.message_sha256) is not None)
+            and re.fullmatch(r"[0-9a-f]{64}", scope.message_sha256) is not None
+            and (scope.registered_context is None
+                 or _valid_registered_context(scope.registered_context, pins.conversation_id)))
 
 
 def _same_scope(candidate: object, expected: TurnScope) -> bool:
     return _valid_scope(candidate) and candidate == expected
 
 
-def _claims_code(request: WakeRequest, evidence: TurnEvidence, now: int,
+def _claims_code(request: WakeRequest | None, evidence: TurnEvidence | None, now: int | None,
                  phase: AttestationPhase) -> GateCode | None:
     if (type(request) is not WakeRequest or not _valid_scope(request.scope)
             or type(request.message_bytes) is not bytes or not request.message_bytes):
@@ -325,7 +361,7 @@ def _claims_code(request: WakeRequest, evidence: TurnEvidence, now: int,
     return None
 
 
-def pre_send(request: WakeRequest, evidence: TurnEvidence, *, now: int) -> GateResult:
+def pre_send(request: WakeRequest, evidence: TurnEvidence | None, *, now: int | None) -> GateResult:
     """Reject invalid claims before any possible staging/click; never Send-ready.
 
     No injectable verifier, provider callback or caller-set verified flag exists.
@@ -338,8 +374,8 @@ def pre_send(request: WakeRequest, evidence: TurnEvidence, *, now: int) -> GateR
                       code or GateCode.NATIVE_PRIVATE_PROVIDER_UNAVAILABLE)
 
 
-def post_send(request: WakeRequest, evidence: TurnEvidence, *, outcome: SendOutcome,
-              user_turn: ChatGPTUserTurnRef | None = None, now: int) -> GateResult:
+def post_send(request: WakeRequest | None, evidence: TurnEvidence | None, *, outcome: SendOutcome,
+              user_turn: ChatGPTUserTurnRef | None = None, now: int | None) -> GateResult:
     """Classify evidence only. Every possible click remains UNKNOWN, no replay.
 
     Never downgrade an uncertain effect to a retryable pre-send HOLD, including
