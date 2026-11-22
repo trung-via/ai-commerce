@@ -99,10 +99,10 @@ def _revalidate(obj: Any, cls: type[Any]) -> Any:
 
 @dataclass(frozen=True, slots=True)
 class ModelConfiguration:
-    """Requested target, not evidence of which model actually answered."""
+    """Requested target. UNKNOWN is an explicit route choice with no model selected."""
 
     provider: str
-    model: str
+    model: str = "UNKNOWN"
     effort: str | None = None
 
     def __post_init__(self) -> None:
@@ -1702,14 +1702,12 @@ class _CycleHalt(Exception):
 
 def _cycle_step_failure(stage: A03CreativeStageResult, previous: list[A03CreativeStageResult],
                         authorization: InvocationAuthorization) -> str | None:
-    from .live import verified_model_transport
+    from .live import verified_reasoning_receipt
 
     if stage.status not in ("CREATIVE_COMPLETE", "TEST_ONLY_MOCK"):
         return stage.failure or "UNKNOWN_INFERENCE"
     result = stage.reasoning
-    if result.observation.mode == "MODEL" and verified_model_transport(
-        stage.job.configuration, result.observation, result.execution, authorization=authorization,
-    ) is None:
+    if result.observation.mode == "MODEL" and verified_reasoning_receipt(stage, authorization=authorization) is None:
         return "UNVERIFIED_MODEL_EXECUTION"
     for prior in previous:
         other = prior.reasoning
@@ -1731,12 +1729,18 @@ def _replayed_transport_attempt(left: CLIExecutionObservation | None, right: CLI
 
 def _creative_cycle_flow(job: A03CreativeCycleJob, authorization: InvocationAuthorization):
     """Pure state machine shared by execution and strict receipt validation."""
-    if job.seed.configuration is None:
+    from .live import _reasoning_route_hold
+
+    config = job.seed.configuration
+    if config is None:
         return "HOLD", "NO_MODEL_CONFIGURED", None, None
     if job.seed.purpose == "PRODUCTION":
         if not (authorization.allow_network and authorization.allow_spend and authorization.authorization_ref):
             return "HOLD", "UNAUTHORIZED", None, None
-        if job.seed.configuration.effort in (None, "UNKNOWN"):
+        route_hold = _reasoning_route_hold(config, "EXPLORE")
+        if route_hold is not None:
+            return "HOLD", route_hold, None, None
+        if config.effort in (None, "UNKNOWN"):
             return "HOLD", "UNVERIFIED_MODEL_CONFIGURATION", None, None
     previous: list[A03CreativeStageResult] = []
 
@@ -2128,14 +2132,12 @@ def _production_step_failure(
     stage: A03CreativeStageResult, cycle: A03CreativeCycleResult,
     authorization: InvocationAuthorization, parent: A03CreativeProductionPackage | None,
 ) -> str | None:
-    from .live import verified_model_transport
+    from .live import verified_reasoning_receipt
 
     if stage.status not in ("CREATIVE_COMPLETE", "TEST_ONLY_MOCK"):
         return stage.failure or "UNKNOWN_INFERENCE"
     result = stage.reasoning
-    if result.observation.mode == "MODEL" and verified_model_transport(
-        stage.job.configuration, result.observation, result.execution, authorization=authorization,
-    ) is None:
+    if result.observation.mode == "MODEL" and verified_reasoning_receipt(stage, authorization=authorization) is None:
         return "UNVERIFIED_MODEL_EXECUTION"
     for prior in cycle.steps:
         other = prior.reasoning
@@ -2167,7 +2169,7 @@ class A03CreativeProductionResult:
     schema_version: str = "A03CreativeProductionResult.v1"
 
     def __post_init__(self) -> None:
-        from .live import InvocationAuthorization, verified_model_transport
+        from .live import InvocationAuthorization, verified_reasoning_receipt
         with _parse_scope():
             if self.schema_version != "A03CreativeProductionResult.v1" or not isinstance(self.job, A03CreativeProductionJob):
                 raise CreativeValidationError("expected typed R3 production result")
@@ -2232,8 +2234,7 @@ class A03CreativeProductionResult:
                         raise CreativeValidationError("production revision disagrees with pinned parent package")
                 if self.status == "CREATIVE_COMPLETE":
                     if (self.job.purpose != "PRODUCTION" or p.lineage.cycle_status != "CREATIVE_COMPLETE"
-                            or verified_model_transport(p.configuration, p.observation, p.execution,
-                                                        authorization=self.authorization) is None):
+                            or verified_reasoning_receipt(self.stage, authorization=self.authorization) is None):
                         raise CreativeValidationError("CREATIVE_COMPLETE production result requires verified native MODEL execution")
                 else:
                     if (self.job.purpose != "TEST_ONLY_MOCK" or p.observation.mode != "TEST_ONLY_MOCK"
@@ -2301,7 +2302,7 @@ def run_creative_production(
     CREATIVE_COMPLETE results; replaying a saved result resumes delivery
     without reinference.
     """
-    from .live import InvocationAuthorization, LiveCreativeReasoner
+    from .live import InvocationAuthorization, LiveCreativeReasoner, _reasoning_route_hold
     from .sidecars import CreativeSidecarStore
     from ._validation import VersionConflict
 
@@ -2360,11 +2361,16 @@ def run_creative_production(
         sidecars.save_production_result(result)
         return sidecars.load_production_result(job)
 
+    operation = "REVISE_PACKAGE" if parent_package is not None else "PRODUCE_PACKAGE"
+    route_hold = (_reasoning_route_hold(job.configuration, operation)
+                  if job.configuration is not None and job.purpose == "PRODUCTION" else None)
     hold_failure: str | None = None
     if job.configuration is None:
         hold_failure = "NO_MODEL_CONFIGURED"
     elif job.purpose == "PRODUCTION" and not (grant.allow_network and grant.allow_spend and grant.authorization_ref):
         hold_failure = "UNAUTHORIZED"
+    elif route_hold is not None:
+        hold_failure = route_hold
     elif job.purpose == "PRODUCTION" and job.configuration.effort in (None, "UNKNOWN"):
         hold_failure = "UNVERIFIED_MODEL_CONFIGURATION"
     elif job.purpose == "PRODUCTION" and cycle.status == "TEST_ONLY_MOCK":

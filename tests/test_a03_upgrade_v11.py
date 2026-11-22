@@ -16,7 +16,7 @@ from ai_commerce.core.provenance import canonical_bytes, sha256_bytes
 from ai_commerce.creative import live as creative_live
 from ai_commerce.creative import v2 as creative_v2
 from ai_commerce.creative import (
-    A03CreativeJob, A03CreativeStageResult, AIInferenceBinding,
+    A03CreativeJob, A03CreativeStageResult, AIInferenceBinding, AIReasoningTask,
     ActorDecision, ActorRef, CodexCliCapability, CodexCliCreativeClient,
     ConceptDraft, ConceptRecord, ConceptSelection, CreativeJobProvenance,
     CreativeIntent, CreativeSidecarStore, CreativeStore, CreativeValidationError,
@@ -39,9 +39,10 @@ from ai_commerce.creative import (
     NSM_V1_VERSION, NSM_V1_WEIGHTS,
     aggregate_benchmark_telemetry, calculate_nsm_v1_score, compare_benchmark_observations,
     evaluate_benchmark_structure, observe_benchmark_run,
-    verified_model_transport,
+    assess_brain_cdp_turn, select_reasoning_provider, verified_model_transport,
 )
 from ai_commerce.providers.base import ProviderCapabilities, ProviderError
+from ai_commerce.wakehub_cdp import authenticated_turn as wakehub_turn
 from ai_commerce.creative.v2 import (
     A03BenchmarkExperimentPlan, BenchmarkLiveTrialGrant, BenchmarkResearchTarget, BenchmarkTrialBudget,
     BenchmarkTrialGrant,
@@ -1490,6 +1491,124 @@ def cycle_job(*, brief=None, count=2, **options):
 
 def cycle_adapter(client):
     return LiveCreativeReasoner(ModelConfiguration("requested-provider", "requested-model", "xhigh"), client)
+
+
+@pytest.mark.parametrize(("provider", "transport", "hold"), [
+    ("codex-cli", "codex-exec-jsonl", "MODEL_SELECTION_REQUIRED"),
+    ("antigravity-cli", "antigravity-cli-session", "AGY_AUTHENTICATED_CLI_SESSION_UNAVAILABLE"),
+    ("chatgpt-brain-cdp", "wakehub-chrome-cdp-9444", "BRAIN_CDP_ORIGIN_AND_TURN_AUTHORITY_UNAVAILABLE"),
+])
+def test_c1_selects_task_route_without_model_and_holds_without_transport(tmp_path, provider, transport, hold):
+    config = ModelConfiguration(provider)
+    cycle = cycle_job(seed_options={"purpose": "PRODUCTION", "configuration": config})
+    request = creative_v2._cycle_request(cycle, "explore", "EXPLORE")
+    job = creative_v2._cycle_stage_job(cycle, request)
+    grant = InvocationAuthorization(True, True, "fixture:c1")
+    task = AIReasoningTask(job, grant)
+    wire = json.loads(task.canonical_payload)
+
+    assert select_reasoning_provider(provider, "EXPLORE") == task.route
+    assert select_reasoning_provider(provider, "PRODUCE_PACKAGE") == task.route
+    assert select_reasoning_provider(provider, "RESEARCH") is None
+    assert wire["transport_id"] == transport and wire["job_sha256"] == job.digest
+    assert wire["request"] == StructuredModelRequest(config, request).to_dict()
+    assert task.digest != replace(task, job=replace(job, attempt=job.attempt + 1)).digest
+    assert task.digest != replace(task, authorization=replace(grant, authorization_ref="fixture:other")).digest
+    assert task.digest != replace(task, job=replace(
+        job, provenance=replace(job.provenance, source_ref="fixture:other-source"),
+    )).digest
+    assert task.digest != replace(task, job=replace(
+        job, configuration=ModelConfiguration(provider, "requested-model", "requested-effort"),
+    )).digest
+
+    result = run_creative_cycle(cycle, tmp_path, authorization=grant)
+    assert (result.status, result.failure, result.steps) == ("HOLD", hold, ())
+    assert run_creative_cycle(cycle, tmp_path, authorization=grant) == result
+
+
+def test_c1_no_route_and_missing_runner_grant_hold_before_inference(tmp_path):
+    unknown = ModelConfiguration("unregistered")
+    assert select_reasoning_provider(unknown.provider, "EXPLORE") is None
+    job = cycle_job(seed_options={"purpose": "PRODUCTION", "configuration": unknown})
+    grant = InvocationAuthorization(True, True, "fixture:c1")
+    result = run_creative_cycle(job, tmp_path / "unknown", authorization=grant)
+    assert (result.status, result.failure, result.steps) == ("HOLD", "NO_PROVIDER_ROUTE", ())
+    brain = cycle_job(seed_options={"purpose": "PRODUCTION", "configuration": ModelConfiguration("chatgpt-brain-cdp")})
+    result = run_creative_cycle(brain, tmp_path / "brain")
+    assert (result.status, result.failure, result.steps) == ("HOLD", "UNAUTHORIZED", ())
+
+
+@pytest.mark.parametrize("provider", ["antigravity-cli", "chatgpt-brain-cdp"])
+def test_c1_explicit_model_and_effort_cannot_enable_unverified_provider(provider):
+    class SpoofedClient(CycleFakeClient):
+        execution_mode = "MODEL"
+
+    config = ModelConfiguration(provider, "claimed-model", "claimed-effort")
+    cycle = cycle_job(seed_options={"purpose": "PRODUCTION", "configuration": config})
+    request = creative_v2._cycle_request(cycle, "explore", "EXPLORE")
+    grant = InvocationAuthorization(True, True, "fixture:c1")
+    client = SpoofedClient()
+    result = reason_v2(request, LiveCreativeReasoner(config, client, authorization=grant))
+    assert result.state == "ERROR"
+    assert result.error_code == select_reasoning_provider(provider, "EXPLORE").unavailable_reason
+    assert not client.calls and result.observation == ProviderObservation() and result.execution is None
+
+
+def test_c1_brain_cdp_claims_bind_task_and_exact_origin_without_permitting_send():
+    config = ModelConfiguration("chatgpt-brain-cdp")
+    cycle = cycle_job(seed_options={"purpose": "PRODUCTION", "configuration": config})
+    request = creative_v2._cycle_request(cycle, "explore", "EXPLORE")
+    task = AIReasoningTask(creative_v2._cycle_stage_job(cycle, request),
+                           InvocationAuthorization(True, True, "fixture:c1"))
+    origin = wakehub_turn.OriginPins(
+        "fixture:account", "fixture:chat-a", "fixture:session", 1, "fixture:registration",
+        "fixture:custody", "fixture:profile", "fixture:context", "fixture:tab", "fixture:composer",
+    )
+    scope = wakehub_turn.TurnScope(origin, "ef02-completion-v1:" + "a" * 64, task.digest)
+    grant = wakehub_turn.SignedWakeGrant(scope, "fixture:grant", "fixture:issuer", "fixture:key", b"claim", 1, 9)
+    reservation = wakehub_turn.DurableReservation(scope, "fixture:reservation", grant.grant_ref, "fixture:durable", 2)
+    observation = wakehub_turn.BrowserObservation(scope, "fixture:surface", 1, 1, True, True)
+    attestation = wakehub_turn.NativeAttestation(
+        scope, wakehub_turn.AttestationPhase.PRE_SEND, wakehub_turn.EvidenceSource.NATIVE_PRIVATE_PROVIDER,
+        "fixture:attestation", grant.issuer_ref, grant.key_id, b"claim", grant.grant_ref,
+        reservation.reservation_ref, observation.observation_ref, 3, 9,
+    )
+    evidence = wakehub_turn.TurnEvidence(observation, grant, reservation, attestation)
+
+    def pre(candidate=task, expected_scope=scope, claims=evidence):
+        return assess_brain_cdp_turn(candidate, expected_scope, claims, now=5)
+
+    code = wakehub_turn.GateCode
+    unavailable = pre()
+    assert unavailable.status is wakehub_turn.GateStatus.UNAVAILABLE
+    assert unavailable.code is code.NATIVE_PRIVATE_PROVIDER_UNAVAILABLE
+    assert not unavailable.send_allowed and unavailable.authenticated_user_turn is None
+    for change in ({"conversation_id": "fixture:chat-b"}, {"account_id": "fixture:other-account"},
+                   {"session_ref": "fixture:other-session"}):
+        assert pre(expected_scope=replace(scope, origin=replace(origin, **change))).code is code.SCOPE_MISMATCH
+    stale = replace(task, job=replace(task.job, attempt=task.job.attempt + 1))
+    assert pre(candidate=stale).code is code.MESSAGE_DIGEST_MISMATCH
+    assert pre(claims=replace(evidence, grant=None)).code is code.GRANT_MISSING
+    assert pre(candidate=replace(task, authorization=InvocationAuthorization())).code is code.GRANT_MISSING
+    assert pre(claims=replace(evidence, grant=replace(grant, use_count=1))).code is code.GRANT_REUSED
+    assert pre(claims=replace(evidence, attestation=replace(
+        attestation, source=wakehub_turn.EvidenceSource.SYNTHETIC_FIXTURE,
+    ))).code is code.WRONG_AUTHORITY_SOURCE
+
+    post_evidence = replace(evidence, attestation=replace(attestation, phase=wakehub_turn.AttestationPhase.POST_SEND))
+    claimed_turn = wakehub_turn.ChatGPTUserTurnRef(
+        scope, "fixture:user-turn", "fixture:message", attestation.attestation_ref,
+        grant.grant_ref, reservation.reservation_ref, wakehub_turn.EvidenceSource.NATIVE_PRIVATE_PROVIDER,
+    )
+    for outcome, user_turn, expected in (
+        (wakehub_turn.SendOutcome.CLICK_REPORTED, None, code.USER_TURN_MISSING),
+        (wakehub_turn.SendOutcome.CLICK_REPORTED, claimed_turn, code.NATIVE_PRIVATE_PROVIDER_UNAVAILABLE),
+        (wakehub_turn.SendOutcome.CLICK_AMBIGUOUS, claimed_turn, code.CLICK_AMBIGUOUS_NO_REPLAY),
+        (wakehub_turn.SendOutcome.TRANSPORT_TIMEOUT, None, code.TRANSPORT_TIMEOUT_NO_REPLAY),
+    ):
+        result = assess_brain_cdp_turn(task, scope, post_evidence, now=5, outcome=outcome, user_turn=user_turn)
+        assert result.status is wakehub_turn.GateStatus.UNKNOWN_EFFECT and result.code is expected
+        assert result.authenticated_user_turn is None and not result.retry_allowed
 
 
 @pytest.mark.parametrize("count", [2, 3])

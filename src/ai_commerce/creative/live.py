@@ -15,7 +15,7 @@ import tempfile
 import threading
 import time
 from copy import deepcopy
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal, Protocol
@@ -23,12 +23,14 @@ from uuid import uuid4
 
 from ai_commerce.core.provenance import canonical_bytes, sha256_bytes
 from ai_commerce.providers.base import ProviderCapabilities
+from ai_commerce.wakehub_cdp import authenticated_turn as wakehub_turn
 
 from ._validation import CreativeValidationError, exact_fields, json_object, read_json, require_text
 from .models import EDITABLE_FIELDS, ConceptChange, ConceptDraft, ProductionPackageSpec, ProviderObservation, require_digest
 from .decisions import CreativeModelSelection
 from .v2 import (
-    CLIExecutionObservation, BenchmarkLiveTrialGrant, BenchmarkResearchTarget, BenchmarkRoleTrace, CreativeEvidenceSource,
+    A03CreativeJob, A03CreativeStageResult, CLIExecutionObservation,
+    BenchmarkLiveTrialGrant, BenchmarkResearchTarget, BenchmarkRoleTrace, CreativeEvidenceSource,
     ModelConfiguration, ReasoningRequest, ReasoningResult, UsageObservation, _VERIFIED_EXECUTION_KIND,
     _require_iso_timestamp, _result_schema,
 )
@@ -47,6 +49,51 @@ class InvocationAuthorization:
             require_text(self.authorization_ref, "authorization_ref")
         if (self.allow_network or self.allow_spend) and self.authorization_ref is None:
             raise CreativeValidationError("live authorization needs an explicit reference")
+
+
+@dataclass(frozen=True, slots=True)
+class ReasoningProviderRoute:
+    provider: str
+    transport_id: str
+    operations: frozenset[str]
+    unavailable_reason: str | None = None
+
+
+_REASONING_OPERATIONS = frozenset({
+    "EXPLORE", "CRITIQUE", "SELECT", "DEVELOP", "PRODUCE_PACKAGE", "REVISE_PACKAGE",
+})
+_CODEX_ROUTE = ReasoningProviderRoute("codex-cli", "codex-exec-jsonl", _REASONING_OPERATIONS)
+_AGY_ROUTE = ReasoningProviderRoute(
+    "antigravity-cli", "antigravity-cli-session", _REASONING_OPERATIONS,
+    "AGY_AUTHENTICATED_CLI_SESSION_UNAVAILABLE",
+)
+_BRAIN_ROUTE = ReasoningProviderRoute(
+    "chatgpt-brain-cdp", "wakehub-chrome-cdp-9444", _REASONING_OPERATIONS,
+    "BRAIN_CDP_ORIGIN_AND_TURN_AUTHORITY_UNAVAILABLE",
+)
+_REASONING_ROUTES = (_CODEX_ROUTE, _AGY_ROUTE, _BRAIN_ROUTE)
+
+
+def select_reasoning_provider(provider: str, operation: str) -> ReasoningProviderRoute | None:
+    """Select an explicit R2/R3 route by operation, without probing or choosing a model.
+
+    A match describes the source contract. Codex checks its installed capabilities
+    and login at execution. The other routes require independent native owners.
+    """
+    return next((route for route in _REASONING_ROUTES
+                 if route.provider == provider and operation in route.operations), None)
+
+
+def _reasoning_route_hold(config: ModelConfiguration, operation: str) -> str | None:
+    route = select_reasoning_provider(config.provider, operation)
+    if route is None:
+        # Retain the legacy configured fixture path. It has no MODEL verifier.
+        return "NO_PROVIDER_ROUTE" if config.model == "UNKNOWN" else None
+    if route.unavailable_reason is not None:
+        return route.unavailable_reason
+    if config.model == "UNKNOWN":
+        return "MODEL_SELECTION_REQUIRED"
+    return None
 
 
 def structured_output_schema(*, r2: bool = False, r3: bool = False) -> dict[str, Any]:
@@ -278,6 +325,72 @@ class StructuredModelRequest:
     def to_dict(self) -> dict[str, Any]:
         return {"config": self.config.to_dict(), "creative": self.creative.to_dict(),
                 "output_schema": self.output_schema}
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class AIReasoningTask:
+    """Source contract for an R2/R3 transport, including the exact job and grant.
+
+    Its digest binds the job's attempt, provenance and source to the structured
+    request and output schema. It does not authenticate the runner or the route.
+    """
+
+    job: A03CreativeJob
+    authorization: InvocationAuthorization
+    route: ReasoningProviderRoute = field(init=False)
+
+    def __post_init__(self) -> None:
+        if type(self.job) is not A03CreativeJob or type(self.authorization) is not InvocationAuthorization:
+            raise CreativeValidationError("reasoning task requires a typed job and runner authorization")
+        job = A03CreativeJob.from_dict(self.job.to_dict())
+        grant = replace(self.authorization)
+        if job.purpose != "PRODUCTION" or (job.request.cycle is None and job.request.production is None):
+            raise CreativeValidationError("reasoning task requires an R2/R3 production job")
+        config = job.configuration
+        route = select_reasoning_provider(config.provider, job.request.operation) if config is not None else None
+        if route is None:
+            raise CreativeValidationError("NO_PROVIDER_ROUTE")
+        object.__setattr__(self, "job", job)
+        object.__setattr__(self, "authorization", grant)
+        object.__setattr__(self, "route", route)
+
+    @property
+    def canonical_payload(self) -> bytes:
+        return canonical_bytes({
+            "schema_version": "AIReasoningTask.v1",
+            "transport_id": self.route.transport_id,
+            "job_sha256": self.job.digest,
+            "request": StructuredModelRequest(self.job.configuration, self.job.request).to_dict(),
+            "authorization": {item.name: getattr(self.authorization, item.name)
+                              for item in fields(InvocationAuthorization)},
+        })
+
+    @property
+    def digest(self) -> str:
+        return sha256_bytes(self.canonical_payload)
+
+
+def assess_brain_cdp_turn(
+    task: AIReasoningTask, scope: wakehub_turn.TurnScope, evidence: wakehub_turn.TurnEvidence,
+    *, now: int, outcome: wakehub_turn.SendOutcome | None = None,
+    user_turn: wakehub_turn.ChatGPTUserTurnRef | None = None,
+) -> wakehub_turn.GateResult:
+    """Bind expected WakeHub origin/event pins to the task and check claims read-only.
+
+    The WakeHub owner must supply the expected scope. This diagnostic never
+    authorizes Send or verifies a Brain response. The existing WakeHub event
+    contract is scoped to its registered wake flow.
+    """
+    if type(task) is not AIReasoningTask or task.route is not _BRAIN_ROUTE:
+        raise CreativeValidationError("expected ChatGPT Brain CDP reasoning task")
+    request = wakehub_turn.WakeRequest(scope, task.canonical_payload)
+    if outcome is not None:
+        return wakehub_turn.post_send(request, evidence, outcome=outcome, user_turn=user_turn, now=now)
+    grant = task.authorization
+    if not (grant.allow_network and grant.allow_spend and grant.authorization_ref):
+        return wakehub_turn.GateResult(wakehub_turn.AttestationPhase.PRE_SEND,
+                                       wakehub_turn.GateStatus.HOLD, wakehub_turn.GateCode.GRANT_MISSING)
+    return wakehub_turn.pre_send(request, evidence, now=now)
 
 
 def _cli_request(request: StructuredModelRequest) -> tuple[str, dict[str, Any], bytes]:
@@ -970,7 +1083,7 @@ class _SourceTransport:
 # immutable legacy wire selects its verifier by provider, so a provider has
 # one receipt verifier under this format.
 _SOURCE_TRANSPORTS = (
-    _SourceTransport("codex-exec-jsonl", "codex-cli", CodexCliCreativeClient,
+    _SourceTransport(_CODEX_ROUTE.transport_id, _CODEX_ROUTE.provider, CodexCliCreativeClient,
                      _VERIFIED_EXECUTION_KIND,
                      CodexCliCreativeClient.execution_mode.fget, CodexCliCreativeClient._complete,
                      _verify_codex_receipt, CodexCliCreativeClient.benchmark_budget_hold),
@@ -1021,6 +1134,27 @@ def _verify_saved_transport(request: StructuredModelRequest, response: Structure
             or not _bound_transport_execution(request.config, response.execution)):
         raise CreativeValidationError("unbound native transport completion")
     transport.verify_receipt(request, response)
+
+
+def verified_reasoning_receipt(
+    stage: A03CreativeStageResult, *, authorization: InvocationAuthorization,
+) -> str | None:
+    """Identify the native transport of a validated R2/R3 stage from trusted storage."""
+    if type(stage) is not A03CreativeStageResult or type(authorization) is not InvocationAuthorization:
+        return None
+    job, receipt = stage.job, stage.reasoning
+    config = job.configuration
+    if (stage.status != "CREATIVE_COMPLETE" or job.purpose != "PRODUCTION"
+            or config is None or receipt.configuration != config
+            or receipt.request != job.request or receipt.response_json is None
+            or (job.request.cycle is None and job.request.production is None)):
+        return None
+    route = select_reasoning_provider(config.provider, job.request.operation)
+    if route is None or route.unavailable_reason is not None:
+        return None
+    transport_id = verified_model_transport(config, receipt.observation, receipt.execution,
+                                            authorization=authorization)
+    return transport_id if transport_id == route.transport_id else None
 
 
 class LiveCreativeReasoner:
@@ -1107,6 +1241,15 @@ class LiveCreativeReasoner:
             return ReasoningResult(request, state, *output, configuration=config,
                                    schema_version=_result_schema(request), **metadata)
 
+        if config is not None and (request.cycle is not None or request.production is not None):
+            hold = _reasoning_route_hold(config, request.operation)
+            if hold is not None:
+                route = select_reasoning_provider(config.provider, request.operation)
+                if (route is not None and route.unavailable_reason is not None
+                        and not (authorization.allow_network and authorization.allow_spend)):
+                    return outcome("UNAUTHORIZED", error_code="UNAUTHORIZED",
+                                   message="Provider route requires explicit network and spend authorization")
+                return outcome("ERROR", error_code=hold, message="Requested reasoning route cannot execute")
         if config is None or client is None or "UNKNOWN" in (config.provider, config.model):
             return outcome("NO_MODEL_CONFIGURED", error_code="NO_MODEL_CONFIGURED",
                                    message="Supply an explicit model configuration and structured client")
