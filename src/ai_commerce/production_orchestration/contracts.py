@@ -516,3 +516,137 @@ class ProductionStageDispatched(_Record):
         require(self.receipt.spec == self.spec and self.receipt.completed_sha256 == self.completed_sha256,
                 "DISPATCH_RECEIPT_BINDING")
         require(self.receipt_sha256 == self.receipt.sha256, "DISPATCH_RECEIPT_HASH_MISMATCH")
+
+
+@dataclass(frozen=True, kw_only=True)
+class LocalBrainDecisionInput:
+    """Bounded local single-owner BrainDecision.v1 transfer input.
+
+    Records local origin/chat_ref and exact decision bytes for traceability.
+    Labels are informational only: this object never claims private verifier
+    attestation, cryptographic identity proof, or live CDP operation.
+    """
+    decision_bytes: bytes
+    origin_ref: str
+    origin_kind: Literal["LOCAL_CHATGPT_TRANSFER", "TEST_ONLY"] = "LOCAL_CHATGPT_TRANSFER"
+    chat_ref: str | None = None
+    evidence_request_sha256: str | None = None
+
+    @property
+    def is_test_only(self) -> bool:
+        return self.origin_kind == "TEST_ONLY"
+
+    def __post_init__(self) -> None:
+        require(type(self.decision_bytes) is bytes and 0 < len(self.decision_bytes) <= 131072,
+                "BRAIN_DECISION_INVALID")
+        _text(self.origin_ref)
+        require(
+            type(self.origin_kind) is str
+            and self.origin_kind in {"LOCAL_CHATGPT_TRANSFER", "TEST_ONLY"},
+            "INVALID_BRAIN_ORIGIN_KIND",
+        )
+        if self.origin_kind == "TEST_ONLY":
+            require(self.origin_ref.startswith("TEST_ONLY:"), "TEST_ONLY_ORIGIN_LABEL_REQUIRED")
+        else:
+            require(not self.origin_ref.startswith("TEST_ONLY:"), "TEST_ONLY_ORIGIN_LABEL_MISMATCH")
+        if self.chat_ref is not None:
+            _text(self.chat_ref)
+        if self.evidence_request_sha256 is not None:
+            _hash(self.evidence_request_sha256)
+
+
+@dataclass(frozen=True, kw_only=True)
+class BrainDecisionIntakeResult:
+    """Typed fail-closed result of W3a local single-owner BrainDecision.v1 intake.
+
+    READY_FOR_HUMAN_RELEASE is the unchanged B0.1 state name only, not a
+    required routine Human review stage. Labels are informational only and
+    never claim private-authenticated identity or live CDP operation.
+    """
+    status: Literal["BRAIN_ACCEPTED", "NO_DECISION", "HOLD"]
+    state: Literal["WAIT_BRAIN", "READY_FOR_HUMAN_RELEASE", "UNKNOWN_EFFECT", "HOLD"]
+    reason: str
+    accepted: bool = False
+    idempotent_replay: bool = False
+    journey_id: str | None = None
+    source_sha: str | None = None
+    logical_identity: str | None = None
+    directive_sha256: str | None = None
+    evidence_request_sha256: str | None = None
+    artifact_sha256: str | None = None
+    q4_qa_sha256: str | None = None
+    decision_id: str | None = None
+    decision_sha256: str | None = None
+    decision_bytes_sha256: str | None = None
+    chat_ref: str | None = None
+    event_id: str | None = None
+    origin_ref: str | None = None
+    origin_kind: Literal["NONE", "LOCAL_CHATGPT_TRANSFER", "TEST_ONLY"] = "NONE"
+    accepted_receipt_sha256: str | None = None
+    accepted_receipt_file_sha256: str | None = None
+    accepted_receipt_ref: str | None = None
+    journal_seq: int | None = None
+    pulse_journal_checkpoint: dict | None = None
+    identity_authenticated: Literal[False] = False
+    live_cdp_proven: Literal[False] = False
+    rights_granted: Literal[False] = False
+    provider_grant: Literal[False] = False
+    publish_authorized: Literal[False] = False
+    spend_authorized: Literal[False] = False
+    network_calls_performed: Literal[0] = 0
+    publish_calls: Literal[0] = 0
+    paid_generation_calls: Literal[0] = 0
+    human_attended_required: Literal[False] = False
+
+    def __post_init__(self) -> None:
+        require(
+            type(self.status) is str
+            and self.status in {"BRAIN_ACCEPTED", "NO_DECISION", "HOLD"},
+            "INVALID_BRAIN_INTAKE_STATUS",
+        )
+        require(
+            type(self.state) is str
+            and self.state in {"WAIT_BRAIN", "READY_FOR_HUMAN_RELEASE", "UNKNOWN_EFFECT", "HOLD"},
+            "INVALID_BRAIN_INTAKE_STATE",
+        )
+        _text(self.reason)
+        require(type(self.accepted) is bool and self.accepted is (self.status == "BRAIN_ACCEPTED"),
+                "INVALID_BRAIN_INTAKE_STATUS")
+        require(type(self.idempotent_replay) is bool, "INVALID_BRAIN_INTAKE_STATUS")
+        require(
+            type(self.origin_kind) is str
+            and self.origin_kind in {"NONE", "LOCAL_CHATGPT_TRANSFER", "TEST_ONLY"},
+            "INVALID_BRAIN_ORIGIN_KIND",
+        )
+        if self.accepted:
+            require(self.state == "READY_FOR_HUMAN_RELEASE", "INVALID_BRAIN_INTAKE_STATE")
+            require(self.origin_kind != "NONE", "INVALID_BRAIN_ORIGIN_KIND")
+            for value in (
+                self.journey_id, self.source_sha, self.logical_identity,
+                self.decision_id, self.chat_ref, self.event_id,
+                self.origin_ref, self.accepted_receipt_ref,
+            ):
+                _text(value)
+            for value in (
+                self.directive_sha256, self.evidence_request_sha256,
+                self.artifact_sha256, self.q4_qa_sha256,
+                self.decision_sha256, self.decision_bytes_sha256,
+                self.accepted_receipt_sha256, self.accepted_receipt_file_sha256,
+            ):
+                _hash(value)
+            require(type(self.journal_seq) is int and self.journal_seq >= 1, "INVALID_JOURNAL_SEQ")
+        else:
+            require(self.state != "READY_FOR_HUMAN_RELEASE", "INVALID_BRAIN_INTAKE_STATE")
+        require(
+            self.identity_authenticated is False
+            and self.live_cdp_proven is False
+            and self.rights_granted is False
+            and self.provider_grant is False
+            and self.publish_authorized is False
+            and self.spend_authorized is False
+            and self.network_calls_performed == 0
+            and self.publish_calls == 0
+            and self.paid_generation_calls == 0
+            and self.human_attended_required is False,
+            "OFFLINE_AUTHORITY_VIOLATION",
+        )

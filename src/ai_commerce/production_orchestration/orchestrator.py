@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 import json
 from pathlib import Path
+import re
 import sqlite3
 import time
 from typing import Literal
@@ -36,10 +37,26 @@ from ai_commerce.opportunity.core.models import validate_opportunity_decision
 from ai_commerce.opportunity.signals.files import local_path, read_local
 from ai_commerce.opportunity.signals.files import ledger_path
 from ai_commerce.production_runtime import attended_worker, receipt as runtime_receipt
-from ai_commerce.production_runtime.contracts import parse_contract as parse_pulse_contract
+from ai_commerce.production_runtime.contracts import (
+    ContractError,
+    draft_authorization as pulse_draft_authorization,
+    parse_contract as parse_pulse_contract,
+    seal_contract as seal_pulse_contract,
+)
+from ai_commerce.production_runtime.state_machine import (
+    AuthorityKind,
+    AuthorityReceipt,
+    Event as PulseEvent,
+    EventKind as PulseEventKind,
+    State as PulseState,
+    TransitionError,
+    VerificationContext,
+    transition as pulse_transition,
+)
 
 from .contracts import (
-    A03PackageHandoff, A04PulseHandoff, CONSUMER_ROUTES, LocalAuthorization, LocalHandoff, OrchestrationError,
+    A03PackageHandoff, A04PulseHandoff, BrainDecisionIntakeResult, CONSUMER_ROUTES,
+    LocalAuthorization, LocalBrainDecisionInput, LocalHandoff, OrchestrationError,
     ProductionStageCompleted, ProductionStageDispatched, ProductionStageReceipt,
     Provenance, RouteAuthorization, StageSpec, bytes_digest, canonical_bytes, digest, require,
 )
@@ -1586,3 +1603,914 @@ class ProductionPipelineOrchestrator:
             else:
                 keys = [row[0] for row in db.execute("SELECT key FROM outbox WHERE slot=?", (base_slot,))]
         return tuple(self.dispatch_local(key) for key in keys)
+
+    def _brain_decision_cut(self, name: str) -> None:
+        """Named crash-window cut for BrainDecision.v1 intake tests; no fault switches."""
+
+    def _pulse_brain_decision_dir(self, key: str) -> Path:
+        return local_path(self._state_dir / "pulse-brain-decisions" / key[:32])
+
+    @staticmethod
+    def _seal_brain_accepted_receipt(directive, accepted_snapshot):
+        """Seal post-BRAIN_ACCEPTED B0.1 ProductJourneyReceipt.v1 without mutating B0.1 schema."""
+        require(
+            accepted_snapshot.state == PulseState.READY_FOR_HUMAN_RELEASE
+            and accepted_snapshot.brain_decision is not None
+            and accepted_snapshot.effect_status == "NONE",
+            "BRAIN_ACCEPTED_SNAPSHOT_REQUIRED",
+        )
+        value = directive.to_dict()
+        decision = accepted_snapshot.brain_decision.to_dict()
+        fixture = any(p.evidence_type == "SYNTHETIC_FIXTURE" for p in accepted_snapshot.evidence)
+        evidence_type = "SYNTHETIC_FIXTURE" if fixture else "HUMAN_SUPPLIED"
+        actor_ref = "fixture:a04-pulse-offline" if fixture else "human:a04-pulse-offline"
+        sealed = seal_pulse_contract("ProductJourneyReceipt", {
+            "schema_version": "ProductJourneyReceipt.v1",
+            **{k: value[k] for k in ("journey_id", "source_sha", "directive_version", "directive_sha256", "scope")},
+            "state": "READY_FOR_HUMAN_RELEASE",
+            "brain_decision": {"ref": decision["decision_id"], "sha256": decision["decision_sha256"]},
+            "owner_evidence_refs": [asdict(p) for p in accepted_snapshot.evidence],
+            "effect": {
+                "status": "NONE",
+                "idempotency_key": None,
+                "request_sha256": None,
+                "receipt": None,
+            },
+            "network_calls_performed": False,
+            "external_effects_performed": False,
+            "authorization": pulse_draft_authorization(),
+            "provenance": {
+                "evidence_type": evidence_type,
+                "actor": "FIXTURE" if fixture else "HUMAN",
+                "actor_ref": actor_ref,
+                "source_ref": "directive:" + value["directive_sha256"],
+                "source_sha": value["source_sha"],
+            },
+        })
+        return parse_pulse_contract("ProductJourneyReceipt", sealed.raw)
+
+    def _load_completed_pulse_stage(self, key: str) -> tuple[ProductionStageCompleted, dict, Path, Path]:
+        grant = self._grant()
+        require(grant.route_id == "a04-to-pulse-offline", "LOCAL_ROUTE_MISMATCH")
+        require(type(key) is str and len(key) > 0, "COMPLETED_NOT_FOUND")
+        with self._database() as db:
+            row = db.execute("SELECT * FROM outbox WHERE key=?", (key,)).fetchone()
+            require(row is not None, "COMPLETED_NOT_FOUND")
+            completed = ProductionStageCompleted.from_dict(json.loads(row["completed"]))
+            require(row["key"] == completed.spec.idempotency_key, "LOCAL_COMPLETION_BINDING")
+            self._authorize_completed(completed)
+            require(
+                row["state"] == "SUCCESS"
+                and row["witness"] is not None
+                and row["dispatched"] is not None,
+                "PULSE_WAIT_BRAIN_NOT_COMMITTED",
+            )
+            witness = json.loads(row["witness"])
+        require(type(witness) is dict and witness.get("schema_version") == "A04PulseLocalInvocation.v1",
+                "INVOCATION_WITNESS_MISMATCH")
+        private_dir, export_dir = self._pulse_receiver_dirs(key)
+        expected_receipt_path = local_path(export_dir / "ProductJourneyReceipt.v1.json")
+        expected_evidence_path = local_path(export_dir / "autonomous-offline-evidence.json")
+        require(
+            witness.get("completed_sha256") == completed.sha256
+            and witness.get("private_dir") == str(private_dir)
+            and witness.get("export_dir") == str(export_dir)
+            and witness.get("artifact_ref") == str(expected_receipt_path)
+            and witness.get("evidence_ref") == str(expected_evidence_path),
+            "INVOCATION_WITNESS_MISMATCH",
+        )
+        return completed, witness, private_dir, export_dir
+
+    def _pulse_wait_brain_kwargs(self, completed: ProductionStageCompleted) -> dict:
+        grant = self._grant()
+        handoff = completed.spec.pulse_handoff
+        require(handoff is not None, "LOCAL_ROUTE_MISMATCH")
+        receiver_auth = self._pulse_receiver_authorization(
+            grant,
+            attempt=handoff.attempt,
+            packet_id=handoff.packet_id,
+            packet_sha256=handoff.packet_sha256,
+            logical_identity=handoff.logical_identity,
+        )
+        return {
+            "authorization": receiver_auth,
+            "packet_path": handoff.packet_ref,
+            "a04_receipt_path": handoff.a04_receipt_ref,
+            "directive_path": handoff.directive_ref,
+            "assets": handoff.assets,
+            "rights": handoff.rights,
+            "asset_root": handoff.asset_root,
+            "source_sha": handoff.source_sha,
+            "package_path": handoff.package_ref,
+            "a03_result_path": handoff.a03_result_ref,
+        }
+
+    @staticmethod
+    def _verify_request_matches_witness(request_data: dict, witness: dict, handoff: A04PulseHandoff) -> None:
+        require(
+            request_data["journey_id"] == handoff.journey_id
+            and request_data["source_sha"] == handoff.source_sha
+            and request_data["packet_id"] == handoff.packet_id == witness.get("packet_id")
+            and request_data["packet_sha256"] == handoff.packet_sha256
+            and request_data["logical_identity"] == handoff.logical_identity == witness.get("logical_identity")
+            and request_data["a04_receipt_id"] == handoff.a04_receipt_id == witness.get("a04_receipt_id")
+            and request_data["a04_receipt_digest"] == handoff.a04_receipt_digest
+            and request_data["receipt_sha256"] == witness.get("receiver_receipt_sha256")
+            and request_data["receipt_file_sha256"] == witness.get("receiver_receipt_file_sha256")
+            and request_data["autonomous_evidence_sha256"] == witness.get("receiver_evidence_sha256")
+            and request_data["autonomous_evidence_file_sha256"] == witness.get("receiver_evidence_file_sha256")
+            and request_data["local_artifact"]["artifact_sha256"] == witness.get("media_artifact_sha256")
+            and request_data["q4_technical_qa"]["qa_ref"] == witness.get("q4_qa_ref")
+            and request_data["q4_technical_qa"]["qa_sha256"] == witness.get("q4_qa_sha256")
+            and request_data["journal_checkpoint"] == witness.get("journal_checkpoint")
+            and request_data["journal_checkpoint"]["journal_id"] == witness.get("journal_id"),
+            "BRAIN_EVIDENCE_WITNESS_MISMATCH",
+        )
+
+    def build_pulse_brain_evidence_request(
+        self,
+        key: str,
+        *,
+        expected_generation: int | None = None,
+    ) -> bytes:
+        """Build a bounded, sanitized BrainReviewEvidenceRequest.v1 from a W2 WAIT_BRAIN stage."""
+        completed, witness, private_dir, export_dir = self._load_completed_pulse_stage(key)
+        common_kwargs = self._pulse_wait_brain_kwargs(completed)
+        try:
+            request_raw = attended_worker.build_a04_pulse_brain_evidence_request(
+                private_dir=str(private_dir),
+                export_dir=str(export_dir),
+                expected_generation=expected_generation,
+                **common_kwargs,
+            )
+            parsed = runtime_receipt.parse_brain_review_evidence_request(request_raw)
+            self._verify_request_matches_witness(parsed, witness, completed.spec.pulse_handoff)
+            return request_raw
+        except OrchestrationError:
+            raise
+        except (ValueError, TypeError, KeyError, OSError):
+            raise OrchestrationError("BRAIN_EVIDENCE_REQUEST_HOLD") from None
+
+    @staticmethod
+    def _validate_brain_journal_records(
+        db,
+        *,
+        key: str,
+        logical_identity: str,
+        journey_id: str,
+        completed_sha256: str,
+    ) -> tuple[tuple[int, dict] | None, tuple[int, dict] | None, set[str], set[str]]:
+        """Validate integrity of all local BrainDecision intake rows in production.sqlite."""
+        rows = db.execute(
+            "SELECT seq, key, kind, body FROM journal "
+            "WHERE kind IN ('BrainDecisionIntakeReserved.v1', 'BrainDecisionAccepted.v1') "
+            "ORDER BY seq"
+        ).fetchall()
+        reserved_by_seq: dict[int, tuple[str, dict]] = {}
+        key_reserved: list[tuple[int, dict]] = []
+        key_accepted: list[tuple[int, dict]] = []
+        other_event_ids: set[str] = set()
+        other_decision_ids: set[str] = set()
+
+        reserved_fields = {
+            "schema_version", "completed_sha256", "logical_identity", "journey_id",
+            "source_sha", "directive_version", "directive_sha256",
+            "wait_receipt_sha256", "wait_receipt_file_sha256",
+            "artifact_sha256", "q4_qa_sha256",
+            "fencing_generation", "lease_until",
+            "decision_id", "decision_sha256", "decision_bytes_sha256", "event_id",
+            "chat_ref", "actor_ref", "origin_ref", "origin_kind",
+            "identity_authenticated", "live_cdp_proven",
+            "evidence_request_sha256", "pulse_journal_checkpoint",
+            "accepted_receipt_sha256", "accepted_receipt_file_sha256", "record_sha256",
+        }
+        accepted_fields = {
+            "schema_version", "completed_sha256", "logical_identity", "journey_id",
+            "source_sha", "directive_version", "directive_sha256",
+            "wait_receipt_sha256", "wait_receipt_file_sha256",
+            "artifact_sha256", "q4_qa_sha256",
+            "reserved_seq", "reserved_record_sha256", "fencing_generation",
+            "decision_id", "decision_sha256", "decision_bytes_sha256", "event_id",
+            "chat_ref", "actor_ref", "origin_ref", "origin_kind",
+            "identity_authenticated", "live_cdp_proven", "accepted_at",
+            "evidence_request_sha256", "pulse_journal_checkpoint",
+            "accepted_receipt_sha256", "accepted_receipt_file_sha256", "accepted_receipt_ref",
+            "accepted_state", "record_sha256",
+        }
+
+        for row in rows:
+            seq, row_key, kind, raw_body = row["seq"], row["key"], row["kind"], row["body"]
+            try:
+                body = json.loads(raw_body)
+            except (ValueError, TypeError):
+                raise OrchestrationError("BRAIN_JOURNAL_TAMPERED") from None
+            require(type(body) is dict and raw_body == canonical_bytes(body).decode("utf-8"),
+                    "BRAIN_JOURNAL_TAMPERED")
+            expected_fields = reserved_fields if kind == "BrainDecisionIntakeReserved.v1" else accepted_fields
+            require(set(body) == expected_fields and body.get("schema_version") == kind,
+                    "BRAIN_JOURNAL_TAMPERED")
+            body_no_hash = {k: v for k, v in body.items() if k != "record_sha256"}
+            require(body.get("record_sha256") == digest(body_no_hash), "BRAIN_JOURNAL_TAMPERED")
+            require(
+                body["identity_authenticated"] is False
+                and body["live_cdp_proven"] is False
+                and body["origin_kind"] in {"LOCAL_CHATGPT_TRANSFER", "TEST_ONLY"},
+                "BRAIN_JOURNAL_TAMPERED",
+            )
+
+            same_logical = (
+                body.get("logical_identity") == logical_identity
+                or body.get("journey_id") == journey_id
+            )
+            if row_key != key:
+                require(not same_logical, "BRAIN_DECISION_CONFLICT")
+                other_event_ids.add(body["event_id"])
+                other_decision_ids.add(body["decision_id"])
+                if kind == "BrainDecisionIntakeReserved.v1":
+                    reserved_by_seq[seq] = (row_key, body)
+                else:
+                    ref_seq = body["reserved_seq"]
+                    require(
+                        ref_seq in reserved_by_seq
+                        and reserved_by_seq[ref_seq][0] == row_key
+                        and reserved_by_seq[ref_seq][1]["record_sha256"] == body["reserved_record_sha256"],
+                        "BRAIN_JOURNAL_TAMPERED",
+                    )
+                continue
+
+            require(
+                body["completed_sha256"] == completed_sha256
+                and body["logical_identity"] == logical_identity
+                and body["journey_id"] == journey_id,
+                "BRAIN_JOURNAL_TAMPERED",
+            )
+            if kind == "BrainDecisionIntakeReserved.v1":
+                reserved_by_seq[seq] = (row_key, body)
+                key_reserved.append((seq, body))
+            else:
+                require(body["accepted_state"] == "READY_FOR_HUMAN_RELEASE", "BRAIN_JOURNAL_TAMPERED")
+                ref_seq = body["reserved_seq"]
+                require(
+                    ref_seq in reserved_by_seq
+                    and reserved_by_seq[ref_seq][0] == key
+                    and reserved_by_seq[ref_seq][1]["record_sha256"] == body["reserved_record_sha256"]
+                    and reserved_by_seq[ref_seq][1]["decision_sha256"] == body["decision_sha256"]
+                    and reserved_by_seq[ref_seq][1]["decision_bytes_sha256"] == body["decision_bytes_sha256"]
+                    and reserved_by_seq[ref_seq][1]["decision_id"] == body["decision_id"]
+                    and reserved_by_seq[ref_seq][1]["event_id"] == body["event_id"]
+                    and reserved_by_seq[ref_seq][1]["origin_ref"] == body["origin_ref"]
+                    and reserved_by_seq[ref_seq][1]["origin_kind"] == body["origin_kind"],
+                    "BRAIN_JOURNAL_TAMPERED",
+                )
+                key_accepted.append((seq, body))
+
+        require(len(key_accepted) <= 1, "BRAIN_JOURNAL_TAMPERED")
+        require(len(key_reserved) <= 1, "BRAIN_JOURNAL_TAMPERED")
+        return (
+            key_reserved[0] if key_reserved else None,
+            key_accepted[0] if key_accepted else None,
+            other_event_ids,
+            other_decision_ids,
+        )
+
+    @staticmethod
+    def _brain_hold(
+        reason: str,
+        *,
+        status: Literal["NO_DECISION", "HOLD"] = "HOLD",
+        state: Literal["WAIT_BRAIN", "UNKNOWN_EFFECT", "HOLD"] = "WAIT_BRAIN",
+        live_request: dict | None = None,
+        decision_input: LocalBrainDecisionInput | None = None,
+    ) -> BrainDecisionIntakeResult:
+        origin_kind: Literal["NONE", "LOCAL_CHATGPT_TRANSFER", "TEST_ONLY"] = (
+            decision_input.origin_kind if type(decision_input) is LocalBrainDecisionInput else "NONE"
+        )
+        origin_ref = (
+            decision_input.origin_ref if type(decision_input) is LocalBrainDecisionInput else None
+        )
+        return BrainDecisionIntakeResult(
+            status=status,
+            state=state,
+            reason=reason,
+            accepted=False,
+            idempotent_replay=False,
+            journey_id=live_request["journey_id"] if live_request else None,
+            source_sha=live_request["source_sha"] if live_request else None,
+            logical_identity=live_request["logical_identity"] if live_request else None,
+            directive_sha256=live_request["directive_sha256"] if live_request else None,
+            evidence_request_sha256=live_request["request_sha256"] if live_request else None,
+            artifact_sha256=live_request["local_artifact"]["artifact_sha256"] if live_request else None,
+            q4_qa_sha256=live_request["q4_technical_qa"]["qa_sha256"] if live_request else None,
+            origin_ref=origin_ref,
+            origin_kind=origin_kind,
+            pulse_journal_checkpoint=dict(live_request["journal_checkpoint"]) if live_request else None,
+        )
+
+    @staticmethod
+    def _brain_accepted_result(
+        acc: dict,
+        *,
+        journal_seq: int,
+        reason: str,
+        idempotent_replay: bool,
+    ) -> BrainDecisionIntakeResult:
+        return BrainDecisionIntakeResult(
+            status="BRAIN_ACCEPTED",
+            state="READY_FOR_HUMAN_RELEASE",
+            reason=reason,
+            accepted=True,
+            idempotent_replay=idempotent_replay,
+            journey_id=acc["journey_id"],
+            source_sha=acc["source_sha"],
+            logical_identity=acc["logical_identity"],
+            directive_sha256=acc["directive_sha256"],
+            evidence_request_sha256=acc["evidence_request_sha256"],
+            artifact_sha256=acc["artifact_sha256"],
+            q4_qa_sha256=acc["q4_qa_sha256"],
+            decision_id=acc["decision_id"],
+            decision_sha256=acc["decision_sha256"],
+            decision_bytes_sha256=acc["decision_bytes_sha256"],
+            chat_ref=acc["chat_ref"],
+            event_id=acc["event_id"],
+            origin_ref=acc["origin_ref"],
+            origin_kind=acc["origin_kind"],
+            accepted_receipt_sha256=acc["accepted_receipt_sha256"],
+            accepted_receipt_file_sha256=acc["accepted_receipt_file_sha256"],
+            accepted_receipt_ref=acc["accepted_receipt_ref"],
+            journal_seq=journal_seq,
+            pulse_journal_checkpoint=dict(acc["pulse_journal_checkpoint"]),
+        )
+
+    def accept_pulse_brain_decision(
+        self,
+        key: str,
+        *,
+        decision_input: LocalBrainDecisionInput | None = None,
+        evidence_request: bytes | None = None,
+        event_id: str | None = None,
+        at: int | None = None,
+        expected_fencing_generation: int | None = None,
+        reconcile_fencing_generation: int | None = None,
+    ) -> BrainDecisionIntakeResult:
+        """Bounded local single-owner W3a BrainDecision.v1 intake for a W2 WAIT_BRAIN journey.
+
+        Preserves B0.1 state_machine BRAIN_ACCEPTED transition (reaching
+        READY_FOR_HUMAN_RELEASE as a state name only), immutable readback of the
+        original W2 ProductJourneyReceipt.v1 and Q4/MP4 hashes, deterministic
+        dedup, atomic SQLite journal+receipt persistence, and crash fencing.
+
+        When no local ChatGPT Brain decision has been supplied (`decision_input=None`),
+        returns an honest NO_DECISION / WAIT_BRAIN result with zero mutation.
+        Labels are informational only and never assert private cryptographic
+        verification or live CDP operation.
+        """
+        grant = self._grant()
+        require(grant.route_id == "a04-to-pulse-offline", "LOCAL_ROUTE_MISMATCH")
+
+        try:
+            completed, witness, private_dir, export_dir = self._load_completed_pulse_stage(key)
+        except OrchestrationError as exc:
+            if str(exc) in {"LOCAL_AUTHORIZATION_REQUIRED", "SOURCE_SHA_MISMATCH", "STATE_DIR_REQUIRED",
+                            "LOCAL_ROUTE_MISMATCH", "ROUTE_NOT_AUTHORIZED"}:
+                raise
+            return self._brain_hold("BRAIN_JOURNAL_OR_SOURCE_TAMPERED")
+
+        handoff = completed.spec.pulse_handoff
+        common_kwargs = self._pulse_wait_brain_kwargs(completed)
+        try:
+            directive, recovery, _, _, live_request_raw = attended_worker.load_a04_pulse_wait_brain_snapshot(
+                private_dir=str(private_dir),
+                export_dir=str(export_dir),
+                **common_kwargs,
+            )
+            live_request = runtime_receipt.parse_brain_review_evidence_request(live_request_raw)
+            self._verify_request_matches_witness(live_request, witness, handoff)
+        except attended_worker.WorkerHold as exc:
+            if str(exc) == "UNKNOWN_EFFECT":
+                return self._brain_hold("BRAIN_UNKNOWN_EFFECT", state="UNKNOWN_EFFECT")
+            return self._brain_hold("BRAIN_JOURNAL_OR_SOURCE_TAMPERED")
+        except (OrchestrationError, runtime_receipt.ReceiptHold, ValueError, TypeError, KeyError, OSError):
+            return self._brain_hold("BRAIN_JOURNAL_OR_SOURCE_TAMPERED")
+
+        if evidence_request is not None:
+            if type(evidence_request) is not bytes or evidence_request != live_request_raw:
+                return self._brain_hold(
+                    "BRAIN_EVIDENCE_REQUEST_MISMATCH",
+                    live_request=live_request,
+                    decision_input=decision_input if type(decision_input) is LocalBrainDecisionInput else None,
+                )
+
+        # Verify journal integrity before returning NO_DECISION so tampering is never masked.
+        try:
+            with self._database() as db:
+                pre_reserved, pre_accepted, _, _ = self._validate_brain_journal_records(
+                    db,
+                    key=key,
+                    logical_identity=handoff.logical_identity,
+                    journey_id=live_request["journey_id"],
+                    completed_sha256=completed.sha256,
+                )
+        except OrchestrationError as exc:
+            return self._brain_hold(
+                str(exc),
+                live_request=live_request,
+                decision_input=decision_input if type(decision_input) is LocalBrainDecisionInput else None,
+            )
+
+        if decision_input is None:
+            if pre_accepted is not None:
+                return self._brain_hold(
+                    "BRAIN_DECISION_ALREADY_ACCEPTED",
+                    state="HOLD",
+                    live_request=live_request,
+                )
+            if pre_reserved is not None:
+                return self._brain_hold("BRAIN_INTERRUPTED_COMMIT_HOLD", live_request=live_request)
+            return self._brain_hold(
+                "WAIT_BRAIN_NO_DECISION",
+                status="NO_DECISION",
+                state="WAIT_BRAIN",
+                live_request=live_request,
+            )
+
+        if type(decision_input) is not LocalBrainDecisionInput:
+            return self._brain_hold("BRAIN_DECISION_INPUT_INVALID", live_request=live_request)
+
+        now_at = int(time.time()) if at is None else at
+        if type(now_at) is not int or not (0 <= now_at < 2**63 - 1):
+            return self._brain_hold("EXPLICIT_TIME_REQUIRED", live_request=live_request, decision_input=decision_input)
+
+        if (
+            decision_input.evidence_request_sha256 is not None
+            and decision_input.evidence_request_sha256 != live_request["request_sha256"]
+        ):
+            return self._brain_hold(
+                "BRAIN_EVIDENCE_REQUEST_MISMATCH",
+                live_request=live_request,
+                decision_input=decision_input,
+            )
+
+        decision_bytes = decision_input.decision_bytes
+        try:
+            decision_contract = parse_pulse_contract("BrainDecision", decision_bytes)
+        except ContractError:
+            return self._brain_hold("BRAIN_DECISION_INVALID", live_request=live_request, decision_input=decision_input)
+        if decision_bytes != decision_contract.raw:
+            return self._brain_hold(
+                "BRAIN_DECISION_BYTES_MISMATCH",
+                live_request=live_request,
+                decision_input=decision_input,
+            )
+        decision_bytes_sha256 = bytes_digest(decision_bytes)
+
+        decision = decision_contract.to_dict()
+        ckpt = live_request["journal_checkpoint"]
+        if decision["schema_version"] != "BrainDecision.v1":
+            return self._brain_hold("BRAIN_VERSION_MISMATCH", live_request=live_request, decision_input=decision_input)
+        if decision["source_sha"] != live_request["source_sha"] or decision["source_sha"] != grant.source_sha:
+            return self._brain_hold("BRAIN_SOURCE_MISMATCH", live_request=live_request, decision_input=decision_input)
+        if decision["journey_id"] != live_request["journey_id"] or decision["journey_id"] != grant.journey_id:
+            return self._brain_hold("BRAIN_JOURNEY_MISMATCH", live_request=live_request, decision_input=decision_input)
+        if decision["directive_version"] != live_request["directive_version"]:
+            return self._brain_hold("BRAIN_VERSION_MISMATCH", live_request=live_request, decision_input=decision_input)
+        if decision["directive_sha256"] != live_request["directive_sha256"]:
+            return self._brain_hold(
+                "BRAIN_DIRECTIVE_MISMATCH",
+                live_request=live_request,
+                decision_input=decision_input,
+            )
+        if decision["scope"] != live_request["scope"] or decision["review_scope"] != "DIRECTIVE_ONLY":
+            return self._brain_hold("BRAIN_SCOPE_MISMATCH", live_request=live_request, decision_input=decision_input)
+        if decision["channel"] != "CURRENT_CHATGPT_CHAT":
+            return self._brain_hold("BRAIN_CHANNEL_MISMATCH", live_request=live_request, decision_input=decision_input)
+        if decision["receipt_ref"] != live_request["receipt_ref"]:
+            return self._brain_hold("BRAIN_RECEIPT_MISMATCH", live_request=live_request, decision_input=decision_input)
+        if decision_input.chat_ref is not None and decision_input.chat_ref != decision["chat_ref"]:
+            return self._brain_hold("BRAIN_CHAT_MISMATCH", live_request=live_request, decision_input=decision_input)
+        if (
+            decision["provenance"]["actor"] != "CHATGPT_BRAIN"
+            or decision["provenance"]["evidence_type"] != "HUMAN_SUPPLIED"
+        ):
+            return self._brain_hold("BRAIN_ACTOR_MISMATCH", live_request=live_request, decision_input=decision_input)
+        if decision["decision"] != "APPROVE_DIRECTIVE":
+            return self._brain_hold(
+                "BRAIN_DECISION_NOT_APPROVED",
+                live_request=live_request,
+                decision_input=decision_input,
+            )
+
+        resolved_event_id = (
+            "event:brain-accepted-" + decision["decision_sha256"][:32]
+            if event_id is None else event_id
+        )
+        if (
+            type(resolved_event_id) is not str
+            or re.fullmatch(r"[a-z][a-z0-9_-]{0,31}:[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", resolved_event_id) is None
+        ):
+            return self._brain_hold("INVALID_EVENT_ID", live_request=live_request, decision_input=decision_input)
+
+        # Drive the unchanged frozen B0.1 pure reducer with an ephemeral local-owner
+        # adapter input before any persistence. This never claims private verifier auth.
+        try:
+            local_bridge_receipt = AuthorityReceipt(
+                kind=AuthorityKind.BRAIN,
+                journey_id=live_request["journey_id"],
+                source_sha=live_request["source_sha"],
+                directive_sha256=live_request["directive_sha256"],
+                scope_sha256=live_request["scope_sha256"],
+                record_sha256=decision["decision_sha256"],
+                actor_ref=decision["provenance"]["actor_ref"],
+                channel="CURRENT_CHATGPT_CHAT",
+                actions=("APPROVE_DIRECTIVE",),
+                verifier_ref="local-owner:single-owner-bridge",
+                valid_from=now_at,
+                expires_at=now_at + 1,
+                evidence_type="HUMAN_SUPPLIED",
+                verified=True,
+            )
+            local_bridge_ctx = VerificationContext(
+                receipts=(local_bridge_receipt,),
+                current_chat_ref=decision["chat_ref"],
+            )
+            pulse_event = PulseEvent(
+                resolved_event_id,
+                PulseEventKind.BRAIN_ACCEPTED,
+                live_request["journey_id"],
+                live_request["source_sha"],
+                record=decision_contract,
+            )
+            accepted_snapshot = pulse_transition(
+                recovery.snapshot,
+                pulse_event,
+                at=now_at,
+                verification=local_bridge_ctx,
+            )
+            accepted_receipt = self._seal_brain_accepted_receipt(directive, accepted_snapshot)
+        except (TransitionError, ContractError, OrchestrationError):
+            return self._brain_hold(
+                "BRAIN_TRANSITION_REJECTED",
+                live_request=live_request,
+                decision_input=decision_input,
+            )
+
+        accepted_receipt_dict = accepted_receipt.to_dict()
+        accepted_receipt_sha256 = accepted_receipt_dict["receipt_sha256"]
+        accepted_receipt_file_sha256 = bytes_digest(accepted_receipt.raw)
+
+        decision_dir = self._pulse_brain_decision_dir(key)
+        decision_artifact_path = local_path(decision_dir / "BrainDecision.v1.json")
+        accepted_receipt_path = local_path(decision_dir / "ProductJourneyReceipt.v1.json")
+        current_fence_gen = ckpt["generation"]
+
+        # Transaction 1: fencing check, logical idempotency, conflict detection, or reservation.
+        reconciling_existing = False
+        reserved_seq: int
+        reserved_record_sha256: str
+        reserved_fence_gen: int
+        try:
+            with self._database() as db:
+                reserved_pair, accepted_pair, other_event_ids, other_decision_ids = (
+                    self._validate_brain_journal_records(
+                        db,
+                        key=key,
+                        logical_identity=handoff.logical_identity,
+                        journey_id=live_request["journey_id"],
+                        completed_sha256=completed.sha256,
+                    )
+                )
+                if resolved_event_id in other_event_ids or decision["decision_id"] in other_decision_ids:
+                    return self._brain_hold(
+                        "DUPLICATE_BRAIN_EVENT_ID",
+                        live_request=live_request,
+                        decision_input=decision_input,
+                    )
+
+                if accepted_pair is not None:
+                    acc_seq, acc = accepted_pair
+                    same_decision = (
+                        acc["decision_id"] == decision["decision_id"]
+                        and acc["decision_sha256"] == decision["decision_sha256"]
+                        and acc["decision_bytes_sha256"] == decision_bytes_sha256
+                        and acc["event_id"] == resolved_event_id
+                        and acc["evidence_request_sha256"] == live_request["request_sha256"]
+                        and acc["chat_ref"] == decision["chat_ref"]
+                        and acc["actor_ref"] == decision["provenance"]["actor_ref"]
+                        and acc["origin_ref"] == decision_input.origin_ref
+                        and acc["origin_kind"] == decision_input.origin_kind
+                        and acc["accepted_receipt_sha256"] == accepted_receipt_sha256
+                        and acc["accepted_receipt_file_sha256"] == accepted_receipt_file_sha256
+                    )
+                    if not same_decision:
+                        return self._brain_hold(
+                            "BRAIN_DECISION_CONFLICT",
+                            live_request=live_request,
+                            decision_input=decision_input,
+                        )
+                    if (
+                        expected_fencing_generation is not None
+                        and (type(expected_fencing_generation) is not int
+                             or expected_fencing_generation != acc["fencing_generation"])
+                    ):
+                        return self._brain_hold(
+                            "STALE_FENCING_GENERATION",
+                            live_request=live_request,
+                            decision_input=decision_input,
+                        )
+                    if (
+                        not decision_artifact_path.is_file()
+                        or not accepted_receipt_path.is_file()
+                        or read_local(decision_artifact_path, limit=131072) != decision_bytes
+                        or read_local(accepted_receipt_path, limit=131072) != accepted_receipt.raw
+                    ):
+                        return self._brain_hold(
+                            "BRAIN_RECEIPT_TAMPERED",
+                            live_request=live_request,
+                            decision_input=decision_input,
+                        )
+                    return self._brain_accepted_result(
+                        acc,
+                        journal_seq=acc_seq,
+                        reason="BRAIN_ACCEPTED_IDEMPOTENT_REPLAY",
+                        idempotent_replay=True,
+                    )
+
+                if reserved_pair is not None:
+                    res_seq, res = reserved_pair
+                    if res["lease_until"] > time.time():
+                        return self._brain_hold(
+                            "BRAIN_DECISION_INTAKE_IN_PROGRESS",
+                            live_request=live_request,
+                            decision_input=decision_input,
+                        )
+                    if reconcile_fencing_generation is None:
+                        return self._brain_hold(
+                            "BRAIN_INTERRUPTED_COMMIT_HOLD",
+                            live_request=live_request,
+                            decision_input=decision_input,
+                        )
+                    if (
+                        type(reconcile_fencing_generation) is not int
+                        or reconcile_fencing_generation != res["fencing_generation"]
+                    ):
+                        return self._brain_hold(
+                            "STALE_FENCING_GENERATION",
+                            live_request=live_request,
+                            decision_input=decision_input,
+                        )
+                    same_reserved = (
+                        res["decision_id"] == decision["decision_id"]
+                        and res["decision_sha256"] == decision["decision_sha256"]
+                        and res["decision_bytes_sha256"] == decision_bytes_sha256
+                        and res["event_id"] == resolved_event_id
+                        and res["evidence_request_sha256"] == live_request["request_sha256"]
+                        and res["chat_ref"] == decision["chat_ref"]
+                        and res["actor_ref"] == decision["provenance"]["actor_ref"]
+                        and res["origin_ref"] == decision_input.origin_ref
+                        and res["origin_kind"] == decision_input.origin_kind
+                        and res["accepted_receipt_sha256"] == accepted_receipt_sha256
+                        and res["accepted_receipt_file_sha256"] == accepted_receipt_file_sha256
+                    )
+                    if not same_reserved:
+                        return self._brain_hold(
+                            "BRAIN_DECISION_CONFLICT",
+                            live_request=live_request,
+                            decision_input=decision_input,
+                        )
+                    if (
+                        not decision_artifact_path.is_file()
+                        or not accepted_receipt_path.is_file()
+                        or read_local(decision_artifact_path, limit=131072) != decision_bytes
+                        or read_local(accepted_receipt_path, limit=131072) != accepted_receipt.raw
+                    ):
+                        return self._brain_hold(
+                            "BRAIN_INTERRUPTED_COMMIT_HOLD",
+                            live_request=live_request,
+                            decision_input=decision_input,
+                        )
+                    reconciling_existing = True
+                    reserved_seq = res_seq
+                    reserved_record_sha256 = res["record_sha256"]
+                    reserved_fence_gen = res["fencing_generation"]
+                else:
+                    if (
+                        expected_fencing_generation is not None
+                        and (type(expected_fencing_generation) is not int
+                             or expected_fencing_generation != current_fence_gen)
+                    ):
+                        return self._brain_hold(
+                            "STALE_FENCING_GENERATION",
+                            live_request=live_request,
+                            decision_input=decision_input,
+                        )
+                    if reconcile_fencing_generation is not None:
+                        return self._brain_hold(
+                            "STALE_FENCING_GENERATION",
+                            live_request=live_request,
+                            decision_input=decision_input,
+                        )
+                    reserved_body = {
+                        "schema_version": "BrainDecisionIntakeReserved.v1",
+                        "completed_sha256": completed.sha256,
+                        "logical_identity": handoff.logical_identity,
+                        "journey_id": live_request["journey_id"],
+                        "source_sha": live_request["source_sha"],
+                        "directive_version": live_request["directive_version"],
+                        "directive_sha256": live_request["directive_sha256"],
+                        "wait_receipt_sha256": live_request["receipt_sha256"],
+                        "wait_receipt_file_sha256": live_request["receipt_file_sha256"],
+                        "artifact_sha256": live_request["local_artifact"]["artifact_sha256"],
+                        "q4_qa_sha256": live_request["q4_technical_qa"]["qa_sha256"],
+                        "fencing_generation": current_fence_gen,
+                        "lease_until": time.time() + self._lease_seconds,
+                        "decision_id": decision["decision_id"],
+                        "decision_sha256": decision["decision_sha256"],
+                        "decision_bytes_sha256": decision_bytes_sha256,
+                        "event_id": resolved_event_id,
+                        "chat_ref": decision["chat_ref"],
+                        "actor_ref": decision["provenance"]["actor_ref"],
+                        "origin_ref": decision_input.origin_ref,
+                        "origin_kind": decision_input.origin_kind,
+                        "identity_authenticated": False,
+                        "live_cdp_proven": False,
+                        "evidence_request_sha256": live_request["request_sha256"],
+                        "pulse_journal_checkpoint": ckpt,
+                        "accepted_receipt_sha256": accepted_receipt_sha256,
+                        "accepted_receipt_file_sha256": accepted_receipt_file_sha256,
+                    }
+                    reserved_record_sha256 = digest(reserved_body)
+                    reserved_full = {**reserved_body, "record_sha256": reserved_record_sha256}
+                    self._journal(db, key, "BrainDecisionIntakeReserved.v1", reserved_full)
+                    reserved_seq = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+                    reserved_fence_gen = current_fence_gen
+        except OrchestrationError as exc:
+            return self._brain_hold(str(exc), live_request=live_request, decision_input=decision_input)
+
+        if not reconciling_existing:
+            self._brain_decision_cut("after_reserve")
+            decision_dir.mkdir(parents=True, exist_ok=True)
+            runtime_receipt.put_new(decision_artifact_path, decision_bytes)
+            runtime_receipt.put_new(accepted_receipt_path, accepted_receipt.raw)
+            self._brain_decision_cut("after_receipt_write")
+
+        # Transaction 2: commit exact BrainDecisionAccepted.v1 record after receipt verification.
+        accepted_body = {
+            "schema_version": "BrainDecisionAccepted.v1",
+            "completed_sha256": completed.sha256,
+            "logical_identity": handoff.logical_identity,
+            "journey_id": live_request["journey_id"],
+            "source_sha": live_request["source_sha"],
+            "directive_version": live_request["directive_version"],
+            "directive_sha256": live_request["directive_sha256"],
+            "wait_receipt_sha256": live_request["receipt_sha256"],
+            "wait_receipt_file_sha256": live_request["receipt_file_sha256"],
+            "artifact_sha256": live_request["local_artifact"]["artifact_sha256"],
+            "q4_qa_sha256": live_request["q4_technical_qa"]["qa_sha256"],
+            "reserved_seq": reserved_seq,
+            "reserved_record_sha256": reserved_record_sha256,
+            "fencing_generation": reserved_fence_gen,
+            "decision_id": decision["decision_id"],
+            "decision_sha256": decision["decision_sha256"],
+            "decision_bytes_sha256": decision_bytes_sha256,
+            "event_id": resolved_event_id,
+            "chat_ref": decision["chat_ref"],
+            "actor_ref": decision["provenance"]["actor_ref"],
+            "origin_ref": decision_input.origin_ref,
+            "origin_kind": decision_input.origin_kind,
+            "identity_authenticated": False,
+            "live_cdp_proven": False,
+            "accepted_at": now_at,
+            "evidence_request_sha256": live_request["request_sha256"],
+            "pulse_journal_checkpoint": ckpt,
+            "accepted_receipt_sha256": accepted_receipt_sha256,
+            "accepted_receipt_file_sha256": accepted_receipt_file_sha256,
+            "accepted_receipt_ref": str(accepted_receipt_path),
+            "accepted_state": "READY_FOR_HUMAN_RELEASE",
+        }
+        accepted_record_sha256 = digest(accepted_body)
+        accepted_full = {**accepted_body, "record_sha256": accepted_record_sha256}
+
+        with self._database() as db:
+            res_pair, acc_pair, _, _ = self._validate_brain_journal_records(
+                db,
+                key=key,
+                logical_identity=handoff.logical_identity,
+                journey_id=live_request["journey_id"],
+                completed_sha256=completed.sha256,
+            )
+            require(
+                acc_pair is None
+                and res_pair is not None
+                and res_pair[0] == reserved_seq
+                and res_pair[1]["record_sha256"] == reserved_record_sha256,
+                "BRAIN_JOURNAL_TAMPERED",
+            )
+            require(
+                read_local(decision_artifact_path, limit=131072) == decision_bytes
+                and read_local(accepted_receipt_path, limit=131072) == accepted_receipt.raw,
+                "BRAIN_RECEIPT_TAMPERED",
+            )
+            self._journal(db, key, "BrainDecisionAccepted.v1", accepted_full)
+            committed_seq = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+        self._brain_decision_cut("after_commit")
+
+        # Mandatory reopen verification on a fresh SQLite connection + disk readback.
+        with self._database() as db:
+            _, reopened_acc_pair, _, _ = self._validate_brain_journal_records(
+                db,
+                key=key,
+                logical_identity=handoff.logical_identity,
+                journey_id=live_request["journey_id"],
+                completed_sha256=completed.sha256,
+            )
+            require(
+                reopened_acc_pair is not None
+                and reopened_acc_pair[0] == committed_seq
+                and reopened_acc_pair[1] == accepted_full,
+                "BRAIN_JOURNAL_TAMPERED",
+            )
+        reopened_decision = parse_pulse_contract("BrainDecision", read_local(decision_artifact_path, limit=131072))
+        reopened_receipt = parse_pulse_contract("ProductJourneyReceipt", read_local(accepted_receipt_path, limit=131072))
+        require(
+            reopened_decision.raw == decision_bytes
+            and reopened_receipt.raw == accepted_receipt.raw
+            and reopened_receipt.to_dict()["state"] == "READY_FOR_HUMAN_RELEASE"
+            and reopened_receipt.to_dict()["brain_decision"] == {
+                "ref": decision["decision_id"],
+                "sha256": decision["decision_sha256"],
+            },
+            "BRAIN_RECEIPT_TAMPERED",
+        )
+        # Confirm original W2 WAIT_BRAIN journal and export remain intact and uncorrupted.
+        attended_worker.inspect_a04_pulse_handoff(
+            private_dir=str(private_dir),
+            export_dir=str(export_dir),
+            **common_kwargs,
+        )
+        return self._brain_accepted_result(
+            accepted_full,
+            journal_seq=committed_seq,
+            reason="BRAIN_ACCEPTED",
+            idempotent_replay=False,
+        )
+
+    def inspect_pulse_brain_decision(self, key: str) -> BrainDecisionIntakeResult:
+        """Read-only reopen check of persisted W3a local BrainDecision.v1 intake state."""
+        grant = self._grant()
+        require(grant.route_id == "a04-to-pulse-offline", "LOCAL_ROUTE_MISMATCH")
+        completed, witness, private_dir, export_dir = self._load_completed_pulse_stage(key)
+        handoff = completed.spec.pulse_handoff
+        common_kwargs = self._pulse_wait_brain_kwargs(completed)
+        try:
+            _, _, _, _, live_request_raw = attended_worker.load_a04_pulse_wait_brain_snapshot(
+                private_dir=str(private_dir),
+                export_dir=str(export_dir),
+                **common_kwargs,
+            )
+            live_request = runtime_receipt.parse_brain_review_evidence_request(live_request_raw)
+            self._verify_request_matches_witness(live_request, witness, handoff)
+        except attended_worker.WorkerHold as exc:
+            if str(exc) == "UNKNOWN_EFFECT":
+                return self._brain_hold("BRAIN_UNKNOWN_EFFECT", state="UNKNOWN_EFFECT")
+            return self._brain_hold("BRAIN_JOURNAL_OR_SOURCE_TAMPERED")
+        except (OrchestrationError, runtime_receipt.ReceiptHold, ValueError, TypeError, KeyError, OSError):
+            return self._brain_hold("BRAIN_JOURNAL_OR_SOURCE_TAMPERED")
+
+        try:
+            with self._database() as db:
+                reserved_pair, accepted_pair, _, _ = self._validate_brain_journal_records(
+                    db,
+                    key=key,
+                    logical_identity=handoff.logical_identity,
+                    journey_id=live_request["journey_id"],
+                    completed_sha256=completed.sha256,
+                )
+        except OrchestrationError as exc:
+            return self._brain_hold(str(exc), live_request=live_request)
+
+        if accepted_pair is not None:
+            acc_seq, acc = accepted_pair
+            decision_dir = self._pulse_brain_decision_dir(key)
+            decision_artifact_path = local_path(decision_dir / "BrainDecision.v1.json")
+            accepted_receipt_path = local_path(decision_dir / "ProductJourneyReceipt.v1.json")
+            if (
+                not decision_artifact_path.is_file()
+                or not accepted_receipt_path.is_file()
+                or bytes_digest(read_local(decision_artifact_path, limit=131072)) != acc["decision_bytes_sha256"]
+                or bytes_digest(read_local(accepted_receipt_path, limit=131072)) != acc["accepted_receipt_file_sha256"]
+            ):
+                return self._brain_hold("BRAIN_RECEIPT_TAMPERED", live_request=live_request)
+            return self._brain_accepted_result(
+                acc,
+                journal_seq=acc_seq,
+                reason="BRAIN_ACCEPTED_PERSISTED",
+                idempotent_replay=True,
+            )
+        if reserved_pair is not None:
+            return self._brain_hold("BRAIN_INTERRUPTED_COMMIT_HOLD", live_request=live_request)
+        return self._brain_hold(
+            "WAIT_BRAIN_NO_DECISION",
+            status="NO_DECISION",
+            state="WAIT_BRAIN",
+            live_request=live_request,
+        )
