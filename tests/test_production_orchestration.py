@@ -1490,7 +1490,7 @@ def w2_pulse_case(tmp_path, monkeypatch, _a03_r3_template):
         "scope": "OFFLINE_LOCAL_RENDER",
         "status": "GRANTED",
         "valid_from": 0,
-        "expires_at": int(time.time()) + 600,
+        "expires_at": int(time.time()) + 3600,
     }
     rights_raw = pulse_canonical_bytes(rights_claim)
     rights_path = asset_dir / "rights-still.json"
@@ -1821,3 +1821,537 @@ def test_w2_pulse02_negative_corrupt_stale_rights_q4_witness_and_authority(w2_pu
     assert w2_pulse_case["make_owner"](state_dir=q4_dir).resume_local() == (unknown,)
     assert len(calls) == 1
     assert not invocation_rows(w2_pulse_case["make_owner"](state_dir=q4_dir), "ProductionStageReceipt.v1")
+
+
+def _w3a_make_test_only_decision_input(
+    req_data: dict,
+    *,
+    decision: str = "APPROVE_DIRECTIVE",
+    decision_id: str = "decision:w3a-test-01",
+    chat_ref: str = "chat:w3a-current-chat",
+    input_chat_ref: str | None = None,
+    actor: str = "CHATGPT_BRAIN",
+    actor_ref: str = "brain:chatgpt-current",
+    evidence_type: str = "HUMAN_SUPPLIED",
+    channel: str = "CURRENT_CHATGPT_CHAT",
+    receipt_ref: str | None = None,
+    source_sha: str | None = None,
+    journey_id: str | None = None,
+    directive_version: int | None = None,
+    directive_sha256: str | None = None,
+    scope: dict | None = None,
+    origin_ref: str = "TEST_ONLY:local-chatgpt-transfer-fixture",
+    origin_kind: str = "TEST_ONLY",
+    input_evidence_request_sha256: str | None = None,
+):
+    from ai_commerce.production_orchestration.contracts import LocalBrainDecisionInput
+    from ai_commerce.production_runtime.contracts import draft_authorization, seal_contract
+
+    eff_source = req_data["source_sha"] if source_sha is None else source_sha
+    eff_journey = req_data["journey_id"] if journey_id is None else journey_id
+    eff_dir_ver = req_data["directive_version"] if directive_version is None else directive_version
+    eff_dir_sha = req_data["directive_sha256"] if directive_sha256 is None else directive_sha256
+    eff_scope = copy.deepcopy(req_data["scope"]) if scope is None else scope
+    eff_receipt_ref = req_data["receipt_ref"] if receipt_ref is None else receipt_ref
+    body = {
+        "schema_version": "BrainDecision.v1",
+        "decision_id": decision_id,
+        "journey_id": eff_journey,
+        "source_sha": eff_source,
+        "directive_version": eff_dir_ver,
+        "directive_sha256": eff_dir_sha,
+        "scope": eff_scope,
+        "decision": decision,
+        "review_scope": "DIRECTIVE_ONLY",
+        "channel": channel,
+        "chat_ref": chat_ref,
+        "receipt_ref": eff_receipt_ref,
+        "rationale": "TEST_ONLY synthetic fixture decision; never live CDP operation.",
+        "provenance": {
+            "actor": actor,
+            "actor_ref": actor_ref,
+            "evidence_type": evidence_type,
+            "source_ref": eff_receipt_ref,
+            "source_sha": eff_source,
+        },
+        "authorization": draft_authorization(),
+    }
+    sealed = seal_contract("BrainDecision", body)
+    decision_dict = sealed.to_dict()
+    local_input = LocalBrainDecisionInput(
+        decision_bytes=sealed.raw,
+        origin_ref=origin_ref,
+        origin_kind=origin_kind,
+        chat_ref=chat_ref if input_chat_ref is None else input_chat_ref,
+        evidence_request_sha256=(
+            req_data["request_sha256"]
+            if input_evidence_request_sha256 is None
+            else input_evidence_request_sha256
+        ),
+    )
+    return sealed.raw, decision_dict, local_input
+
+
+def test_w3a_pulse03_evidence_request_no_decision_and_pr_pass_preserve_wait_brain(w2_pulse_case, monkeypatch):
+    _w2_require_windows_media()
+    import time
+    from ai_commerce.production_orchestration.contracts import LocalBrainDecisionInput
+    from ai_commerce.production_runtime import attended_worker, receipt as runtime_receipt
+
+    owner = w2_pulse_case["make_owner"]()
+    done = owner.complete_a04_pulse(**w2_pulse_case["call_kwargs"])
+    assert done.status == "SUCCESS" and done.receiver_receipt["state"] == "WAIT_BRAIN"
+    key = done.completed.spec.idempotency_key
+
+    monkeypatch.setattr(attended_worker.service, "run", lambda *a, **k: pytest.fail("W3a must never render"))
+    req_raw = owner.build_pulse_brain_evidence_request(key)
+    req_data = runtime_receipt.parse_brain_review_evidence_request(req_raw)
+    assert owner.build_pulse_brain_evidence_request(key) == req_raw
+    assert str(w2_pulse_case["tmp_path"]).encode("utf-8") not in req_raw
+    assert b"Silent offline visual showcase" not in req_raw
+    assert req_data["receipt_sha256"] == done.receiver_receipt["receipt_sha256"]
+    assert req_data["local_artifact"]["artifact_sha256"] == done.receiver_receipt["artifact_sha256"]
+    assert req_data["q4_technical_qa"]["qa_sha256"] == done.receiver_receipt["q4_qa_sha256"]
+    assert req_data["journal_checkpoint"] == done.receiver_receipt["journal_checkpoint"]
+
+    now_at = int(time.time())
+
+    # No genuine ChatGPT decision received -> honest WAIT_BRAIN / NO_DECISION with zero mutation.
+    absent = owner.accept_pulse_brain_decision(
+        key,
+        decision_input=None,
+        evidence_request=req_raw,
+        at=now_at,
+    )
+    assert absent.status == "NO_DECISION"
+    assert absent.state == "WAIT_BRAIN"
+    assert absent.reason == "WAIT_BRAIN_NO_DECISION"
+    assert absent.accepted is False
+    assert absent.origin_kind == "NONE"
+    assert absent.identity_authenticated is False
+    assert absent.live_cdp_proven is False
+    assert absent.rights_granted is False and absent.provider_grant is False
+    assert absent.publish_authorized is False and absent.spend_authorized is False
+    assert absent.network_calls_performed == absent.publish_calls == absent.paid_generation_calls == 0
+
+    # GitHub PR Brain PASS comments/dicts never satisfy PULSE BrainDecision.v1 intake.
+    for non_decision in (
+        "AI_COMMERCE_BRAIN_REVIEW_PASS_V1",
+        {"verdict": "PASS", "channel": "GITHUB_PR", "actor": "CHATGPT_BRAIN"},
+    ):
+        held = owner.accept_pulse_brain_decision(
+            key,
+            decision_input=non_decision,
+            evidence_request=req_raw,
+            at=now_at,
+        )
+        assert held.status == "HOLD"
+        assert held.reason == "BRAIN_DECISION_INPUT_INVALID"
+        assert held.state == "WAIT_BRAIN"
+        assert held.accepted is False
+
+    pr_pass_bytes = LocalBrainDecisionInput(
+        decision_bytes=b'{"verdict":"AI_COMMERCE_BRAIN_REVIEW_PASS_V1","channel":"GITHUB_PR"}',
+        origin_ref="TEST_ONLY:github-pr-pass",
+        origin_kind="TEST_ONLY",
+    )
+    pr_held = owner.accept_pulse_brain_decision(
+        key,
+        decision_input=pr_pass_bytes,
+        evidence_request=req_raw,
+        at=now_at,
+    )
+    assert pr_held.status == "HOLD" and pr_held.reason == "BRAIN_DECISION_INVALID" and pr_held.state == "WAIT_BRAIN"
+
+    assert not invocation_rows(owner, "BrainDecisionIntakeReserved.v1")
+    assert not invocation_rows(owner, "BrainDecisionAccepted.v1")
+    inspected = owner.inspect_pulse_brain_decision(key)
+    assert inspected.status == "NO_DECISION" and inspected.state == "WAIT_BRAIN"
+
+
+def test_w3a_pulse03_local_test_only_decision_accepts_once_and_reopens_idempotently(w2_pulse_case, monkeypatch):
+    _w2_require_windows_media()
+    import time
+    from ai_commerce.production_runtime import attended_worker, receipt as runtime_receipt
+    from ai_commerce.production_runtime.contracts import draft_authorization, parse_contract
+
+    owner = w2_pulse_case["make_owner"]()
+    done = owner.complete_a04_pulse(**w2_pulse_case["call_kwargs"])
+    key = done.completed.spec.idempotency_key
+    monkeypatch.setattr(attended_worker.service, "run", lambda *a, **k: pytest.fail("W3a must never render"))
+
+    orig_receipt_path = Path(done.event.receipt.artifact_ref)
+    orig_receipt_bytes = orig_receipt_path.read_bytes()
+    orig_evidence_path = orig_receipt_path.parent / "autonomous-offline-evidence.json"
+    orig_evidence_bytes = orig_evidence_path.read_bytes()
+
+    req_raw = owner.build_pulse_brain_evidence_request(key)
+    req_data = runtime_receipt.parse_brain_review_evidence_request(req_raw)
+    now_at = int(time.time())
+    decision_raw, decision_dict, decision_input = _w3a_make_test_only_decision_input(req_data)
+
+    accepted = owner.accept_pulse_brain_decision(
+        key,
+        decision_input=decision_input,
+        evidence_request=req_raw,
+        at=now_at,
+    )
+    # READY_FOR_HUMAN_RELEASE is the unchanged B0.1 state name only; no routine Human stage required.
+    assert accepted.status == "BRAIN_ACCEPTED"
+    assert accepted.state == "READY_FOR_HUMAN_RELEASE"
+    assert accepted.accepted is True
+    assert accepted.idempotent_replay is False
+    assert accepted.origin_kind == "TEST_ONLY"
+    assert accepted.origin_ref == "TEST_ONLY:local-chatgpt-transfer-fixture"
+    assert accepted.identity_authenticated is False
+    assert accepted.live_cdp_proven is False
+    assert accepted.human_attended_required is False
+    assert accepted.rights_granted is False and accepted.provider_grant is False
+    assert accepted.publish_authorized is False and accepted.spend_authorized is False
+    assert accepted.network_calls_performed == accepted.publish_calls == accepted.paid_generation_calls == 0
+    assert accepted.source_sha == req_data["source_sha"]
+    assert accepted.journey_id == req_data["journey_id"]
+    assert accepted.directive_sha256 == req_data["directive_sha256"]
+    assert accepted.artifact_sha256 == req_data["local_artifact"]["artifact_sha256"]
+    assert accepted.q4_qa_sha256 == req_data["q4_technical_qa"]["qa_sha256"]
+    assert accepted.decision_id == decision_dict["decision_id"]
+    assert accepted.decision_sha256 == decision_dict["decision_sha256"]
+    assert accepted.decision_bytes_sha256 == bytes_digest(decision_raw)
+    assert accepted.chat_ref == decision_dict["chat_ref"]
+    assert accepted.event_id == "event:brain-accepted-" + decision_dict["decision_sha256"][:32]
+
+    # Original W2 ProductJourneyReceipt.v1 and autonomous evidence remain byte-identical.
+    assert orig_receipt_path.read_bytes() == orig_receipt_bytes
+    assert orig_evidence_path.read_bytes() == orig_evidence_bytes
+
+    # Verify persisted post-accept B0.1 ProductJourneyReceipt.v1 at READY_FOR_HUMAN_RELEASE.
+    receipt_path = Path(accepted.accepted_receipt_ref)
+    persisted_receipt = parse_contract("ProductJourneyReceipt", receipt_path.read_bytes()).to_dict()
+    assert persisted_receipt["state"] == "READY_FOR_HUMAN_RELEASE"
+    assert persisted_receipt["brain_decision"] == {
+        "ref": decision_dict["decision_id"],
+        "sha256": decision_dict["decision_sha256"],
+    }
+    assert persisted_receipt["effect"]["status"] == "NONE"
+    assert persisted_receipt["authorization"] == draft_authorization()
+    assert persisted_receipt["network_calls_performed"] is False
+    assert persisted_receipt["external_effects_performed"] is False
+
+    # Reopen orchestrator and confirm exact single logical decision + idempotent replay.
+    reopened = w2_pulse_case["make_owner"]()
+    inspected = reopened.inspect_pulse_brain_decision(key)
+    assert inspected.status == "BRAIN_ACCEPTED"
+    assert inspected.state == "READY_FOR_HUMAN_RELEASE"
+    assert inspected.journal_seq == accepted.journal_seq
+    assert inspected.decision_sha256 == accepted.decision_sha256
+    assert inspected.origin_kind == "TEST_ONLY"
+    assert inspected.identity_authenticated is False
+    assert inspected.live_cdp_proven is False
+
+    replayed = reopened.accept_pulse_brain_decision(
+        key,
+        decision_input=decision_input,
+        evidence_request=req_raw,
+        at=now_at,
+    )
+    assert replayed.status == "BRAIN_ACCEPTED"
+    assert replayed.idempotent_replay is True
+    assert replayed.journal_seq == accepted.journal_seq
+    assert replayed.accepted_receipt_sha256 == accepted.accepted_receipt_sha256
+
+    # Conflicting second decision on the same logical journey is rejected; ONE persistent logical decision remains.
+    _, _, second_input = _w3a_make_test_only_decision_input(
+        req_data,
+        decision_id="decision:w3a-conflicting-second",
+    )
+    conflict = reopened.accept_pulse_brain_decision(
+        key,
+        decision_input=second_input,
+        evidence_request=req_raw,
+        at=now_at,
+    )
+    assert conflict.status == "HOLD" and conflict.reason == "BRAIN_DECISION_CONFLICT" and conflict.accepted is False
+    assert len(invocation_rows(owner, "BrainDecisionIntakeReserved.v1")) == 1
+    assert len(invocation_rows(owner, "BrainDecisionAccepted.v1")) == 1
+    # W2 WAIT_BRAIN outbox/receipt and user_version=1 remain intact.
+    assert reopened.resume_local() == (done,)
+    with sqlite3.connect(owner._state_dir / "production.sqlite") as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 1
+
+
+def test_w3a_pulse03_negative_mismatches_invalid_bytes_tamper_unknown_and_revoked_auth(w2_pulse_case, monkeypatch):
+    _w2_require_windows_media()
+    import time
+    from ai_commerce.production_orchestration.contracts import LocalBrainDecisionInput
+    from ai_commerce.production_runtime import attended_worker, receipt as runtime_receipt
+
+    owner = w2_pulse_case["make_owner"]()
+    done = owner.complete_a04_pulse(**w2_pulse_case["call_kwargs"])
+    key = done.completed.spec.idempotency_key
+    req_raw = owner.build_pulse_brain_evidence_request(key)
+    req_data = runtime_receipt.parse_brain_review_evidence_request(req_raw)
+    now_at = int(time.time())
+
+    # LocalBrainDecisionInput enforces TEST_ONLY label honesty.
+    valid_raw, _, valid_input = _w3a_make_test_only_decision_input(req_data)
+    with pytest.raises(OrchestrationError, match="TEST_ONLY_ORIGIN_LABEL_REQUIRED"):
+        LocalBrainDecisionInput(
+            decision_bytes=valid_raw,
+            origin_ref="local:unmarked-fixture",
+            origin_kind="TEST_ONLY",
+        )
+    with pytest.raises(OrchestrationError, match="TEST_ONLY_ORIGIN_LABEL_MISMATCH"):
+        LocalBrainDecisionInput(
+            decision_bytes=valid_raw,
+            origin_ref="TEST_ONLY:disguised-as-live",
+            origin_kind="LOCAL_CHATGPT_TRANSFER",
+        )
+
+    cases = [
+        ("wrong-chat", {"input_chat_ref": "chat:wrong-other-chat"}, "BRAIN_CHAT_MISMATCH"),
+        ("fake-actor-human", {"actor": "HUMAN"}, "BRAIN_ACTOR_MISMATCH"),
+        ("non-human-evidence-type", {"evidence_type": "SYNTHETIC_FIXTURE"}, "BRAIN_ACTOR_MISMATCH"),
+        ("decision-revise", {"decision": "REVISE"}, "BRAIN_DECISION_NOT_APPROVED"),
+        ("decision-hold", {"decision": "HOLD"}, "BRAIN_DECISION_NOT_APPROVED"),
+        ("decision-stop", {"decision": "STOP"}, "BRAIN_DECISION_NOT_APPROVED"),
+        ("wrong-source", {"source_sha": "0" * 40}, "BRAIN_SOURCE_MISMATCH"),
+        ("wrong-journey", {"journey_id": "journey:" + "9" * 32}, "BRAIN_JOURNEY_MISMATCH"),
+        ("wrong-version", {"directive_version": 2}, "BRAIN_VERSION_MISMATCH"),
+        ("wrong-directive", {"directive_sha256": "0" * 64}, "BRAIN_DIRECTIVE_MISMATCH"),
+        ("wrong-scope", {"scope": {"action_class": "PUBLISH", "provider_ref": "provider:x",
+                                   "account_ref": "account:x", "surface": "surface:x", "asset_sha256": "a" * 64}},
+         "BRAIN_SCOPE_MISMATCH"),
+        ("wrong-receipt-ref", {"receipt_ref": "receipt:" + "0" * 64}, "BRAIN_RECEIPT_MISMATCH"),
+        ("wrong-request-sha", {"input_evidence_request_sha256": "0" * 64}, "BRAIN_EVIDENCE_REQUEST_MISMATCH"),
+    ]
+    for label, overrides, expected_reason in cases:
+        _, _, dec_input = _w3a_make_test_only_decision_input(req_data, **overrides)
+        res = owner.accept_pulse_brain_decision(
+            key,
+            decision_input=dec_input,
+            evidence_request=req_raw,
+            at=now_at,
+        )
+        assert res.status == "HOLD" and res.accepted is False and res.state == "WAIT_BRAIN", (label, res)
+        assert res.reason == expected_reason, (label, res.reason, expected_reason)
+
+    # Changed raw bytes (trailing newline), tampered digest, and malformed JSON fail closed.
+    changed_bytes_res = owner.accept_pulse_brain_decision(
+        key,
+        decision_input=replace(valid_input, decision_bytes=valid_raw + b"\n"),
+        evidence_request=req_raw,
+        at=now_at,
+    )
+    assert changed_bytes_res.status == "HOLD" and changed_bytes_res.reason == "BRAIN_DECISION_BYTES_MISMATCH"
+
+    tampered_digest_obj = json.loads(valid_raw)
+    tampered_digest_obj["decision_sha256"] = "0" * 64
+    tampered_digest_res = owner.accept_pulse_brain_decision(
+        key,
+        decision_input=replace(valid_input, decision_bytes=canonical_bytes(tampered_digest_obj)),
+        evidence_request=req_raw,
+        at=now_at,
+    )
+    assert tampered_digest_res.status == "HOLD" and tampered_digest_res.reason == "BRAIN_DECISION_INVALID"
+
+    bad_json_res = owner.accept_pulse_brain_decision(
+        key,
+        decision_input=replace(valid_input, decision_bytes=b"{not-json"),
+        evidence_request=req_raw,
+        at=now_at,
+    )
+    assert bad_json_res.status == "HOLD" and bad_json_res.reason == "BRAIN_DECISION_INVALID"
+
+    bad_req_res = owner.accept_pulse_brain_decision(
+        key,
+        decision_input=valid_input,
+        evidence_request=req_raw + b" ",
+        at=now_at,
+    )
+    assert bad_req_res.status == "HOLD" and bad_req_res.reason == "BRAIN_EVIDENCE_REQUEST_MISMATCH"
+
+    # Tampered production.sqlite brain journal row is rejected fail-closed.
+    tamper_dir = w2_pulse_case["tmp_path"] / "w3a-tamper-journal"
+    tamper_owner = w2_pulse_case["make_owner"](state_dir=tamper_dir)
+    tamper_done = tamper_owner.complete_a04_pulse(**w2_pulse_case["call_kwargs"])
+    t_key = tamper_done.completed.spec.idempotency_key
+    t_req_raw = tamper_owner.build_pulse_brain_evidence_request(t_key)
+    t_req = runtime_receipt.parse_brain_review_evidence_request(t_req_raw)
+    _, _, t_input = _w3a_make_test_only_decision_input(t_req)
+    with sqlite3.connect(tamper_dir / "production.sqlite") as db:
+        db.execute(
+            "INSERT INTO journal(key,kind,body) VALUES (?,?,?)",
+            (t_key, "BrainDecisionAccepted.v1", '{"tampered":true}'),
+        )
+    tampered_res = tamper_owner.accept_pulse_brain_decision(
+        t_key,
+        decision_input=t_input,
+        evidence_request=t_req_raw,
+        at=now_at,
+    )
+    assert tampered_res.status == "HOLD" and tampered_res.reason == "BRAIN_JOURNAL_TAMPERED" and tampered_res.accepted is False
+
+    # Tampered B0.2 journal.sqlite fails closed without minting ACK.
+    b02_dir = w2_pulse_case["tmp_path"] / "w3a-tamper-b02"
+    b02_owner = w2_pulse_case["make_owner"](state_dir=b02_dir)
+    b02_done = b02_owner.complete_a04_pulse(**w2_pulse_case["call_kwargs"])
+    b_key = b02_done.completed.spec.idempotency_key
+    b_req_raw = b02_owner.build_pulse_brain_evidence_request(b_key)
+    b_req = runtime_receipt.parse_brain_review_evidence_request(b_req_raw)
+    _, _, b_input = _w3a_make_test_only_decision_input(b_req)
+    private_dir = b02_dir / "pulse-runtime" / b_key[:32]
+    (private_dir / "journal.sqlite").write_bytes(b"corrupt pulse journal")
+    b02_res = b02_owner.accept_pulse_brain_decision(
+        b_key,
+        decision_input=b_input,
+        evidence_request=b_req_raw,
+        at=now_at,
+    )
+    assert b02_res.status == "HOLD" and b02_res.reason == "BRAIN_JOURNAL_OR_SOURCE_TAMPERED" and b02_res.accepted is False
+    assert not invocation_rows(owner, "BrainDecisionAccepted.v1")
+
+    # UNKNOWN_EFFECT on underlying PULSE journal fails closed and preserves UNKNOWN_EFFECT.
+    with monkeypatch.context() as mp:
+        mp.setattr(
+            attended_worker,
+            "load_a04_pulse_wait_brain_snapshot",
+            lambda **kw: (_ for _ in ()).throw(attended_worker.WorkerHold("UNKNOWN_EFFECT")),
+        )
+        unk_res = owner.accept_pulse_brain_decision(
+            key,
+            decision_input=valid_input,
+            evidence_request=req_raw,
+            at=now_at,
+        )
+    assert (
+        unk_res.status == "HOLD"
+        and unk_res.state == "UNKNOWN_EFFECT"
+        and unk_res.reason == "BRAIN_UNKNOWN_EFFECT"
+        and unk_res.accepted is False
+    )
+
+    # Revoked caller local authorization cannot intake BrainDecision.
+    owner.revoke_local_authorization()
+    with pytest.raises(OrchestrationError, match="LOCAL_AUTHORIZATION_REQUIRED"):
+        owner.accept_pulse_brain_decision(
+            key,
+            decision_input=valid_input,
+            evidence_request=req_raw,
+            at=now_at,
+        )
+
+
+@pytest.mark.parametrize("cut", ["after_reserve", "after_receipt_write", "after_commit"])
+def test_w3a_pulse03_crash_before_and_after_commit_recovers_safely_once(w2_pulse_case, monkeypatch, cut):
+    _w2_require_windows_media()
+    import time
+    from ai_commerce.production_runtime import receipt as runtime_receipt
+
+    state_dir = w2_pulse_case["tmp_path"] / f"w3a-crash-{cut}"
+    first = w2_pulse_case["make_owner"](state_dir=state_dir)
+    done = first.complete_a04_pulse(**w2_pulse_case["call_kwargs"])
+    key = done.completed.spec.idempotency_key
+    req_raw = first.build_pulse_brain_evidence_request(key)
+    req_data = runtime_receipt.parse_brain_review_evidence_request(req_raw)
+    now_at = int(time.time())
+    _, _, decision_input = _w3a_make_test_only_decision_input(req_data)
+
+    # Stale expected_fencing_generation is rejected before writing any reservation.
+    stale = first.accept_pulse_brain_decision(
+        key,
+        decision_input=decision_input,
+        evidence_request=req_raw,
+        at=now_at,
+        expected_fencing_generation=999,
+    )
+    assert stale.status == "HOLD" and stale.reason == "STALE_FENCING_GENERATION" and stale.accepted is False
+    assert not invocation_rows(first, "BrainDecisionIntakeReserved.v1")
+
+    def crash_at_cut(name):
+        if name == cut:
+            raise LocalCrash()
+
+    monkeypatch.setattr(first, "_brain_decision_cut", crash_at_cut)
+    with pytest.raises(LocalCrash):
+        first.accept_pulse_brain_decision(
+            key,
+            decision_input=decision_input,
+            evidence_request=req_raw,
+            at=now_at,
+            expected_fencing_generation=req_data["journal_checkpoint"]["generation"],
+        )
+    assert len(invocation_rows(first, "BrainDecisionIntakeReserved.v1")) == 1
+
+    second = w2_pulse_case["make_owner"](state_dir=state_dir)
+    if cut == "after_commit":
+        # Crash after durable SQLite commit: reopen/replay converges to the exact single ACK.
+        assert len(invocation_rows(first, "BrainDecisionAccepted.v1")) == 1
+        inspected = second.inspect_pulse_brain_decision(key)
+        assert inspected.status == "BRAIN_ACCEPTED"
+        assert inspected.state == "READY_FOR_HUMAN_RELEASE"
+        assert inspected.idempotent_replay is True
+        assert inspected.origin_kind == "TEST_ONLY"
+        replayed = second.accept_pulse_brain_decision(
+            key,
+            decision_input=decision_input,
+            evidence_request=req_raw,
+            at=now_at,
+        )
+        assert replayed.status == "BRAIN_ACCEPTED" and replayed.idempotent_replay is True
+        assert replayed.journal_seq == inspected.journal_seq
+        assert len(invocation_rows(second, "BrainDecisionIntakeReserved.v1")) == 1
+        assert len(invocation_rows(second, "BrainDecisionAccepted.v1")) == 1
+        return
+
+    assert not invocation_rows(first, "BrainDecisionAccepted.v1")
+
+    # While reservation lease is active, a concurrent caller holds without mutating.
+    busy = second.accept_pulse_brain_decision(
+        key,
+        decision_input=decision_input,
+        evidence_request=req_raw,
+        at=now_at,
+    )
+    assert busy.status == "HOLD" and busy.reason == "BRAIN_DECISION_INTAKE_IN_PROGRESS" and busy.accepted is False
+
+    # After lease expiry, interrupted commit holds without explicit exact-generation reconciliation.
+    expired_now = time.time() + 120
+    monkeypatch.setattr("ai_commerce.production_orchestration.orchestrator.time.time", lambda: expired_now)
+    held = second.accept_pulse_brain_decision(
+        key,
+        decision_input=decision_input,
+        evidence_request=req_raw,
+        at=now_at,
+    )
+    assert held.status == "HOLD" and held.reason == "BRAIN_INTERRUPTED_COMMIT_HOLD" and held.accepted is False
+
+    # Wrong reconcile_fencing_generation is denied.
+    wrong_fence = second.accept_pulse_brain_decision(
+        key,
+        decision_input=decision_input,
+        evidence_request=req_raw,
+        at=now_at,
+        reconcile_fencing_generation=999,
+    )
+    assert wrong_fence.status == "HOLD" and wrong_fence.reason == "STALE_FENCING_GENERATION"
+
+    # Reconciling with exact generation:
+    # - after_reserve has no persisted receipt files -> stays HOLD (never mints ACK from incomplete commit).
+    # - after_receipt_write has exact persisted receipt files -> converges cleanly to ONE BrainDecisionAccepted.v1.
+    reconciled = second.accept_pulse_brain_decision(
+        key,
+        decision_input=decision_input,
+        evidence_request=req_raw,
+        at=now_at,
+        reconcile_fencing_generation=req_data["journal_checkpoint"]["generation"],
+    )
+    if cut == "after_reserve":
+        assert reconciled.status == "HOLD" and reconciled.reason == "BRAIN_INTERRUPTED_COMMIT_HOLD"
+        assert not invocation_rows(second, "BrainDecisionAccepted.v1")
+    else:
+        assert reconciled.status == "BRAIN_ACCEPTED" and reconciled.state == "READY_FOR_HUMAN_RELEASE"
+        assert reconciled.origin_kind == "TEST_ONLY"
+        assert reconciled.identity_authenticated is False and reconciled.live_cdp_proven is False
+        assert len(invocation_rows(second, "BrainDecisionIntakeReserved.v1")) == 1
+        assert len(invocation_rows(second, "BrainDecisionAccepted.v1")) == 1
+        assert second.inspect_pulse_brain_decision(key).journal_seq == reconciled.journal_seq

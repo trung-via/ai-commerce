@@ -21,7 +21,9 @@ from .journal import Checkpoint, Journal
 from .recovery import replay_verified
 from .state_machine import Event, EventKind, EvidencePin
 from .receipt import (
+    _build_brain_review_evidence_request_bundle,
     autonomous_evidence_packet,
+    build_brain_review_evidence_request,
     evidence_packet,
     export_autonomous_packet,
     export_packet,
@@ -1008,3 +1010,51 @@ def resume_a04_pulse_handoff(
         return _autonomous_export_and_summary(
             root, dest, directive, intent, history, result, checked, q4_qa, write=True
         )
+
+
+def build_a04_pulse_brain_evidence_request(
+    *,
+    private_dir,
+    export_dir,
+    expected_generation=None,
+    **inputs,
+):
+    """Build deterministic, sanitized BrainReviewEvidenceRequest.v1 bytes from W2 WAIT_BRAIN.
+
+    Read-only: re-verifies current local files, native A06 MP4 decode, Q4
+    technical QA, ProductJourneyReceipt.v1 readback, and B0.2 journal checkpoint.
+    Never mutates journal/exports and never authenticates Brain identity.
+    """
+    root = _private(str(private_dir))
+    dest = _private(str(export_dir))
+    _need(dest != root and root not in dest.parents and dest not in root.parents,
+          "SEPARATE_EXPORT_DIRECTORY_REQUIRED")
+    return build_brain_review_evidence_request(
+        private_dir=str(root),
+        receipt_path=str(dest / "ProductJourneyReceipt.v1.json"),
+        evidence_path=str(dest / "autonomous-offline-evidence.json"),
+        expected_generation=expected_generation,
+        **inputs,
+    )
+
+
+def load_a04_pulse_wait_brain_snapshot(
+    *,
+    private_dir,
+    export_dir,
+    expected_generation=None,
+    **inputs,
+):
+    """Read-only verified W2 WAIT_BRAIN snapshot + current BrainReviewEvidenceRequest.v1 bytes."""
+    root = _private(str(private_dir))
+    dest = _private(str(export_dir))
+    _need(dest != root and root not in dest.parents and dest not in root.parents,
+          "SEPARATE_EXPORT_DIRECTORY_REQUIRED")
+    return _build_brain_review_evidence_request_bundle(
+        private_dir=str(root),
+        receipt_path=str(dest / "ProductJourneyReceipt.v1.json"),
+        evidence_path=str(dest / "autonomous-offline-evidence.json"),
+        expected_generation=expected_generation,
+        propagate_unknown_effect=True,
+        **inputs,
+    )

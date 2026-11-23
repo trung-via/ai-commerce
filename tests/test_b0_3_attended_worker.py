@@ -1239,7 +1239,7 @@ def _make_autonomous_a04_pulse_fixture(tmp_path, *, source_sha="95f4f5d9d4484103
         "scope": "OFFLINE_LOCAL_RENDER",
         "status": "GRANTED",
         "valid_from": 0,
-        "expires_at": int(time.time()) + 600 if expires_at is None else expires_at,
+        "expires_at": int(time.time()) + 3600 if expires_at is None else expires_at,
     }
     rights_raw = canonical_bytes(rights_claim)
     rights_path = asset_dir / "rights-01.json"
@@ -1552,3 +1552,97 @@ def test_autonomous_a04_pulse_negative_auth_source_rights_q4_and_tamper_hold(tmp
             **q4_case["inputs"],
         )
     assert not (q4_case["export_dir"] / "ProductJourneyReceipt.v1.json").exists()
+
+
+def test_w3a_brain_evidence_request_deterministic_bounded_sanitized_and_rechecked(tmp_path, monkeypatch):
+    require_media()
+    fixture = _make_autonomous_a04_pulse_fixture(tmp_path / "w3a-req")
+    received = worker.receive_a04_pulse_handoff(
+        private_dir=str(fixture["private_dir"]),
+        export_dir=str(fixture["export_dir"]),
+        **fixture["inputs"],
+    )
+    assert received["state"] == "WAIT_BRAIN"
+
+    monkeypatch.setattr(worker.service, "run", lambda *a, **k: pytest.fail("W3a evidence request must never render"))
+    before_private = b15_snapshot(fixture["private_dir"])
+    before_export = b15_snapshot(fixture["export_dir"])
+
+    req_raw = worker.build_a04_pulse_brain_evidence_request(
+        private_dir=str(fixture["private_dir"]),
+        export_dir=str(fixture["export_dir"]),
+        **fixture["inputs"],
+    )
+    req_raw_again = worker.build_a04_pulse_brain_evidence_request(
+        private_dir=str(fixture["private_dir"]),
+        export_dir=str(fixture["export_dir"]),
+        **fixture["inputs"],
+    )
+    assert req_raw == req_raw_again
+    assert len(req_raw) <= receipt_owner.BRAIN_REVIEW_REQUEST_MAX_BYTES
+    assert b15_snapshot(fixture["private_dir"]) == before_private
+    assert b15_snapshot(fixture["export_dir"]) == before_export
+
+    parsed = receipt_owner.parse_brain_review_evidence_request(req_raw)
+    assert parsed["schema_version"] == "BrainReviewEvidenceRequest.v1"
+    assert parsed["intake_mode"] == "AUTONOMOUS_OFFLINE_LOCAL"
+    assert parsed["human_attended"] is False
+    assert parsed["state"] == "WAIT_BRAIN"
+    assert parsed["review_scope"] == "DIRECTIVE_ONLY"
+    assert parsed["required_channel"] == "CURRENT_CHATGPT_CHAT"
+    assert parsed["journey_id"] == received["journey_id"]
+    assert parsed["source_sha"] == received["source_sha"]
+    assert parsed["directive_version"] == 1
+    assert parsed["directive_sha256"] == fixture["directive"].to_dict()["directive_sha256"]
+    assert parsed["receipt_ref"] == "receipt:" + received["receipt_sha256"]
+    assert parsed["receipt_sha256"] == received["receipt_sha256"]
+    assert parsed["receipt_file_sha256"] == received["receipt_file_sha256"]
+    assert parsed["local_artifact"]["artifact_sha256"] == received["artifact_sha256"]
+    assert parsed["local_artifact"]["ffprobe_full_decode"] is True
+    assert parsed["q4_technical_qa"]["qa_ref"] == received["q4_qa_ref"]
+    assert parsed["q4_technical_qa"]["qa_sha256"] == received["q4_qa_sha256"]
+    assert parsed["journal_checkpoint"] == received["journal_checkpoint"]
+    assert len(parsed["journal_sequence"]) == 4
+    assert parsed["brain_identity_authenticated"] is False
+    assert parsed["brain_decision"] is None
+    assert parsed["authorization"] == draft_authorization()
+    assert parsed["unproven"] == receipt_owner.B15_UNPROVEN
+    assert parsed["provider_network_calls"] == parsed["paid_generation_calls"] == parsed["publish_calls"] == 0
+    for secret in (str(tmp_path), PRIVATE_TEXT):
+        assert secret not in b15_text(parsed)
+        assert secret.encode("utf-8") not in req_raw
+
+    receipt_path = str(fixture["export_dir"] / "ProductJourneyReceipt.v1.json")
+    evidence_path = str(fixture["export_dir"] / "autonomous-offline-evidence.json")
+    assert receipt_owner.recheck_brain_review_evidence_request(
+        req_raw,
+        private_dir=str(fixture["private_dir"]),
+        receipt_path=receipt_path,
+        evidence_path=evidence_path,
+        **fixture["inputs"],
+    ) == req_raw
+
+    # Malformed or self-resealed forged fields are bounded and rejected before source access.
+    forged = dict(parsed)
+    forged["brain_identity_authenticated"] = True
+    with pytest.raises(ReceiptHold, match="^BRAIN_EVIDENCE_REQUEST_INVALID$"):
+        receipt_owner.parse_brain_review_evidence_request(b15_reseal(forged, "request_sha256"))
+    with pytest.raises(ReceiptHold, match="^BRAIN_EVIDENCE_REQUEST_INVALID$"):
+        receipt_owner.parse_brain_review_evidence_request(b"x" * (receipt_owner.BRAIN_REVIEW_REQUEST_MAX_BYTES + 1))
+
+    # Post-build tamper to MP4 or receipt invalidates live recheck without leaking paths.
+    mp4 = next(fixture["private_dir"].glob("e01-*/video.mp4"))
+    saved_mp4 = mp4.read_bytes()
+    try:
+        mp4.write_bytes(saved_mp4 + b"tampered")
+        with pytest.raises(ReceiptHold, match="^BRAIN_EVIDENCE_REQUEST_HOLD$") as held:
+            receipt_owner.recheck_brain_review_evidence_request(
+                req_raw,
+                private_dir=str(fixture["private_dir"]),
+                receipt_path=receipt_path,
+                evidence_path=evidence_path,
+                **fixture["inputs"],
+            )
+        assert str(tmp_path) not in str(held.value) and PRIVATE_TEXT not in str(held.value)
+    finally:
+        mp4.write_bytes(saved_mp4)
