@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import replace
 import hashlib
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -115,6 +116,133 @@ def test_exact_chat_only_and_no_new_tabs_or_navigation():
     outcome = call(FakeInventory(same1, same2))
     assert outcome.error_code == "AMBIGUOUS_CHAT_TARGETS"
     assert same1.counts["click"] == same2.counts["click"] == 0
+
+
+_PULSE_CHAT = "chat:" + URL.rsplit("/", 1)[1]
+
+
+class FakePulseBrainPage:
+    url = URL
+
+    def __init__(self, case, events):
+        self.case = case
+        self.events = events
+
+    def set_default_timeout(self, timeout):
+        assert timeout == 3000
+
+    def evaluate(self, script, args):
+        assert args["url"] == URL
+        if script == doorbell._CHECK:
+            return "READY"
+        if script == doorbell._INSERT:
+            self.events.append("insert")
+            return True
+        assert script == doorbell._CLICK
+        self.events.append("click")
+        if self.case == "disconnect":
+            raise OSError("synthetic ambiguous click")
+        return True
+
+    def wait_for_function(self, script, *, arg, timeout):
+        if script == doorbell._READY:
+            assert timeout == 3000
+            return
+        assert script == doorbell._PULSE_BRAIN_RESPONSE and timeout == 30000
+        self.events.append("answer")
+        if self.case == "timeout":
+            raise TimeoutError("synthetic incomplete answer")
+        body = json.loads(arg["text"].splitlines()[-2])
+        body.update(decision="APPROVE_DIRECTIVE", rationale="Synthetic review of exact evidence.")
+        header = arg["header"]
+        if self.case == "wrong-source":
+            body["source_sha"] = body["provenance"]["source_sha"] = "f" * 40
+        if self.case == "wrong-correlation":
+            header = header.replace("e" * 64, "a" * 64)
+        reply = header + json.dumps(body)
+        if self.case == "truncated":
+            reply = reply[:-1]
+        return SimpleNamespace(json_value=lambda: reply)
+
+
+@pytest.fixture
+def pulse_brain_request(monkeypatch):
+    evidence = b'{"synthetic":true}'
+    request = {
+        "request_sha256": "e" * 64, "journey_id": "journey:test", "source_sha": "a" * 40,
+        "directive_version": 1, "directive_sha256": "d" * 64,
+        "scope": {"action_class": "EXPORT_DRAFT", "provider_ref": None, "account_ref": None,
+                  "surface": None, "asset_sha256": None},
+        "review_scope": "DIRECTIVE_ONLY", "required_channel": "CURRENT_CHATGPT_CHAT",
+        "receipt_ref": "receipt:" + "b" * 64,
+    }
+
+    def parse(raw):
+        assert raw == evidence
+        return request
+
+    monkeypatch.setattr(doorbell, "parse_brain_review_evidence_request", parse)
+    return evidence
+
+
+@pytest.mark.parametrize("case", ["approve", "wrong-source", "wrong-correlation", "truncated",
+                                 "timeout", "disconnect"])
+def test_pulse_brain_one_click_and_bounded_correlated_ui_result(pulse_brain_request, case):
+    from ai_commerce.production_runtime.contracts import parse_contract
+
+    events = []
+    page = FakePulseBrainPage(case, events)
+    bridge = doorbell.LocalChromePulseBrainBridge(binding=BIND, allow_submit=True, inventory=FakeInventory(page))
+
+    def reserve():
+        events.append("durable-intent")
+        return True
+
+    result = bridge.request_decision(evidence_request=pulse_brain_request, chat_ref=_PULSE_CHAT,
+                                     reserve_send=reserve)
+    assert events == ["durable-intent", "insert", "click"] + ([] if case == "disconnect" else ["answer"])
+    if case == "approve":
+        assert result.is_test_only and result.origin_ref.startswith("TEST_ONLY:")
+        assert result.chat_ref == _PULSE_CHAT and result.evidence_request_sha256 == "e" * 64
+        assert parse_contract("BrainDecision", result.decision_bytes).to_dict()["decision"] == "APPROVE_DIRECTIVE"
+    else:
+        assert result is None
+
+
+def test_pulse_brain_rejects_wrong_chat_and_endpoint_before_reserving(pulse_brain_request):
+    page = FakePulseBrainPage("approve", [])
+    other_page = FakePulseBrainPage("approve", [])
+    other_page.url = OTHER
+    for binding, chat_ref, pages, attach in (
+        (BIND, "chat:wrong", (page,), False),
+        (replace(BIND, cdp_endpoint="http://127.0.0.1:9333"), _PULSE_CHAT, (page,), False),
+        (BIND, _PULSE_CHAT, (other_page,), True),
+        (BIND, _PULSE_CHAT, (page, page), True),
+    ):
+        inventory = FakeInventory(*pages)
+        bridge = doorbell.LocalChromePulseBrainBridge(binding=binding, allow_submit=True, inventory=inventory)
+        assert bridge.request_decision(evidence_request=pulse_brain_request, chat_ref=chat_ref,
+                                       reserve_send=lambda: pytest.fail("unexpected send intent")) is None
+        assert inventory.calls == ([BIND.cdp_endpoint] if attach else [])
+    assert page.events == other_page.events == []
+
+
+def test_pulse_brain_requires_opt_in_and_a_new_durable_intent(pulse_brain_request):
+    page = FakePulseBrainPage("approve", [])
+    inventory = FakeInventory(page)
+    for enabled in (False, True):
+        bridge = doorbell.LocalChromePulseBrainBridge(binding=BIND, allow_submit=enabled, inventory=inventory)
+        assert bridge.request_decision(evidence_request=pulse_brain_request, chat_ref=_PULSE_CHAT,
+                                       reserve_send=lambda: False) is None
+    assert inventory.calls == [BIND.cdp_endpoint] and page.events == []
+
+
+def test_pulse_brain_rejects_invalid_evidence_without_cdp():
+    inventory = FakeInventory(FakePulseBrainPage("approve", []))
+    bridge = doorbell.LocalChromePulseBrainBridge(binding=BIND, allow_submit=True, inventory=inventory)
+    assert bridge.request_decision(evidence_request=b"{}", chat_ref=_PULSE_CHAT,
+                                   reserve_send=lambda: pytest.fail("unexpected send intent")) is None
+    assert inventory.calls == []
 
 
 @pytest.mark.parametrize("gate", [

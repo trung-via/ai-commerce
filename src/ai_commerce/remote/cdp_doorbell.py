@@ -1,8 +1,8 @@
 """Opt-in Chrome CDP doorbell for an already-authenticated, exact ChatGPT chat.
 
 Adapted as an independent AI Commerce component after reading the user's
-AIOS-Renew local_chat_wake.py source. No AIOS import, credentials, session data,
-browser launching, navigation, assistant scraping or automatic activation.
+AIOS-Renew local_chat_wake.py source. The legacy wake uses only user-turn
+evidence. The opt-in PULSE bridge reads its one correlated assistant turn.
 
 A witnessed browser user turn is only *UI evidence*, not an authenticated
 ChatGPT server receipt or proof of autonomous Brain continuation. D2 therefore
@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -21,8 +22,11 @@ from urllib.parse import urlsplit
 from typing import Callable, Protocol
 from pathlib import Path
 
+from ..production_orchestration.contracts import LocalBrainDecisionInput, OrchestrationError
+from ..production_runtime.contracts import draft_authorization, seal_contract
+from ..production_runtime.receipt import parse_brain_review_evidence_request
 from ..wakehub_cdp import authenticated_turn as cdp_turn
-from .conversation_binding import ResolvedBinding, _CHAT, _REPOSITORY, _endpoint
+from .conversation_binding import ResolvedBinding, _CHAT, _REPOSITORY, _decode_unique, _endpoint
 from .trusted_origin import (
     CompleteSearchDomainWitness, OriginError, PrivateOriginSnapshot,
     LocalCallerAttestation, OriginAuthority,
@@ -47,8 +51,7 @@ _STOP = '[data-testid="stop-button"]'
 _LOGIN = '[data-testid="login-button"], a[href^="/auth/login"]'
 _WORK = '[data-workspace-type="team"], [data-workspace-type="enterprise"], [data-workspace-type="business"], [data-testid="work-composer"]'
 
-# All page-side scripts return bounded status codes, never transcript contents,
-# cookies, account data or ChatGPT response text.
+# Legacy page-side scripts return bounded status codes and user-turn evidence.
 _GUARD = """
 const visible = sel => [...document.querySelectorAll(sel)].filter(
  e => e.getClientRects().length > 0 && getComputedStyle(e).visibility === 'visible');
@@ -167,6 +170,24 @@ _PROVE = "(args) => { " + _GUARD + """
      visible(args.work).length) return false;
  const found=matches();
  return found.length===1 && found[0].getClientRects().length > 0;
+}"""
+
+_PULSE_BRAIN_RESPONSE = "(args) => { " + _GUARD + """
+ if (location.href.replace(/\\/$/,'') !== args.url ||
+     visible('main').length !== 1 || visible(args.login).length ||
+     visible(args.work).length || visible(args.stop).length) return false;
+ const turns = visible('main [data-message-author-role]');
+ const user = matches();
+ if (user.length !== 1 || turns.length < 2 || turns[turns.length - 2] !== user[0])
+   return false;
+ const answer = turns[turns.length - 1];
+ if (answer.getAttribute('data-message-author-role') !== 'assistant') return false;
+ const article = answer.closest('article');
+ if (!article || ![...article.querySelectorAll('[data-testid="copy-turn-action-button"]')]
+       .some(button => button.getClientRects().length)) return false;
+ const text = answer.innerText;
+ return typeof text === 'string' && text.length <= args.max_chars &&
+        text.startsWith(args.header) ? text : false;
 }"""
 
 _OBSERVER_CHECK = "(args) => { " + _GUARD + """
@@ -1054,6 +1075,102 @@ class LocalChromeDoorbellAdapter:
             return receipt("UNKNOWN" if staging_started or clicked else "UNSUPPORTED",
                            "SUBMISSION_UNPROVEN" if clicked else (
                                "INSERT_BLOCKED" if staging_started else "CDP_UNAVAILABLE"))
+
+
+class LocalChromePulseBrainBridge:
+    """One exact-chat PULSE review through an already-open local 9444 session."""
+
+    def __init__(self, *, binding: ResolvedBinding, allow_submit: bool = False,
+                 inventory: BrowserInventory | None = None):
+        self._binding = binding
+        self._allow_submit = allow_submit is True
+        self._test_only = inventory is not None
+        self._inventory = _PlaywrightInventory() if inventory is None else inventory
+
+    def request_decision(
+        self, *, evidence_request: bytes, chat_ref: str, reserve_send: Callable[[], bool],
+    ) -> LocalBrainDecisionInput | None:
+        binding = self._binding
+        if (not self._allow_submit or (not self._test_only and not _is_windows()) or
+                type(binding) is not ResolvedBinding or binding.cdp_endpoint != "http://127.0.0.1:9444" or
+                type(binding.chat_url) is not str):
+            return None
+        match = _CHAT.fullmatch(binding.chat_url)
+        if match is None or chat_ref != "chat:" + match[1]:
+            return None
+
+        try:
+            request = parse_brain_review_evidence_request(evidence_request)
+            nonce = secrets.token_hex(16)
+            request_sha = request["request_sha256"]
+            header = f"PULSE_BRAIN_DECISION {nonce} {request_sha}\n"
+            decision_fields = {
+                "schema_version": "BrainDecision.v1",
+                "decision_id": "decision:pulse-" + nonce,
+                "journey_id": request["journey_id"],
+                "source_sha": request["source_sha"],
+                "directive_version": request["directive_version"],
+                "directive_sha256": request["directive_sha256"],
+                "scope": request["scope"],
+                "review_scope": request["review_scope"],
+                "channel": request["required_channel"],
+                "chat_ref": chat_ref,
+                "receipt_ref": request["receipt_ref"],
+                "provenance": {
+                    "actor": "CHATGPT_BRAIN", "actor_ref": "brain:chatgpt-current",
+                    "evidence_type": "HUMAN_SUPPLIED", "source_ref": request["receipt_ref"],
+                    "source_sha": request["source_sha"],
+                },
+                "authorization": draft_authorization(),
+            }
+            prompt = (
+                "Review this PULSE directive using only the supplied evidence. "
+                "Reply with the exact header below followed by one plain JSON object. "
+                "Copy the decision fields exactly and add only decision and rationale. "
+                "Choose APPROVE_DIRECTIVE, REVISE, HOLD, or STOP. Use HOLD if evidence "
+                "is insufficient. Do not use tools or take any other action.\n"
+                + header + json.dumps(decision_fields, ensure_ascii=True, sort_keys=True) + "\n"
+                + evidence_request.decode("utf-8")
+            )
+            args = {**_ARGS, "url": binding.chat_url, "text": prompt,
+                    "header": header, "max_chars": 16384}
+
+            with self._inventory.pages(binding.cdp_endpoint) as pages:
+                matching = [page for page in pages if type(page.url) is str
+                            and page.url.removesuffix("/") == binding.chat_url]
+                if len(matching) != 1:
+                    return None
+                page = matching[0]
+                page.set_default_timeout(3000)
+                if page.evaluate(_CHECK, args) != "READY" or not reserve_send():
+                    return None
+                if page.evaluate(_INSERT, args) is not True:
+                    return None
+                page.wait_for_function(_READY, arg=args, timeout=3000)
+                if page.evaluate(_CLICK, args) is not True:
+                    return None
+                answer = page.wait_for_function(_PULSE_BRAIN_RESPONSE, arg=args, timeout=30000).json_value()
+                if page.url.removesuffix("/") != binding.chat_url:
+                    return None
+
+            if type(answer) is not str or len(answer) > args["max_chars"] or not answer.startswith(header):
+                return None
+            body = _decode_unique(answer[len(header):])
+            if type(body) is not dict or set(body) != {*decision_fields, "decision", "rationale"}:
+                return None
+            decision = seal_contract("BrainDecision", body)
+            if any(body[field] != value for field, value in decision_fields.items()):
+                return None
+            return LocalBrainDecisionInput(
+                decision_bytes=decision.raw,
+                origin_kind="TEST_ONLY" if self._test_only else "LOCAL_CHATGPT_TRANSFER",
+                origin_ref=("TEST_ONLY:" if self._test_only else "") + "pulse-cdp-ui:" + nonce,
+                chat_ref=chat_ref, evidence_request_sha256=request_sha,
+            )
+        except OrchestrationError:
+            raise
+        except Exception:
+            return None
 
 
 class LocalChromeObserverAdapter:
