@@ -114,7 +114,7 @@ def broker_crypto(crypto):
         subprocess.run([crypto.exe, "-Y", "sign", "-f", str(key), "-n", ob.CHALLENGE_NAMESPACE, str(path)],
                        check=True, capture_output=True, timeout=10)
         return jn.canonical(dict(body=body, signature=base64.b64encode(Path(str(path) + ".sig").read_bytes()).decode("ascii")))
-    return SimpleNamespace(signers=signers, signed=signed)
+    return SimpleNamespace(key=key, signers=signers, signed=signed)
 
 
 @pytest.fixture
@@ -1417,3 +1417,1010 @@ def test_client_handle_authentication_uses_kernel_endpoint_and_scm_facts(g3, mon
         context = ob._desktop_context(124)
         assert context[2:4] == (g3.broker.server, g3.broker.client)
     assert closed == ([888] if fault == "impersonation" else [])
+
+
+# ---------------------------------------------------------------------------
+# Slice (A): Two-SID independent broker + observer signing handoff tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def two_sid_handoff(status_exchange, monkeypatch):
+    """Real independent scratch Ed25519 keys for broker SID and observer SID.
+
+    Models three separate OS processes across two named pipes:
+    - Broker service (service_sid(), Session 0, ServiceCustody)
+    - Interactive desktop peer (operator SID, Session 7, NEVER reads observer key)
+    - Observer signer (OBSERVER SID, ObserverCustody)
+    """
+    x = status_exchange
+    g3 = x.g3
+    # Broker uses its OWN enrolled private key, separate from observer's private key.
+    g3.broker.anchor["private_key_path"] = str(g3.broker_crypto.key)
+    observer_exe = g3.broker.f.storage.root / "WakeHubObserverSigner.exe"
+    observer_exe.write_bytes(b"synthetic-observer-signer-image-v1")
+    signer_server = inv.ProcessIdentity(3333, T - 45, str(observer_exe) if os.name == "nt" else ob.OBSERVER_SIGNER_IMAGE, OBSERVER, 2)
+    observer_exec_path = signer_server.executable
+    if os.name != "nt":
+        orig_check = jn.WindowsPathCustody.check
+        def mapped_check(self, path, *, directory=False):
+            if str(path) == ob.OBSERVER_SIGNER_IMAGE:
+                return observer_exe
+            return orig_check(self, path, directory=directory)
+        monkeypatch.setattr(jn.WindowsPathCustody, "check", mapped_check)
+    signer_cfg = dict(
+        schema="WakeHubG3ObserverSignerAnchor.v1",
+        task_parent=en.TASK_PARENT,
+        pipe=b.OBSERVER_SIGNER_PIPE,
+        observer_sid=OBSERVER,
+        observer_executable=observer_exec_path,
+        observer_sha256=auth._digest(observer_exe.read_bytes()),
+        observer_key_path=str(g3.broker.f.crypto.keys["observer"]),
+    )
+    monkeypatch.setattr(ob, "_read_observer_signer_anchor", lambda: signer_cfg)
+
+    observer_custody_calls = []
+    def checked_observer_custody(self, path, *, directory=False):
+        observer_custody_calls.append((current_pid[0], self.owner_sid, str(path)))
+        if self.owner_sid != OBSERVER:
+            jn.deny()
+        return Path(path)
+    monkeypatch.setattr(b.ObserverCustody, "check", checked_observer_custody)
+
+    current_pid = [g3.broker.server.pid]
+    monkeypatch.setattr(os, "getpid", lambda: current_pid[0])
+    identities = {
+        g3.broker.server.pid: g3.broker.server,
+        g3.broker.client.pid: g3.broker.client,
+        signer_server.pid: signer_server,
+    }
+    monkeypatch.setattr(b, "read_process_identity", lambda pid: identities[pid] if pid in identities else jn.deny())
+
+    signer_facts = dict(server=asdict(signer_server), client=asdict(g3.broker.client), scm=g3.broker.facts["scm"])
+    monkeypatch.setattr(ob, "_observe_client_connection", lambda handle: g3.broker.facts)
+    monkeypatch.setattr(ob, "_observe_observer_signer_connection",
+                        lambda handle, side, *, observer_sid, operator_sid: signer_facts)
+
+    # Multi-handle deterministic Win32 pipe ABI seam (handles 201/202 = broker pipe, 301/302 = signer pipe).
+    now_mono = [100.0]
+    monkeypatch.setattr(ob, "_SPENT_HANDLES", set())
+    monkeypatch.setattr(ob, "_UNFINISHED_IO", [])
+    pipes = {
+        201: dict(side=ob._PipeSide.SERVER, peer=202, inbox=[], writes=[]),
+        202: dict(side=ob._PipeSide.CLIENT, peer=201, inbox=[], writes=[]),
+        301: dict(side=ob._PipeSide.SERVER, peer=302, inbox=[], writes=[]),
+        302: dict(side=ob._PipeSide.CLIENT, peer=301, inbox=[], writes=[]),
+    }
+    closed = []
+    error = [0]
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **kw: object())
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: error[0])
+    last_count = {}
+
+    def api(dll, name, args, result):
+        def call(*values):
+            if name == "GetNamedPipeInfo":
+                h = values[0]
+                values[1]._obj.value = (1 if pipes[h]["side"] is ob._PipeSide.SERVER else 0) | 4
+                return True
+            if name == "GetNamedPipeHandleStateW":
+                values[1]._obj.value = 2
+                return True
+            if name == "NtQueryInformationFile":
+                values[2]._obj.value = 0
+                return 0
+            if name == "CreateEventW":
+                return 900
+            if name == "CloseHandle":
+                closed.append(values[0])
+                return True
+            if name == "WriteFile":
+                h = values[0]
+                data = bytes(values[1].raw[:values[2]])
+                pipes[h]["writes"].append(data)
+                pipes[pipes[h]["peer"]]["inbox"].append(data)
+                last_count[h] = len(data)
+                return True
+            if name == "ReadFile":
+                h = values[0]
+                if not pipes[h]["inbox"]:
+                    error[0] = 109
+                    return False
+                data = pipes[h]["inbox"].pop(0)
+                ctypes.memmove(values[1], data, len(data))
+                last_count[h] = len(data)
+                return True
+            if name == "GetOverlappedResultEx":
+                h = values[0]
+                values[2]._obj.value = last_count[h]
+                return True
+            if name == "PeekNamedPipe":
+                h = values[0]
+                values[4]._obj.value = len(pipes[h]["inbox"][0]) if pipes[h]["inbox"] else 0
+                return True
+            if name == "CancelIoEx":
+                return True
+            pytest.fail("unexpected native API " + name)
+        return call
+    monkeypatch.setattr(b, "_api", api)
+
+    return SimpleNamespace(
+        x=x, g3=g3, signer_cfg=signer_cfg, signer_server=signer_server,
+        signer_facts=signer_facts, current_pid=current_pid, identities=identities,
+        pipes=pipes, closed=closed, now_mono=now_mono,
+        observer_custody_calls=observer_custody_calls, observer_exe=observer_exe,
+    )
+
+
+def test_two_sid_broker_and_observer_signing_handoff_positive(two_sid_handoff):
+    h = two_sid_handoff
+    # Step 1: Service (service_sid(), Session 0) reserves & signs challenge with broker key.
+    h.current_pid[0] = h.g3.broker.server.pid
+    broker_io = host.ConnectedStatusIO(clock=lambda: h.g3.clock[0], monotonic=lambda: h.now_mono[0])
+    challenge = broker_io.begin(201, h.x.request)
+    signed_challenge = host.sign_broker_challenge(
+        201, challenge, deadline=broker_io._exchange._deadline, clock=broker_io._exchange.clock,
+    )
+    offer_raw = broker_io._exchange.offer(201, signed_challenge)
+    broker_io._pipe.write_frame(offer_raw)
+
+    # Step 2: Interactive desktop peer (operator SID) receives challenge & sends sign request.
+    h.current_pid[0] = h.g3.broker.client.pid
+    desktop_peer = ob.ConnectedDesktopStatusIO(clock=lambda: h.g3.clock[0], monotonic=lambda: h.now_mono[0])
+    transcript = desktop_peer.receive(202)
+    req_frame = ob.ObserverSignRequestFrame(
+        desktop_peer._signed_challenge, desktop_peer._observation, auth._digest(transcript),
+    )
+    # Pre-queue client request on signer pipe server inbox and execute observer-SID signer host.
+    h.pipes[301]["inbox"].append(req_frame.to_bytes())
+    assert h.observer_custody_calls == []  # Operator SID NEVER touched observer key custody.
+
+    # Step 3: Observer signer (OBSERVER SID) authenticates & signs with ObserverCustody key.
+    h.current_pid[0] = h.signer_server.pid
+    signer_host = ob.ConnectedObserverSignerHost(clock=lambda: h.g3.clock[0], monotonic=lambda: h.now_mono[0])
+    assert signer_host.handle_connection(301) is ob.DesktopStatusOutcome.RESPONSE_WRITTEN
+    assert len(h.pipes[301]["writes"]) == 1
+    assert all(pid == h.signer_server.pid and sid == OBSERVER for pid, sid, _ in h.observer_custody_calls)
+
+    # Step 4: Interactive desktop peer receives signed frame from observer signer & replies to broker.
+    h.current_pid[0] = h.g3.broker.client.pid
+    before_client_calls = len(h.observer_custody_calls)
+    sign_client = ob.ConnectedObserverSignClient(clock=lambda: h.g3.clock[0])
+    signed_status = sign_client.request_signature(
+        302,
+        signed_challenge=desktop_peer._signed_challenge,
+        observation=desktop_peer._observation,
+        expected=desktop_peer._challenge,
+        deadline=desktop_peer._deadline,
+    )
+    assert len(h.observer_custody_calls) == before_client_calls  # Client side NEVER reads observer key.
+    assert desktop_peer.respond(signed_status) is ob.DesktopStatusOutcome.RESPONSE_WRITTEN
+
+    # Step 5: Service reads signed observer status frame and completes G3 STATUS exchange.
+    h.current_pid[0] = h.g3.broker.server.pid
+    reply = broker_io._pipe.read_frame()
+    receipt = broker_io._exchange.complete(201, reply)
+    broker_io._pipe.close()
+    assert receipt.operation is op.Operation.STATUS
+    assert receipt.decision is op.Decision.STATUS_OBSERVED
+    assert receipt.effect is op.EffectAttempt.NOT_ATTEMPTED
+    assert h.g3.rows()[0][1] == "DONE"
+    assert desktop_peer.abandon() is ob.DesktopStatusOutcome.UNKNOWN
+    for secret in (SID, OBSERVER, JID, challenge.nonce, str(h.g3.broker_crypto.key),
+                   str(h.g3.broker.f.crypto.keys["observer"])):
+        assert secret not in receipt.to_json()
+
+
+def test_broker_and_desktop_status_owners_end_to_end_single_shot(two_sid_handoff, monkeypatch):
+    h = two_sid_handoff
+    # Run BrokerStatusOwner end-to-end by driving DesktopStatusOwner + ObserverSignerHost on offer write.
+    orig_write = ob._StatusPipeIO.write_frame
+    def intercept_offer(self, raw):
+        orig_write(self, raw)
+        if self.handle == 201:
+            # Intercept when broker writes offer -> drive desktop peer + observer signer.
+            h.current_pid[0] = h.g3.broker.client.pid
+            peer_owner = ob.DesktopStatusOwner(clock=lambda: h.g3.clock[0], monotonic=lambda: h.now_mono[0])
+            # When client writes request to signer pipe 302, immediately run observer signer host on 301.
+            orig_wmsg = ob._StatusPipeIO.write_message
+            def intercept_sign_req(pipe_self, data, validator):
+                orig_wmsg(pipe_self, data, validator)
+                if pipe_self.handle == 302:
+                    saved = h.current_pid[0]
+                    h.current_pid[0] = h.signer_server.pid
+                    signer_host = ob.ConnectedObserverSignerHost(
+                        clock=lambda: h.g3.clock[0], monotonic=lambda: h.now_mono[0],
+                    )
+                    assert signer_host.handle_connection(301) is ob.DesktopStatusOutcome.RESPONSE_WRITTEN
+                    h.current_pid[0] = saved
+            monkeypatch.setattr(ob._StatusPipeIO, "write_message", intercept_sign_req)
+            assert peer_owner.execute(202, 302) is ob.DesktopStatusOutcome.RESPONSE_WRITTEN
+            assert peer_owner.execute(202, 302) is ob.DesktopStatusOutcome.DUPLICATE
+            h.current_pid[0] = h.g3.broker.server.pid
+    monkeypatch.setattr(ob._StatusPipeIO, "write_frame", intercept_offer)
+
+    h.current_pid[0] = h.g3.broker.server.pid
+    owner = host.BrokerStatusOwner(clock=lambda: h.g3.clock[0], monotonic=lambda: h.now_mono[0])
+    receipt = owner.execute(201, h.x.request)
+    assert receipt.operation is op.Operation.STATUS
+    assert receipt.decision is op.Decision.STATUS_OBSERVED
+    assert receipt.effect is op.EffectAttempt.NOT_ATTEMPTED
+    assert owner.execute(201, h.x.request).reason is op.Reason.DUPLICATE
+    assert h.g3.rows()[0][1] == "DONE"
+    # Verify observer custody was ONLY checked under observer signer PID, never under operator or service PID.
+    assert h.observer_custody_calls
+    assert all(pid == h.signer_server.pid for pid, _, _ in h.observer_custody_calls)
+
+
+@pytest.mark.parametrize("fault", [
+    "non_service_sid", "session_nonzero", "wrong_pid", "wrong_key_custody",
+    "expired_nonce", "monotonic_expired", "wrong_generation", "wrong_source",
+    "wrong_logon", "wrong_key_material", "unbound_challenge",
+])
+def test_broker_signing_handoff_denies_invalid_identity_or_expiry(two_sid_handoff, monkeypatch, fault):
+    h = two_sid_handoff
+    h.current_pid[0] = h.g3.broker.server.pid
+    broker_io = host.ConnectedStatusIO(clock=lambda: h.g3.clock[0], monotonic=lambda: h.now_mono[0])
+    challenge = broker_io.begin(201, h.x.request)
+    if fault == "non_service_sid":
+        h.identities[h.g3.broker.server.pid] = replace(h.g3.broker.server, user_sid=SID)
+    elif fault == "session_nonzero":
+        h.identities[h.g3.broker.server.pid] = replace(h.g3.broker.server, session_id=1)
+    elif fault == "wrong_pid":
+        h.current_pid[0] = h.g3.broker.client.pid
+    elif fault == "wrong_key_custody":
+        monkeypatch.setattr(b.ServiceCustody, "check", lambda self, p, **kw: jn.deny() if str(p) == str(h.g3.broker_crypto.key) else Path(p))
+    elif fault == "expired_nonce":
+        h.g3.clock[0] = T + 5
+    elif fault == "monotonic_expired":
+        h.now_mono[0] = 105.0
+    elif fault == "wrong_generation":
+        challenge = replace(challenge, generation=challenge.generation + 1)
+    elif fault == "wrong_source":
+        challenge = replace(challenge, source=replace(SOURCE, release_epoch=SOURCE.release_epoch + 1))
+    elif fault == "wrong_logon":
+        challenge = replace(challenge, logon_id="0000000000099999")
+    elif fault == "wrong_key_material":
+        # Point broker private key to observer's key -> signature fails broker_signers verification!
+        h.g3.broker.anchor["private_key_path"] = str(h.g3.broker.f.crypto.keys["observer"])
+    elif fault == "unbound_challenge":
+        challenge = replace(challenge, request_sha256=None)
+    with pytest.raises(jn.NativeDenied):
+        host.sign_broker_challenge(
+            201, challenge, deadline=broker_io._exchange._deadline, clock=broker_io._exchange.clock,
+        )
+    assert broker_io.abandon().decision is op.Decision.UNKNOWN_EFFECT
+    assert h.g3.rows()[0][1:] == ("UNKNOWN", None)
+
+
+@pytest.mark.parametrize("fault", [
+    "observer_sid_equals_operator", "observer_sid_equals_service", "bad_observer_image_hash",
+    "wrong_client_sid", "wrong_client_logon", "bad_observer_key_custody",
+    "forged_broker_challenge", "wrong_transcript_hash", "future_observed_at",
+    "expired_nonce", "replayed_nonce", "wrong_generation", "wrong_source",
+    "shared_key_path_with_broker", "wrong_observer_key_material",
+])
+def test_observer_signer_ipc_denies_forged_or_mismatched_handoff(two_sid_handoff, monkeypatch, fault):
+    h = two_sid_handoff
+    # Build a valid broker-signed challenge and desktop observation first.
+    h.current_pid[0] = h.g3.broker.server.pid
+    challenge = h.x.exchange.begin(123, h.x.request)
+    signed_challenge = h.g3.broker_crypto.signed(challenge.body())
+    obs = ob.observation_body(
+        challenge, now=T, process=h.g3.broker.client,
+        logon_id=h.g3.config["logon_id"], source=SOURCE, generation=1,
+    )
+    transcript = auth.signing_bytes(obs)
+    req_raw = ob.ObserverSignRequestFrame(signed_challenge, obs, auth._digest(transcript)).to_bytes()
+
+    signer_host = ob.ConnectedObserverSignerHost(clock=lambda: h.g3.clock[0], monotonic=lambda: h.now_mono[0])
+    if fault == "replayed_nonce":
+        # First signing succeeds on handle 301; second attempt with same nonce returns DUPLICATE.
+        h.current_pid[0] = h.signer_server.pid
+        h.pipes[301]["inbox"].append(req_raw)
+        assert signer_host.handle_connection(301) is ob.DesktopStatusOutcome.RESPONSE_WRITTEN
+        h.pipes[303] = dict(side=ob._PipeSide.SERVER, peer=302, inbox=[req_raw], writes=[])
+        assert signer_host.handle_connection(303) is ob.DesktopStatusOutcome.DUPLICATE
+        assert h.pipes[303]["writes"] == []
+        return
+
+    if fault == "observer_sid_equals_operator":
+        h.signer_cfg["observer_sid"] = SID
+    elif fault == "observer_sid_equals_service":
+        h.signer_cfg["observer_sid"] = b.service_sid()
+    elif fault == "bad_observer_image_hash":
+        h.signer_cfg["observer_sha256"] = "0" * 64
+    elif fault == "wrong_client_sid":
+        h.signer_facts["client"]["user_sid"] = OBSERVER
+    elif fault == "wrong_client_logon":
+        monkeypatch.setattr(ob, "read_logon_id", lambda pid: "0000000000099999")
+    elif fault == "bad_observer_key_custody":
+        monkeypatch.setattr(b.ObserverCustody, "check", lambda *a, **kw: jn.deny())
+    elif fault == "forged_broker_challenge":
+        forged_sc = h.g3.broker.f.crypto.signed(challenge.body(), "issuer", "grant", namespace=ob.CHALLENGE_NAMESPACE)
+        req_raw = ob.ObserverSignRequestFrame(forged_sc, obs, auth._digest(transcript)).to_bytes()
+    elif fault == "wrong_transcript_hash":
+        payload = jn.decode(req_raw[4:])
+        payload["transcript_sha256"] = "0" * 64
+        body_bytes = jn.canonical(payload)
+        req_raw = len(body_bytes).to_bytes(4, "big") + body_bytes
+    elif fault == "future_observed_at":
+        future_obs = dict(obs, observed_at=T + 1)
+        req_raw = ob.ObserverSignRequestFrame(
+            signed_challenge, future_obs, auth._digest(auth.signing_bytes(future_obs)),
+        ).to_bytes()
+    elif fault == "expired_nonce":
+        h.g3.clock[0] = T + 5
+    elif fault == "wrong_generation":
+        h.g3.config["generation"] = 2
+    elif fault == "wrong_source":
+        h.g3.config["source"]["release_epoch"] = 2
+    elif fault == "shared_key_path_with_broker":
+        h.signer_cfg["observer_key_path"] = h.g3.broker.anchor["private_key_path"]
+    elif fault == "wrong_observer_key_material":
+        h.signer_cfg["observer_key_path"] = str(h.g3.broker.f.crypto.keys["issuer"])
+
+    h.current_pid[0] = h.signer_server.pid
+    h.pipes[301]["inbox"].append(req_raw)
+    assert signer_host.handle_connection(301) is ob.DesktopStatusOutcome.UNKNOWN
+    assert h.pipes[301]["writes"] == []
+
+
+@pytest.mark.parametrize("bad_sid", [b.service_sid(), "S-1-5-18", "S-1-5-32-544", "not-a-sid"])
+def test_observer_custody_rejects_invalid_sids(bad_sid):
+    with pytest.raises(jn.NativeDenied):
+        b.ObserverCustody(bad_sid)
+
+
+@pytest.mark.parametrize("fault", [
+    None, "operator_read_ace", "service_read_ace", "everyone_ace",
+    "unprotected_dacl", "wrong_owner", "missing_observer_read",
+])
+def test_observer_custody_enforces_protected_dacl_and_excludes_operator(monkeypatch, tmp_path, fault):
+    key_file = tmp_path / "observer_ed25519"
+    key_file.write_bytes(b"placeholder")
+    monkeypatch.setattr(jn.WindowsPathCustody, "check", lambda self, p, **kw: Path(p))
+    owner = SID if fault == "wrong_owner" else OBSERVER
+    aces = [(0, 0, 0x1f01ff, "S-1-5-18")]
+    if fault != "missing_observer_read":
+        aces.append((0, 0, 0x80000000, OBSERVER))
+    if fault == "operator_read_ace":
+        aces.append((0, 0, 0x80000000, SID))
+    elif fault == "service_read_ace":
+        aces.append((0, 0, 0x80000000, b.service_sid()))
+    elif fault == "everyone_ace":
+        aces.append((0, 0, 1, "S-1-1-0"))
+    monkeypatch.setattr(jn.WindowsPathCustody, "_descriptor", lambda *a, **kw: (owner, aces))
+    monkeypatch.setattr(b, "_protected_dacl", lambda *a, **kw: jn.deny() if fault == "unprotected_dacl" else None)
+    custody = b.ObserverCustody(OBSERVER)
+    if fault:
+        with pytest.raises(jn.NativeDenied):
+            custody.check(key_file)
+    else:
+        assert custody.check(key_file) == key_file
+
+
+@pytest.mark.parametrize("fault", [
+    None, "same_sid", "create_instance", "write_dac", "write_owner",
+    "generic_all", "generic_write", "service_ace", "foreign_ace",
+    "unprotected_dacl", "wrong_owner",
+])
+def test_observer_signer_pipe_acl_enforces_exact_endpoint_isolation(monkeypatch, fault):
+    owner = SID if fault == "wrong_owner" else OBSERVER
+    op_mask = {
+        "create_instance": 4, "write_dac": 0x40000, "write_owner": 0x80000,
+        "generic_all": 0x10000000, "generic_write": 0x40000000,
+    }.get(fault, 3)
+    aces = [(0, 0, 0x1f01ff, OBSERVER), (0, 0, op_mask, SID)]
+    if fault == "service_ace":
+        aces.append((0, 0, 3, b.service_sid()))
+    elif fault == "foreign_ace":
+        aces.append((0, 0, 3, "S-1-5-21-111-222-333-9999"))
+    monkeypatch.setattr(jn.WindowsPathCustody, "_descriptor", lambda *a, **kw: (owner, aces))
+    monkeypatch.setattr(b, "_protected_dacl", lambda *a, **kw: jn.deny() if fault == "unprotected_dacl" else None)
+    if fault:
+        with pytest.raises(jn.NativeDenied):
+            b._check_observer_signer_pipe_acl(301, SID if fault == "same_sid" else OBSERVER, SID)
+    else:
+        b._check_observer_signer_pipe_acl(301, OBSERVER, SID)
+
+
+@pytest.mark.parametrize("side", [ob._PipeSide.SERVER, ob._PipeSide.CLIENT])
+@pytest.mark.parametrize("fault", [
+    None, "impersonation", "wrong_side", "wrong_pipe", "wrong_self_pid",
+    "wrong_observer_sid", "wrong_operator_sid", "session0_client", "same_pid", "bad_acl",
+])
+def test_observer_signer_kernel_pipe_observation_both_sides(g3, monkeypatch, side, fault):
+    monkeypatch.setattr(auth, "windows_only", lambda: None)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **kw: object())
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 1008)
+    signer_server = inv.ProcessIdentity(3333, T - 45, ob.OBSERVER_SIGNER_IMAGE, OBSERVER, 2)
+    self_pid = signer_server.pid if side is ob._PipeSide.SERVER else g3.broker.client.pid
+    monkeypatch.setattr(os, "getpid", lambda: self_pid + (1 if fault == "wrong_self_pid" else 0))
+    pipe_name = ctypes.create_unicode_buffer(b.OBSERVER_SIGNER_PIPE + ("-bad" if fault == "wrong_pipe" else ""))
+    closed = []
+
+    def api(dll, method, args, result):
+        def call(*values):
+            if method == "GetCurrentThread":
+                return 777
+            if method == "OpenThreadToken":
+                if fault == "impersonation":
+                    values[3]._obj.value = 888
+                return fault == "impersonation"
+            if method == "CloseHandle":
+                closed.append(values[0].value)
+                return True
+            if method == "GetNamedPipeInfo":
+                is_server = (side is ob._PipeSide.SERVER) ^ (fault == "wrong_side")
+                values[1]._obj.value = (1 if is_server else 0) | 4
+                return True
+            if method == "NtQueryObject":
+                class UnicodeString(ctypes.Structure):
+                    _fields_ = [("length", ob.wt.USHORT), ("maximum", ob.wt.USHORT), ("buffer", ctypes.c_void_p)]
+                out = ctypes.cast(values[2], ctypes.POINTER(UnicodeString)).contents
+                out.length = len(pipe_name.value) * 2
+                out.maximum = out.length + 2
+                out.buffer = ctypes.addressof(pipe_name)
+                return 0
+            is_client = "Client" in method
+            proc = g3.broker.client if is_client else signer_server
+            if method.endswith("ProcessId"):
+                values[1]._obj.value = signer_server.pid if fault == "same_pid" else proc.pid
+            elif method.endswith("SessionId"):
+                values[1]._obj.value = 0 if (fault == "session0_client" and is_client) else proc.session_id
+            else:
+                pytest.fail("unexpected API " + method)
+            return True
+        return call
+
+    monkeypatch.setattr(b, "_api", api)
+    monkeypatch.setattr(b, "_check_observer_signer_pipe_acl",
+                        lambda *a, **kw: jn.deny() if fault == "bad_acl" else None)
+    def read_id(pid):
+        if pid == signer_server.pid:
+            return replace(signer_server, user_sid=SID) if fault == "wrong_observer_sid" else signer_server
+        if pid == g3.broker.client.pid:
+            if fault == "wrong_operator_sid":
+                return replace(g3.broker.client, user_sid=OBSERVER)
+            if fault == "session0_client":
+                return replace(g3.broker.client, session_id=0)
+            return g3.broker.client
+        jn.deny()
+    monkeypatch.setattr(b, "read_process_identity", read_id)
+    monkeypatch.setattr(b, "_scm_process", lambda: g3.broker.facts["scm"])
+
+    if fault:
+        with pytest.raises(jn.NativeDenied):
+            ob._observe_observer_signer_connection(301, side, observer_sid=OBSERVER, operator_sid=SID)
+    else:
+        observed = ob._observe_observer_signer_connection(301, side, observer_sid=OBSERVER, operator_sid=SID)
+        assert observed["server"]["user_sid"] == OBSERVER
+        assert observed["client"]["user_sid"] == SID
+    assert closed == ([888] if fault == "impersonation" else [])
+
+
+# ---------------------------------------------------------------------------
+# Slice (B): Admin-attended SCM PID/creation-time binding & readback tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def scm_binding_env(g3, monkeypatch):
+    """Deterministic admin-attended enrollment/readback fixture with simulated HKLM."""
+    root = g3.broker.f.storage.root
+    service_bin = root / "WakeHubBroker.exe"
+    service_bin.write_bytes(b"preinstalled-wakehub-broker-binary-v1")
+    observer_bin = root / "WakeHubObserverSigner.exe"
+    observer_bin.write_bytes(b"preinstalled-wakehub-observer-binary-v1")
+    desktop_bin = root / "WakeHubDesktopPeer.exe"
+    desktop_bin.write_bytes(b"preinstalled-wakehub-desktop-binary-v1")
+
+    service_img_str = str(service_bin) if os.name == "nt" else en.SERVICE_IMAGE
+    observer_img_str = str(observer_bin) if os.name == "nt" else ob.OBSERVER_SIGNER_IMAGE
+    desktop_img_str = str(desktop_bin) if os.name == "nt" else en.DESKTOP_IMAGE
+    monkeypatch.setattr(en, "SERVICE_IMAGE", service_img_str)
+    monkeypatch.setattr(en, "CHALLENGES_PATH", str(g3.path))
+    monkeypatch.setattr(host, "CHALLENGES_PATH", str(g3.path))
+
+    if os.name != "nt":
+        orig_check = jn.WindowsPathCustody.check
+        virtual = {
+            service_img_str: service_bin,
+            observer_img_str: observer_bin,
+            desktop_img_str: desktop_bin,
+        }
+        def mapped_check(self, path, *, directory=False):
+            if str(path) in virtual:
+                return virtual[str(path)]
+            return orig_check(self, path, directory=directory)
+        monkeypatch.setattr(jn.WindowsPathCustody, "check", mapped_check)
+
+    monkeypatch.setattr(b, "_check_admin_token", lambda: None)
+    monkeypatch.setattr(b.ObserverCustody, "check", lambda self, p, **kw: Path(p))
+
+    pins = en.EnrollmentPins(
+        SOURCE, 1, SID, OBSERVER, (SID,),
+        auth._digest(service_bin.read_bytes()),
+        auth._digest(observer_bin.read_bytes()),
+        g3.broker.f.anchor["issuer_signers"]["sha256"],
+        g3.broker.f.anchor["human_signers"]["sha256"],
+        g3.broker.f.anchor["observer_signers"]["sha256"],
+        g3.config["broker_signers"]["sha256"],
+        JID,
+    )
+    desktop_peer = inv.ProcessIdentity(2222, T - 50, desktop_img_str, SID, 7)
+    spec = en.AttendedScmBindingSpec(
+        pins=pins,
+        target=TARGET,
+        desktop_peer=desktop_peer,
+        desktop_peer_sha256=auth._digest(desktop_bin.read_bytes()),
+        logon_id=g3.config["logon_id"],
+        verifier_path=g3.broker.f.anchor["verifier"]["path"],
+        verifier_sha256=g3.broker.f.anchor["verifier"]["sha256"],
+        issuer_signers_path=g3.broker.f.anchor["issuer_signers"]["path"],
+        human_signers_path=g3.broker.f.anchor["human_signers"]["path"],
+        observer_signers_path=g3.broker.f.anchor["observer_signers"]["path"],
+        broker_signers_path=g3.config["broker_signers"]["path"],
+        enrollment_path=g3.broker.f.anchor["enrollment"],
+        journal_path=g3.broker.f.anchor["journal_path"],
+        requests_path=g3.broker.anchor["requests_path"],
+        challenges_path=str(g3.path),
+        private_key_path=str(g3.broker_crypto.key),
+        desktop_path=g3.broker.anchor["desktop_path"],
+        observer_executable=observer_img_str,
+        observer_key_path=str(g3.broker.f.crypto.keys["observer"]),
+    )
+
+    live_state = dict(
+        server=inv.ProcessIdentity(4100, T - 30, service_img_str, b.service_sid(), 0),
+        scm=dict(pid=4100, binary=service_img_str, account="NT SERVICE\\" + b.SERVICE, kind=0x10, sid_type=1),
+    )
+    registry = {}
+    writes = []
+
+    def write_anchor(subkey, value_name, payload):
+        raw = jn.canonical(payload)
+        writes.append((subkey, value_name))
+        registry[(subkey, value_name)] = raw
+        return raw
+
+    def read_reg(subkey, value_name):
+        if (subkey, value_name) not in registry:
+            raise FileNotFoundError(value_name)
+        return jn.decode(registry[(subkey, value_name)])
+
+    monkeypatch.setattr(b, "_write_protected_anchor_value", write_anchor)
+    monkeypatch.setattr(b, "_read_broker_anchor", lambda: read_reg(b.ANCHOR, "Anchor"))
+    monkeypatch.setattr(host, "_read_g3_config", lambda: read_reg(en.G3_ANCHOR, "Anchor"))
+    monkeypatch.setattr(ob, "_read_observer_signer_anchor",
+                        lambda: read_reg(en.G3_ANCHOR, ob.OBSERVER_SIGNER_ANCHOR_VALUE))
+    monkeypatch.setattr(b, "_scm_process", lambda: dict(live_state["scm"]))
+    monkeypatch.setattr(b, "read_process_identity",
+                        lambda pid: live_state["server"] if pid == live_state["server"].pid else jn.deny())
+
+    return SimpleNamespace(
+        g3=g3, spec=spec, pins=pins, live_state=live_state, registry=registry,
+        writes=writes, service_bin=service_bin, observer_bin=observer_bin,
+        desktop_bin=desktop_bin, service_img_str=service_img_str, root=root,
+    )
+
+
+def test_attended_scm_pid_binding_binds_only_after_independent_readback(scm_binding_env):
+    env = scm_binding_env
+    # Before binding, readback fails closed to HOLD_RECONCILE with no bound PID and NOT_ATTEMPTED.
+    before = en.collect_live_scm_readback(env.spec, clock=lambda: T)
+    assert before.state is en.ScmBindingState.HOLD_RECONCILE
+    assert before.registry_anchor_write is en.RegistryAnchorWriteState.NOT_ATTEMPTED
+    assert before.bound_pid is None and before.bound_created_at is None
+    before_pub = json.loads(before.to_public_json())
+    assert before_pub["state"] == "HOLD_RECONCILE_ONLY"
+    assert before_pub["registry_anchor_write"] == "NOT_ATTEMPTED"
+    assert before_pub["native_effect"] == "NOT_ATTEMPTED"
+    assert before_pub["authority"] == "SOURCE_ONLY"
+    assert before_pub["start"] == "DENY" and before_pub["reuse"] == "DENY"
+    assert before_pub["wake"] == "NOT_SENT" and before_pub["chrome"] == "NOT_STARTED" and before_pub["send"] == "NOT_SENT"
+    assert env.writes == []
+
+    # Initial attended binding writes all 3 protected anchors and verifies independent readback.
+    bound = en.attend_scm_pid_binding(env.spec, clock=lambda: T)
+    assert bound.state is en.ScmBindingState.PID_BOUND_READBACK_VERIFIED
+    assert bound.registry_anchor_write is en.RegistryAnchorWriteState.VERIFIED_WRITTEN
+    assert bound.bound_pid == 4100
+    assert bound.bound_created_at == T - 30
+    assert bound.retry_allowed is False
+    assert len(env.writes) == 3
+
+    # Sanitized public JSON truthfully reports VERIFIED_WRITTEN (never NOT_ATTEMPTED),
+    # never leaks PID/SID/logon/path/digest, and keeps Wake/Chrome/Send denied/unsent.
+    public_text = bound.to_public_json()
+    public = json.loads(public_text)
+    assert public["state"] == "PID_BOUND_AFTER_INDEPENDENT_READBACK"
+    assert public["pid_bound"] is True and public["readback_verified"] is True
+    assert public["retry_allowed"] is False
+    assert public["registry_anchor_write"] == "VERIFIED_WRITTEN"
+    assert public["native_effect"] == "REGISTRY_ANCHOR_VERIFIED_WRITTEN"
+    assert public["authority"] == "ATTENDED_ADMIN_REGISTRY_ANCHOR_BOUND"
+    assert public["registry_anchor_write"] != "NOT_ATTEMPTED"
+    assert public["native_effect"] != "NOT_ATTEMPTED"
+    assert "NOT_ATTEMPTED" not in public_text
+    assert public["start"] == "DENY" and public["reuse"] == "DENY"
+    assert public["wake"] == "NOT_SENT" and public["chrome"] == "NOT_STARTED" and public["send"] == "NOT_SENT"
+    assert public["chatgpt_account_session"] == "ACCOUNT_UNPROVEN"
+    for secret in ("4100", SID, OBSERVER, JID, env.spec.logon_id, env.service_img_str, bound.anchor_digest):
+        assert secret not in public_text
+
+    # Independent read-only readback succeeds without performing any writes.
+    rb = en.collect_live_scm_readback(env.spec, clock=lambda: T)
+    assert rb.state is en.ScmBindingState.READBACK_VERIFIED
+    assert rb.registry_anchor_write is en.RegistryAnchorWriteState.NOT_ATTEMPTED
+    assert rb.bound_pid == 4100 and rb.bound_created_at == T - 30
+    assert len(env.writes) == 3
+    rb_pub = json.loads(rb.to_public_json())
+    assert rb_pub["state"] == "LIVE_READBACK_VERIFIED_NO_WRITE"
+    assert rb_pub["pid_bound"] is False and rb_pub["readback_verified"] is True
+    assert rb_pub["registry_anchor_write"] == "NOT_ATTEMPTED"
+    assert rb_pub["native_effect"] == "NOT_ATTEMPTED"
+    assert rb_pub["authority"] == "ATTENDED_ADMIN_READBACK_ONLY"
+    assert rb_pub["start"] == "DENY" and rb_pub["reuse"] == "DENY"
+    assert rb_pub["wake"] == "NOT_SENT" and rb_pub["chrome"] == "NOT_STARTED" and rb_pub["send"] == "NOT_SENT"
+
+    # Already-bound all-PRESENT identical live pins perform verified READ-ONLY idempotent return with no write.
+    idempotent = en.attend_scm_pid_binding(env.spec, clock=lambda: T)
+    assert idempotent.state is en.ScmBindingState.READBACK_VERIFIED
+    assert idempotent.reason == "INDEPENDENT_READBACK_MATCH"
+    assert idempotent.registry_anchor_write is en.RegistryAnchorWriteState.NOT_ATTEMPTED
+    assert idempotent.bound_pid == 4100 and idempotent.bound_created_at == T - 30
+    assert idempotent.retry_allowed is False
+    assert len(env.writes) == 3
+    idem_pub = json.loads(idempotent.to_public_json())
+    assert idem_pub["state"] == "LIVE_READBACK_VERIFIED_NO_WRITE"
+    assert idem_pub["pid_bound"] is False and idem_pub["readback_verified"] is True
+    assert idem_pub["registry_anchor_write"] == "NOT_ATTEMPTED"
+    assert idem_pub["native_effect"] == "NOT_ATTEMPTED"
+    assert idem_pub["authority"] == "ATTENDED_ADMIN_READBACK_ONLY"
+    assert idem_pub["start"] == "DENY" and idem_pub["reuse"] == "DENY"
+    assert idem_pub["wake"] == "NOT_SENT" and idem_pub["chrome"] == "NOT_STARTED" and idem_pub["send"] == "NOT_SENT"
+
+    # Simulated SCM service restart: new dynamic PID 5200 & creation time T-5.
+    env.live_state["server"] = inv.ProcessIdentity(5200, T - 5, env.service_img_str, b.service_sid(), 0)
+    env.live_state["scm"]["pid"] = 5200
+    # Stale readback fails closed to HOLD_RECONCILE with no write.
+    stale = en.collect_live_scm_readback(env.spec, clock=lambda: T)
+    assert stale.state is en.ScmBindingState.HOLD_RECONCILE and stale.bound_pid is None
+    assert stale.reason == "READBACK_MISMATCH_RECONCILE_ONLY"
+    assert stale.registry_anchor_write is en.RegistryAnchorWriteState.NOT_ATTEMPTED
+    stale_pub = json.loads(stale.to_public_json())
+    assert stale_pub["registry_anchor_write"] == "NOT_ATTEMPTED"
+    assert stale_pub["native_effect"] == "NOT_ATTEMPTED"
+    assert stale_pub["authority"] == "SOURCE_ONLY"
+    assert len(env.writes) == 3
+
+    # Legitimate changed PID requires bounded attended rebind and truthful VERIFIED_WRITTEN state.
+    rebound = en.attend_scm_pid_binding(env.spec, clock=lambda: T)
+    assert rebound.state is en.ScmBindingState.PID_BOUND_READBACK_VERIFIED
+    assert rebound.registry_anchor_write is en.RegistryAnchorWriteState.VERIFIED_WRITTEN
+    assert rebound.bound_pid == 5200 and rebound.bound_created_at == T - 5
+    assert len(env.writes) == 6
+    rebound_text = rebound.to_public_json()
+    rebound_pub = json.loads(rebound_text)
+    assert rebound_pub["state"] == "PID_BOUND_AFTER_INDEPENDENT_READBACK"
+    assert rebound_pub["pid_bound"] is True and rebound_pub["readback_verified"] is True
+    assert rebound_pub["registry_anchor_write"] == "VERIFIED_WRITTEN"
+    assert rebound_pub["native_effect"] == "REGISTRY_ANCHOR_VERIFIED_WRITTEN"
+    assert rebound_pub["authority"] == "ATTENDED_ADMIN_REGISTRY_ANCHOR_BOUND"
+    assert "NOT_ATTEMPTED" not in rebound_text
+    assert rebound_pub["start"] == "DENY" and rebound_pub["reuse"] == "DENY"
+    assert rebound_pub["wake"] == "NOT_SENT" and rebound_pub["chrome"] == "NOT_STARTED" and rebound_pub["send"] == "NOT_SENT"
+
+
+_POSTWRITE_AMBIGUOUS_FAULTS = frozenset({
+    "write_error_first",
+    "write_error_second",
+    "write_error_third",
+    "write_lost_ack",
+    "postwrite_readback_mismatch",
+    "postwrite_pid_changed",
+    "postwrite_unprotected_dacl",
+    "postwrite_invalid_anchor_validation",
+})
+
+
+@pytest.mark.parametrize("fault", [
+    "non_admin", "ci_env", "bad_service_hash", "bad_observer_hash", "bad_signer_hash",
+    "unsigned_release", "kill_switch", "wrong_scm_account", "interactive_scm_kind",
+    "wrong_scm_binary", "service_session_nonzero", "bad_observer_custody",
+    "partial_existing_anchor", "drifted_existing_generation", "drifted_existing_source",
+    "pid_changed_before_write",
+    "write_error_first", "write_error_second", "write_error_third", "write_lost_ack",
+    "postwrite_readback_mismatch", "postwrite_pid_changed", "postwrite_unprotected_dacl",
+    "postwrite_invalid_anchor_validation",
+])
+def test_attended_scm_pid_binding_holds_reconcile_on_any_fault(scm_binding_env, monkeypatch, fault):
+    env = scm_binding_env
+    if fault == "non_admin":
+        monkeypatch.setattr(b, "_check_admin_token", jn.deny)
+    elif fault == "ci_env":
+        monkeypatch.setattr(auth, "windows_only", jn.deny)
+    elif fault == "bad_service_hash":
+        env.service_bin.write_bytes(b"tampered-service-binary")
+    elif fault == "bad_observer_hash":
+        env.observer_bin.write_bytes(b"tampered-observer-binary")
+    elif fault == "bad_signer_hash":
+        env.spec = replace(env.spec, pins=replace(env.pins, broker_key="0" * 64))
+    elif fault == "unsigned_release":
+        Path(env.spec.enrollment_path).write_bytes(b'{"body":{},"signature":"forged"}')
+    elif fault == "kill_switch":
+        (env.root / "KILL").write_text("STOP")
+    elif fault == "wrong_scm_account":
+        env.live_state["scm"]["account"] = "LocalSystem"
+    elif fault == "interactive_scm_kind":
+        env.live_state["scm"]["kind"] = 0x110  # SERVICE_WIN32_OWN_PROCESS | SERVICE_INTERACTIVE_PROCESS
+    elif fault == "wrong_scm_binary":
+        env.live_state["scm"]["binary"] = r"C:\Foreign\evil.exe"
+    elif fault == "service_session_nonzero":
+        env.live_state["server"] = replace(env.live_state["server"], session_id=1)
+    elif fault == "bad_observer_custody":
+        monkeypatch.setattr(b.ObserverCustody, "check", lambda *a, **kw: jn.deny())
+    elif fault == "partial_existing_anchor":
+        env.registry[(b.ANCHOR, "Anchor")] = b'{"partial":true}'
+    elif fault in ("drifted_existing_generation", "drifted_existing_source"):
+        assert en.attend_scm_pid_binding(env.spec, clock=lambda: T).state is en.ScmBindingState.PID_BOUND_READBACK_VERIFIED
+        env.writes.clear()
+        g3_existing = jn.decode(env.registry[(en.G3_ANCHOR, "Anchor")])
+        if fault == "drifted_existing_generation":
+            g3_existing["generation"] = 99
+        else:
+            g3_existing["source"]["release_epoch"] = 99
+        env.registry[(en.G3_ANCHOR, "Anchor")] = jn.canonical(g3_existing)
+    elif fault == "pid_changed_before_write":
+        calls = [0]
+        def changing_scm():
+            calls[0] += 1
+            return dict(env.live_state["scm"], pid=4100 if calls[0] == 1 else 4199)
+        monkeypatch.setattr(b, "_scm_process", changing_scm)
+    elif fault in ("write_error_first", "write_error_second", "write_error_third"):
+        fail_on = {"write_error_first": 1, "write_error_second": 2, "write_error_third": 3}[fault]
+        def failing_write(subkey, value_name, payload):
+            env.writes.append((subkey, value_name))
+            if len(env.writes) == fail_on:
+                raise OSError(f"simulated registry flush error #{fail_on}")
+            raw = jn.canonical(payload)
+            env.registry[(subkey, value_name)] = raw
+            return raw
+        monkeypatch.setattr(b, "_write_protected_anchor_value", failing_write)
+    elif fault == "write_lost_ack":
+        def lost_ack_write(subkey, value_name, payload):
+            env.writes.append((subkey, value_name))
+            raw = jn.canonical(payload)
+            env.registry[(subkey, value_name)] = raw
+            return None if len(env.writes) == 1 else raw
+        monkeypatch.setattr(b, "_write_protected_anchor_value", lost_ack_write)
+    elif fault == "postwrite_readback_mismatch":
+        orig_read = host._read_g3_config
+        def tampered_read():
+            data = orig_read()
+            if env.writes:
+                data["generation"] += 1
+            return data
+        monkeypatch.setattr(host, "_read_g3_config", tampered_read)
+    elif fault == "postwrite_pid_changed":
+        def post_change_scm():
+            if env.writes:
+                return dict(env.live_state["scm"], pid=4999)
+            return dict(env.live_state["scm"])
+        monkeypatch.setattr(b, "_scm_process", post_change_scm)
+    elif fault == "postwrite_unprotected_dacl":
+        orig_read_broker = b._read_broker_anchor
+        def denied_after_write():
+            if env.writes:
+                jn.deny()
+            return orig_read_broker()
+        monkeypatch.setattr(b, "_read_broker_anchor", denied_after_write)
+    elif fault == "postwrite_invalid_anchor_validation":
+        monkeypatch.setattr(b, "validate_peer", lambda *a, **kw: jn.deny())
+
+    result = en.attend_scm_pid_binding(env.spec, clock=lambda: T)
+    assert result.state is en.ScmBindingState.HOLD_RECONCILE
+    assert result.bound_pid is None and result.bound_created_at is None
+    assert result.retry_allowed is False
+    public_text = result.to_public_json()
+    public = json.loads(public_text)
+    assert public["state"] == "HOLD_RECONCILE_ONLY"
+    assert public["pid_bound"] is False and public["readback_verified"] is False
+    assert public["retry_allowed"] is False
+    assert public["start"] == "DENY" and public["reuse"] == "DENY"
+    assert public["wake"] == "NOT_SENT" and public["chrome"] == "NOT_STARTED" and public["send"] == "NOT_SENT"
+    assert public["chatgpt_account_session"] == "ACCOUNT_UNPROVEN"
+    if fault in _POSTWRITE_AMBIGUOUS_FAULTS:
+        assert len(env.writes) >= 1
+        assert result.registry_anchor_write is en.RegistryAnchorWriteState.UNKNOWN_EFFECT
+        assert public["registry_anchor_write"] == "UNKNOWN_EFFECT"
+        assert public["native_effect"] == "REGISTRY_ANCHOR_UNKNOWN_EFFECT"
+        assert public["authority"] == "ATTENDED_ADMIN_REGISTRY_ANCHOR_UNKNOWN_RECONCILE_ONLY"
+        # Negative acceptance: receipt MUST NEVER report NOT_ATTEMPTED after any potentially executed write.
+        assert public["registry_anchor_write"] != "NOT_ATTEMPTED"
+        assert public["native_effect"] != "NOT_ATTEMPTED"
+        assert "NOT_ATTEMPTED" not in public_text
+    else:
+        assert env.writes == []
+        assert result.registry_anchor_write is en.RegistryAnchorWriteState.NOT_ATTEMPTED
+        assert public["registry_anchor_write"] == "NOT_ATTEMPTED"
+        assert public["native_effect"] == "NOT_ATTEMPTED"
+        assert public["authority"] == "SOURCE_ONLY"
+
+
+def test_attended_scm_binding_result_rejects_contradictory_effect_states():
+    digest = "a" * 64
+    invalid_cases = [
+        # Written/bound state cannot claim NOT_ATTEMPTED or UNKNOWN_EFFECT.
+        dict(state=en.ScmBindingState.PID_BOUND_READBACK_VERIFIED,
+             reason="PID_BOUND_AFTER_INDEPENDENT_READBACK",
+             registry_anchor_write=en.RegistryAnchorWriteState.NOT_ATTEMPTED,
+             bound_pid=4100, bound_created_at=T - 30, anchor_digest=digest),
+        dict(state=en.ScmBindingState.PID_BOUND_READBACK_VERIFIED,
+             reason="PID_BOUND_AFTER_INDEPENDENT_READBACK",
+             registry_anchor_write=en.RegistryAnchorWriteState.UNKNOWN_EFFECT,
+             bound_pid=4100, bound_created_at=T - 30, anchor_digest=digest),
+        # No-write readback state cannot claim VERIFIED_WRITTEN or UNKNOWN_EFFECT.
+        dict(state=en.ScmBindingState.READBACK_VERIFIED,
+             reason="INDEPENDENT_READBACK_MATCH",
+             registry_anchor_write=en.RegistryAnchorWriteState.VERIFIED_WRITTEN,
+             bound_pid=4100, bound_created_at=T - 30, anchor_digest=digest),
+        dict(state=en.ScmBindingState.READBACK_VERIFIED,
+             reason="INDEPENDENT_READBACK_MATCH",
+             registry_anchor_write=en.RegistryAnchorWriteState.UNKNOWN_EFFECT,
+             bound_pid=4100, bound_created_at=T - 30, anchor_digest=digest),
+        # HOLD_RECONCILE cannot claim VERIFIED_WRITTEN, nor downgrade post-write failure to NOT_ATTEMPTED.
+        dict(state=en.ScmBindingState.HOLD_RECONCILE,
+             reason="POSTWRITE_READBACK_MISMATCH_RECONCILE_ONLY",
+             registry_anchor_write=en.RegistryAnchorWriteState.VERIFIED_WRITTEN),
+        dict(state=en.ScmBindingState.HOLD_RECONCILE,
+             reason="AMBIGUOUS_WRITE_RECONCILE_ONLY",
+             registry_anchor_write=en.RegistryAnchorWriteState.NOT_ATTEMPTED),
+        dict(state=en.ScmBindingState.HOLD_RECONCILE,
+             reason="POSTWRITE_READBACK_MISMATCH_RECONCILE_ONLY",
+             registry_anchor_write=en.RegistryAnchorWriteState.NOT_ATTEMPTED),
+        # Pre-write failure reason cannot claim UNKNOWN_EFFECT; raw string is rejected.
+        dict(state=en.ScmBindingState.HOLD_RECONCILE,
+             reason="ADMIN_OR_HOST_PREREQUISITES_UNPROVEN",
+             registry_anchor_write=en.RegistryAnchorWriteState.UNKNOWN_EFFECT),
+        dict(state=en.ScmBindingState.HOLD_RECONCILE,
+             reason="ADMIN_OR_HOST_PREREQUISITES_UNPROVEN",
+             registry_anchor_write="NOT_ATTEMPTED"),
+    ]
+    for kwargs in invalid_cases:
+        with pytest.raises(jn.NativeDenied):
+            en.AttendedScmBindingResult(**kwargs)
+
+
+@pytest.mark.parametrize("fault", [None, "impersonation", "non_primary", "unelevated", "not_admin_member"])
+def test_admin_token_check_requires_elevated_primary_admin_without_impersonation(monkeypatch, fault):
+    monkeypatch.setattr(auth, "windows_only", lambda: None)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **kw: object())
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 1008)
+    closed, freed = [], []
+
+    def api(dll, name, args, result):
+        def call(*values):
+            if name == "GetCurrentThread":
+                return 701
+            if name == "GetCurrentProcess":
+                return 702
+            if name == "OpenThreadToken":
+                if fault == "impersonation":
+                    values[3]._obj.value = 801
+                return fault == "impersonation"
+            if name == "OpenProcessToken":
+                values[2]._obj.value = 802
+                return True
+            if name == "GetTokenInformation":
+                kind = values[1]
+                values[4]._obj.value = 4
+                if kind == 8:
+                    values[2]._obj.value = 2 if fault == "non_primary" else 1
+                elif kind == 20:
+                    values[2]._obj.value = 0 if fault == "unelevated" else 1
+                else:
+                    pytest.fail("unexpected token info kind")
+                return True
+            if name == "ConvertStringSidToSidW":
+                assert values[0] == "S-1-5-32-544"
+                values[1]._obj.value = 903
+                return True
+            if name == "CheckTokenMembership":
+                values[2]._obj.value = 0 if fault == "not_admin_member" else 1
+                return True
+            if name == "CloseHandle":
+                closed.append(getattr(values[0], "value", values[0]))
+                return True
+            if name == "LocalFree":
+                freed.append(getattr(values[0], "value", values[0]))
+                return 0
+            pytest.fail("unexpected admin API " + name)
+        return call
+
+    monkeypatch.setattr(b, "_api", api)
+    if fault:
+        with pytest.raises(jn.NativeDenied):
+            b._check_admin_token()
+    else:
+        b._check_admin_token()
+    if fault == "impersonation":
+        assert closed == [801] and freed == []
+    else:
+        assert closed == [802]
+        assert freed == ([903] if fault in (None, "not_admin_member") else [])
+
+
+def test_g3_cli_entrypoints_fail_closed_with_sanitized_json(capsys):
+    for fn, argv in (
+        (host.main, ["--mode", "preflight"]),
+        (ob.main, ["--mode", "preflight"]),
+        (ob.main, ["--mode", "signer"]),
+        (en.main, ["--mode", "preflight"]),
+        (en.main, ["--mode", "bind-scm-pid"]),
+    ):
+        rc = fn(argv)
+        assert rc == 2
+        out = json.loads(capsys.readouterr().out)
+        assert out.get("start", "DENY") == "DENY"
+        assert out.get("native_effect", "NOT_ATTEMPTED") == "NOT_ATTEMPTED"
+
+
+# ---------------------------------------------------------------------------
+# Windows-only native tests (read-only live probes + fail-closed without host assets)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-only native G3 custody tests")
+def test_windows_native_process_identity_and_logon_luid_live(monkeypatch):
+    ident = b.read_process_identity(os.getpid())
+    assert ident.pid == os.getpid()
+    assert ident.user_sid.startswith("S-1-5-")
+    assert ident.created_at > 0
+    assert Path(ident.executable).is_file()
+    # Read-only Win32 primary-token AuthenticationId probe.
+    monkeypatch.setattr(auth, "windows_only", lambda: None)
+    luid = ob.read_logon_id(os.getpid())
+    assert len(luid) == 16 and luid != "0" * 16 and all(c in "0123456789abcdef" for c in luid)
+    with pytest.raises(jn.NativeDenied):
+        b.read_process_identity(0)
+    with pytest.raises(jn.NativeDenied):
+        ob.read_logon_id(0)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-only native G3 custody tests")
+def test_windows_native_owners_fail_closed_without_enrolled_host_assets(pins):
+    # Without an installed SCM service, protected HKLM anchors, or enrolled keys,
+    # every callable Windows owner fails closed cleanly without side effects.
+    svc_receipt = host.BrokerStatusOwner().execute(999999, b"{}")
+    assert svc_receipt.decision is op.Decision.HOLD
+    assert svc_receipt.effect is op.EffectAttempt.NOT_ATTEMPTED
+    assert ob.ConnectedObserverSignerHost().handle_connection(999999) is ob.DesktopStatusOutcome.UNKNOWN
+    assert ob.DesktopStatusOwner().execute(999999, 999998) is ob.DesktopStatusOutcome.UNKNOWN
+    spec = en.AttendedScmBindingSpec(
+        pins=pins,
+        target=TARGET,
+        desktop_peer=inv.ProcessIdentity(2222, T - 50, en.DESKTOP_IMAGE, SID, 7),
+        desktop_peer_sha256="7" * 64,
+        logon_id="0000000000012345",
+        verifier_path=r"C:\Windows\System32\OpenSSH\ssh-keygen.exe",
+        verifier_sha256="8" * 64,
+        issuer_signers_path=r"C:\ProgramData\AI-Commerce\WakeHubG3\issuer-signers",
+        human_signers_path=r"C:\ProgramData\AI-Commerce\WakeHubG3\human-signers",
+        observer_signers_path=r"C:\ProgramData\AI-Commerce\WakeHubG3\observer-signers",
+        broker_signers_path=r"C:\ProgramData\AI-Commerce\WakeHubG3\broker-signers",
+        enrollment_path=r"C:\ProgramData\AI-Commerce\WakeHubG3\enrollment.json",
+        journal_path=en.PRIVATE_ROOT + r"\effects.sqlite3",
+        requests_path=en.PRIVATE_ROOT + r"\requests.sqlite3",
+        challenges_path=en.CHALLENGES_PATH,
+        private_key_path=en.PRIVATE_ROOT + r"\broker_ed25519",
+        desktop_path=en.PRIVATE_ROOT + r"\desktop.json",
+        observer_executable=ob.OBSERVER_SIGNER_IMAGE,
+        observer_key_path=en.OBSERVER_ROOT + r"\observer_ed25519",
+    )
+    rb = en.collect_live_scm_readback(spec)
+    assert rb.state is en.ScmBindingState.HOLD_RECONCILE and rb.bound_pid is None and rb.retry_allowed is False
+    bound = en.attend_scm_pid_binding(spec)
+    assert bound.state is en.ScmBindingState.HOLD_RECONCILE and bound.bound_pid is None and bound.retry_allowed is False

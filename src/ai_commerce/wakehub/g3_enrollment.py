@@ -6,16 +6,26 @@ reconciliation, including when an earlier installer ACK was lost.
 """
 from __future__ import annotations
 
+import argparse
 from dataclasses import asdict, dataclass
 from enum import Enum
 import hashlib
+import json
+import math
 import ntpath
+import os
+from pathlib import Path
 import re
+import sys
+import time
 
+from ai_commerce.wakehub import native_authority as auth
 from ai_commerce.wakehub import native_broker as broker
 from ai_commerce.wakehub import private_operator as op
 from ai_commerce.wakehub.native_inventory import ProcessIdentity
-from ai_commerce.wakehub.native_journal import canonical, deny, OS_TRUSTED_SIDS
+from ai_commerce.wakehub.native_journal import (
+    canonical, decode, deny, lane_for, shape, WindowsPathCustody, OS_TRUSTED_SIDS,
+)
 
 
 TASK_PARENT = "4a9b07bd41df8cfe4b011e575c4d0ea8a729357f"
@@ -24,6 +34,7 @@ G3_ANCHOR = r"SOFTWARE\AI-Commerce\WakeHubG3"
 SERVICE_IMAGE = r"C:\Program Files\AI-Commerce\WakeHubG3\WakeHubBroker.exe"
 PRIVATE_ROOT = r"C:\ProgramData\AI-Commerce\WakeHubG3\Broker"
 OBSERVER_ROOT = r"C:\ProgramData\AI-Commerce\WakeHubG3\Observer"
+CHALLENGES_PATH = PRIVATE_ROOT + r"\challenges.sqlite3"
 STATUS_FRAME_BODY_LIMIT = 65536
 STATUS_TRANSPORT_MISSING_OWNERS = (
     "INSTALLED_SCM_OWNED_FIXED_PIPE_SERVER",
@@ -387,3 +398,653 @@ def desktop_bootstrap_postflight(plan: DesktopBootstrapPlan, pins: DesktopBootst
             or checked.state is not DesktopBootstrapState.READBACK_MATCH):
         return DesktopBootstrapPlan(checked.digest, checked.resources, DesktopBootstrapState.RECONCILE_ONLY)
     return checked
+
+
+class ScmBindingState(Enum):
+    HOLD_RECONCILE = "HOLD_RECONCILE_ONLY"
+    READBACK_VERIFIED = "LIVE_READBACK_VERIFIED_NO_WRITE"
+    PID_BOUND_READBACK_VERIFIED = "PID_BOUND_AFTER_INDEPENDENT_READBACK"
+
+
+class RegistryAnchorWriteState(Enum):
+    NOT_ATTEMPTED = "NOT_ATTEMPTED"
+    VERIFIED_WRITTEN = "VERIFIED_WRITTEN"
+    UNKNOWN_EFFECT = "UNKNOWN_EFFECT"
+
+
+_POSTWRITE_UNKNOWN_REASONS = frozenset({
+    "AMBIGUOUS_WRITE_RECONCILE_ONLY",
+    "POSTWRITE_READBACK_MISMATCH_RECONCILE_ONLY",
+})
+
+_SCM_BINDING_REASONS = frozenset({
+    "ADMIN_OR_HOST_PREREQUISITES_UNPROVEN",
+    "EXISTING_ANCHOR_AMBIGUOUS_OR_CHANGED",
+    "LIVE_SCM_CHANGED_BEFORE_WRITE",
+    "AMBIGUOUS_WRITE_RECONCILE_ONLY",
+    "POSTWRITE_READBACK_MISMATCH_RECONCILE_ONLY",
+    "READBACK_MISMATCH_RECONCILE_ONLY",
+    "INDEPENDENT_READBACK_MATCH",
+    "PID_BOUND_AFTER_INDEPENDENT_READBACK",
+    "INVALID_BINDING_SPEC",
+})
+
+
+def _spec_path(value: object) -> bool:
+    return (type(value) is str and 0 < len(value) <= 1024
+            and not any(ord(c) < 32 for c in value)
+            and not any(bad in value for bad in ("..", "*", "?"))
+            and (op._path(value) or Path(value).is_absolute()))
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class AttendedScmBindingSpec:
+    """Pre-existing admin-pinned inputs for live SCM PID/creation-time binding.
+
+    Never carries private key material, installer commands, or shell arguments.
+    The service binary, SCM noninteractive account, signed release, public
+    signer policies, and separate broker/observer custodies must already exist.
+    """
+    pins: EnrollmentPins
+    target: op.PrivateTarget
+    desktop_peer: ProcessIdentity
+    desktop_peer_sha256: str
+    logon_id: str
+    verifier_path: str
+    verifier_sha256: str
+    issuer_signers_path: str
+    human_signers_path: str
+    observer_signers_path: str
+    broker_signers_path: str
+    enrollment_path: str
+    journal_path: str
+    requests_path: str
+    challenges_path: str
+    private_key_path: str
+    desktop_path: str
+    observer_executable: str
+    observer_key_path: str
+
+    def __post_init__(self):
+        paths = (
+            self.verifier_path, self.issuer_signers_path, self.human_signers_path,
+            self.observer_signers_path, self.broker_signers_path, self.enrollment_path,
+            self.journal_path, self.requests_path, self.challenges_path,
+            self.private_key_path, self.desktop_path, self.observer_executable,
+            self.observer_key_path,
+        )
+        private_paths = (
+            self.journal_path, self.requests_path, self.challenges_path,
+            self.private_key_path, self.desktop_path, self.observer_key_path,
+        )
+        norm_private = [ntpath.normcase(p) for p in private_paths if type(p) is str]
+        allowed_verifiers = ("ssh-keygen.exe",) if os.name == "nt" else ("ssh-keygen.exe", "ssh-keygen")
+        if (type(self.pins) is not EnrollmentPins
+                or type(self.target) is not op.PrivateTarget
+                or type(self.desktop_peer) is not ProcessIdentity
+                or self.target.user_sid != self.pins.operator_sid
+                or (self.desktop_peer.user_sid, self.desktop_peer.session_id)
+                != (self.target.user_sid, self.target.session_id)
+                or self.desktop_peer.session_id <= 0
+                or type(self.logon_id) is not str
+                or not re.fullmatch(r"[0-9a-f]{16}", self.logon_id)
+                or self.logon_id == "0" * 16
+                or any(type(h) is not str or not re.fullmatch(r"[0-9a-f]{64}", h)
+                       for h in (self.desktop_peer_sha256, self.verifier_sha256))
+                or any(not _spec_path(p) for p in paths)
+                or Path(self.verifier_path).name.casefold() not in allowed_verifiers
+                or ntpath.normcase(self.challenges_path) != ntpath.normcase(CHALLENGES_PATH)
+                or len(norm_private) != len(private_paths)
+                or len(set(norm_private)) != len(private_paths)):
+            deny()
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class AttendedScmBindingResult:
+    """Bounded result of an admin-attended SCM PID/creation-time stage."""
+    state: ScmBindingState
+    reason: str
+    registry_anchor_write: RegistryAnchorWriteState = RegistryAnchorWriteState.NOT_ATTEMPTED
+    bound_pid: int | None = None
+    bound_created_at: float | None = None
+    anchor_digest: str | None = None
+    retry_allowed: bool = False
+
+    def __post_init__(self):
+        verified = self.state in (ScmBindingState.READBACK_VERIFIED, ScmBindingState.PID_BOUND_READBACK_VERIFIED)
+        if (type(self.state) is not ScmBindingState
+                or type(self.reason) is not str or self.reason not in _SCM_BINDING_REASONS
+                or type(self.registry_anchor_write) is not RegistryAnchorWriteState
+                or self.retry_allowed is not False):
+            deny()
+        if (self.state is ScmBindingState.READBACK_VERIFIED
+                and (self.registry_anchor_write is not RegistryAnchorWriteState.NOT_ATTEMPTED
+                     or self.reason != "INDEPENDENT_READBACK_MATCH")):
+            deny()
+        if (self.state is ScmBindingState.PID_BOUND_READBACK_VERIFIED
+                and (self.registry_anchor_write is not RegistryAnchorWriteState.VERIFIED_WRITTEN
+                     or self.reason != "PID_BOUND_AFTER_INDEPENDENT_READBACK")):
+            deny()
+        if self.state is ScmBindingState.HOLD_RECONCILE:
+            if (self.registry_anchor_write is RegistryAnchorWriteState.VERIFIED_WRITTEN
+                    or self.reason in ("INDEPENDENT_READBACK_MATCH", "PID_BOUND_AFTER_INDEPENDENT_READBACK")):
+                deny()
+            if ((self.reason in _POSTWRITE_UNKNOWN_REASONS)
+                    is not (self.registry_anchor_write is RegistryAnchorWriteState.UNKNOWN_EFFECT)):
+                deny()
+        if verified:
+            if (type(self.bound_pid) is not int or not 0 < self.bound_pid < 2**32
+                    or type(self.bound_created_at) not in (int, float)
+                    or not math.isfinite(self.bound_created_at) or self.bound_created_at <= 0
+                    or type(self.anchor_digest) is not str
+                    or not re.fullmatch(r"[0-9a-f]{64}", self.anchor_digest)):
+                deny()
+        elif self.bound_pid is not None or self.bound_created_at is not None:
+            deny()
+
+    def to_public_json(self) -> str:
+        """Sanitized public output only: never leaks PID, path, SID, logon or digest."""
+        verified = self.state in (ScmBindingState.READBACK_VERIFIED, ScmBindingState.PID_BOUND_READBACK_VERIFIED)
+        if self.state is ScmBindingState.PID_BOUND_READBACK_VERIFIED:
+            authority = "ATTENDED_ADMIN_REGISTRY_ANCHOR_BOUND"
+            native_effect = "REGISTRY_ANCHOR_VERIFIED_WRITTEN"
+        elif self.state is ScmBindingState.READBACK_VERIFIED:
+            authority = "ATTENDED_ADMIN_READBACK_ONLY"
+            native_effect = "NOT_ATTEMPTED"
+        elif self.registry_anchor_write is RegistryAnchorWriteState.UNKNOWN_EFFECT:
+            authority = "ATTENDED_ADMIN_REGISTRY_ANCHOR_UNKNOWN_RECONCILE_ONLY"
+            native_effect = "REGISTRY_ANCHOR_UNKNOWN_EFFECT"
+        else:
+            authority = "SOURCE_ONLY"
+            native_effect = "NOT_ATTEMPTED"
+        return canonical(dict(
+            schema_version="WakeHubG3AttendedScmBindingPublic.v1",
+            state=self.state.value,
+            reason=self.reason,
+            pid_bound=self.state is ScmBindingState.PID_BOUND_READBACK_VERIFIED,
+            readback_verified=verified,
+            retry_allowed=False,
+            registry_anchor_write=self.registry_anchor_write.value,
+            authority=authority,
+            native_effect=native_effect,
+            start="DENY",
+            reuse="DENY",
+            wake="NOT_SENT",
+            chrome="NOT_STARTED",
+            send="NOT_SENT",
+            chatgpt_account_session="ACCOUNT_UNPROVEN",
+        )).decode("ascii")
+
+
+def _verify_preinstalled_prerequisites(spec: AttendedScmBindingSpec, *, now: float):
+    """Verify pre-existing signed release, signers, binaries, custodies and live SCM."""
+    from ai_commerce.wakehub import g3_desktop_observer as observer
+
+    if type(spec) is not AttendedScmBindingSpec or type(now) not in (int, float) or not math.isfinite(now) or now <= 0:
+        deny()
+    auth.windows_only()
+    broker._check_admin_token()
+    custody = WindowsPathCustody()
+    pins = spec.pins
+    # 1. Verify all four independent public signer files and hashes.
+    role_specs = (
+        ("issuer", spec.issuer_signers_path, pins.issuer_key, auth.IDENTITIES["issuer"]),
+        ("human", spec.human_signers_path, pins.human_key, auth.IDENTITIES["human"]),
+        ("observer", spec.observer_signers_path, pins.observer_key, auth.IDENTITIES["observer"]),
+        ("broker", spec.broker_signers_path, pins.broker_key, observer.BROKER_IDENTITY),
+    )
+    pubkeys = []
+    for _, signer_path, expected_sha, expected_identity in role_specs:
+        raw = custody.check(signer_path).read_bytes()
+        if len(raw) > 8192 or auth._digest(raw) != expected_sha:
+            deny()
+        lines = [line.split() for line in raw.decode("ascii").splitlines() if line.strip()]
+        if len(lines) != 1 or len(lines[0]) != 3 or lines[0][:2] != [expected_identity, "ssh-ed25519"]:
+            deny()
+        pubkeys.append(lines[0][2])
+    if len(set(pubkeys)) != 4:
+        deny()
+    # 2. Verify pinned ssh-keygen verifier binary.
+    verifier = custody.check(spec.verifier_path)
+    allowed_verifiers = ("ssh-keygen.exe",) if os.name == "nt" else ("ssh-keygen.exe", "ssh-keygen")
+    if verifier.name.casefold() not in allowed_verifiers or auth._digest(verifier.read_bytes()) != spec.verifier_sha256:
+        deny()
+    # 3. Verify pre-existing signed release enrollment and files.
+    lane = lane_for(spec.target)
+    authority_anchor = dict(
+        schema="WakeHubG2Anchor.v1",
+        issuer_signers=dict(path=spec.issuer_signers_path, sha256=pins.issuer_key),
+        human_signers=dict(path=spec.human_signers_path, sha256=pins.human_key),
+        observer_signers=dict(path=spec.observer_signers_path, sha256=pins.observer_key),
+        verifier=dict(path=spec.verifier_path, sha256=spec.verifier_sha256),
+        enrollment=spec.enrollment_path,
+        operator_sid=pins.operator_sid,
+        runner_sids=list(pins.runner_sids),
+        journal_path=spec.journal_path,
+        journal_id=pins.journal_id,
+        lane=lane,
+    )
+    enrollment_file = custody.check(spec.enrollment_path)
+    enrollment_bytes = enrollment_file.read_bytes()
+    enrolled = auth._signed(enrollment_bytes, "issuer", "enrollment", authority_anchor)
+    shape(enrolled, "schema task_parent source target release_root files journal_path journal_id lane observer_root observer_sid issued_at expires_at enabled")
+    if (enrolled["schema"] != "WakeHubG2Enrollment.v1"
+            or enrolled["task_parent"] != auth.TASK_PARENT
+            or enrolled["enabled"] is not True
+            or not 0 < enrolled["issued_at"] <= now < enrolled["expires_at"]
+            or op.SourceBinding(**enrolled["source"]) != pins.source
+            or op.PrivateTarget(**enrolled["target"]) != spec.target
+            or enrolled["journal_id"] != pins.journal_id
+            or ntpath.normcase(enrolled["journal_path"]) != ntpath.normcase(spec.journal_path)
+            or enrolled["lane"] != lane
+            or enrolled["observer_sid"] != broker.service_sid()):
+        deny()
+    release_root = custody.check(enrolled["release_root"], directory=True)
+    files = enrolled["files"]
+    if type(files) is not dict or not 5 <= len(files) <= 512:
+        deny()
+    for relative, expected_hash in files.items():
+        if (type(relative) is not str or not re.fullmatch(r"[A-Za-z0-9_./-]+", relative)
+                or any(part in ("", ".", "..") for part in relative.split("/"))
+                or type(expected_hash) is not str or not re.fullmatch(r"[0-9a-f]{64}", expected_hash)):
+            deny()
+        if auth._digest(custody.check(release_root / relative).read_bytes()) != expected_hash:
+            deny()
+    service_custody = broker.ServiceCustody()
+    observer_root = service_custody.check(enrolled["observer_root"], directory=True)
+    journal_file = service_custody.check(spec.journal_path)
+    if any((root / "KILL").exists() for root in (enrollment_file.parent, observer_root, journal_file.parent)):
+        deny()
+    rev = auth._signed(service_custody.check(observer_root / "revocations.json").read_bytes(),
+                       "issuer", "revocations", authority_anchor)
+    shape(rev, "schema journal_id epoch source_epoch release_epoch issued_at expires_at revoked")
+    auth._fresh(rev, now)
+    if (rev["schema"] != "WakeHubG2Revocations.v1"
+            or rev["journal_id"] != pins.journal_id
+            or rev["source_epoch"] != pins.source.source_epoch
+            or rev["release_epoch"] != pins.source.release_epoch):
+        deny()
+    # 4. Verify pre-installed service, observer signer, and desktop peer binaries.
+    if auth._digest(custody.check(SERVICE_IMAGE).read_bytes()) != pins.service_sha256:
+        deny()
+    if auth._digest(custody.check(spec.observer_executable).read_bytes()) != pins.observer_sha256:
+        deny()
+    if auth._digest(custody.check(spec.desktop_peer.executable).read_bytes()) != spec.desktop_peer_sha256:
+        deny()
+    # 5. Verify pre-existing separate broker and observer key/ledger custodies.
+    for private_path in (spec.journal_path, spec.requests_path, spec.challenges_path,
+                         spec.private_key_path, spec.desktop_path):
+        service_custody.check(private_path)
+    broker.ObserverCustody(pins.observer_sid).check(spec.observer_key_path)
+    # 6. Query live SCM service (read-only) and live kernel process identity.
+    scm = broker._scm_process()
+    if (scm["account"] != "NT SERVICE\\" + broker.SERVICE
+            or scm["kind"] != 0x10
+            or scm["sid_type"] not in (1, 3)
+            or scm["binary"] not in (SERVICE_IMAGE, '"' + SERVICE_IMAGE + '"')):
+        deny()
+    live_server = broker.read_process_identity(scm["pid"])
+    if (live_server.pid != scm["pid"]
+            or live_server.user_sid != broker.service_sid()
+            or live_server.session_id != 0
+            or ntpath.normcase(live_server.executable) != ntpath.normcase(SERVICE_IMAGE)
+            or live_server.created_at > now):
+        deny()
+    # 7. Construct exact canonical anchors bound to live SCM PID + created_at.
+    desired_broker = dict(
+        schema="WakeHubPrivateBrokerAnchor.v1",
+        task_parent=auth.TASK_PARENT,
+        authority=authority_anchor,
+        service=dict(name=broker.SERVICE, process=asdict(live_server), sha256=pins.service_sha256),
+        desktop_peer=dict(process=asdict(spec.desktop_peer), sha256=spec.desktop_peer_sha256),
+        requests_path=spec.requests_path,
+        private_key_path=spec.private_key_path,
+        desktop_path=spec.desktop_path,
+    )
+    desired_g3 = dict(
+        schema="WakeHubG3Host.v1",
+        task_parent=TASK_PARENT,
+        source=asdict(pins.source),
+        generation=pins.generation,
+        journal_id=pins.journal_id,
+        target=asdict(spec.target),
+        logon_id=spec.logon_id,
+        broker_signers=dict(path=spec.broker_signers_path, sha256=pins.broker_key),
+        challenges_path=spec.challenges_path,
+    )
+    desired_signer = dict(
+        schema="WakeHubG3ObserverSignerAnchor.v1",
+        task_parent=TASK_PARENT,
+        pipe=broker.OBSERVER_SIGNER_PIPE,
+        observer_sid=pins.observer_sid,
+        observer_executable=spec.observer_executable,
+        observer_sha256=pins.observer_sha256,
+        observer_key_path=spec.observer_key_path,
+    )
+    return live_server, scm, dict(broker=desired_broker, g3=desired_g3, observer_signer=desired_signer)
+
+
+def _static_broker_pins(anchor: dict) -> dict:
+    """Static broker pins excluding dynamic runtime process PID/created_at."""
+    shape(anchor, "schema task_parent authority service desktop_peer requests_path private_key_path desktop_path")
+    shape(anchor["service"], "name process sha256")
+    shape(anchor["desktop_peer"], "process sha256")
+    shape(anchor["service"]["process"], "pid created_at executable user_sid session_id")
+    shape(anchor["desktop_peer"]["process"], "pid created_at executable user_sid session_id")
+    return dict(
+        schema=anchor["schema"],
+        task_parent=anchor["task_parent"],
+        authority=anchor["authority"],
+        service_name=anchor["service"]["name"],
+        service_executable=ntpath.normcase(anchor["service"]["process"]["executable"]),
+        service_user_sid=anchor["service"]["process"]["user_sid"],
+        service_session_id=anchor["service"]["process"]["session_id"],
+        service_sha256=anchor["service"]["sha256"],
+        desktop_executable=ntpath.normcase(anchor["desktop_peer"]["process"]["executable"]),
+        desktop_user_sid=anchor["desktop_peer"]["process"]["user_sid"],
+        desktop_session_id=anchor["desktop_peer"]["process"]["session_id"],
+        desktop_sha256=anchor["desktop_peer"]["sha256"],
+        requests_path=anchor["requests_path"],
+        private_key_path=anchor["private_key_path"],
+        desktop_path=anchor["desktop_path"],
+    )
+
+
+def _read_existing_anchors():
+    """Distinguish cleanly between absent registry values vs present vs error."""
+    from ai_commerce.wakehub import g3_desktop_observer as observer
+    from ai_commerce.wakehub import g3_service_host as host
+
+    readers = (
+        ("broker", broker._read_broker_anchor),
+        ("g3", host._read_g3_config),
+        ("observer_signer", observer._read_observer_signer_anchor),
+    )
+    found = {}
+    for name, reader in readers:
+        try:
+            found[name] = ("PRESENT", reader())
+        except FileNotFoundError:
+            found[name] = ("ABSENT", None)
+    return found
+
+
+def collect_live_scm_readback(spec: AttendedScmBindingSpec, *,
+                              clock=time.time) -> AttendedScmBindingResult:
+    """Read-only independent native readback of pre-installed SCM + protected anchors."""
+    from ai_commerce.wakehub import g3_desktop_observer as observer
+    from ai_commerce.wakehub import g3_service_host as host
+
+    if type(spec) is not AttendedScmBindingSpec:
+        return AttendedScmBindingResult(
+            ScmBindingState.HOLD_RECONCILE,
+            "INVALID_BINDING_SPEC",
+            registry_anchor_write=RegistryAnchorWriteState.NOT_ATTEMPTED,
+        )
+    try:
+        live_before, scm_before, desired = _verify_preinstalled_prerequisites(spec, now=clock())
+        rb_broker = broker._read_broker_anchor()
+        rb_g3 = host._read_g3_config()
+        rb_signer = observer._read_observer_signer_anchor()
+        scm_after = broker._scm_process()
+        live_after = broker.read_process_identity(scm_after["pid"])
+        if (live_after != live_before or scm_after != scm_before
+                or canonical(rb_broker) != canonical(desired["broker"])
+                or canonical(rb_g3) != canonical(desired["g3"])
+                or canonical(rb_signer) != canonical(desired["observer_signer"])):
+            return AttendedScmBindingResult(
+                ScmBindingState.HOLD_RECONCILE,
+                "READBACK_MISMATCH_RECONCILE_ONLY",
+                registry_anchor_write=RegistryAnchorWriteState.NOT_ATTEMPTED,
+            )
+        facts = dict(server=asdict(live_after), client=asdict(spec.desktop_peer), scm=scm_after)
+        broker.validate_peer(rb_broker, facts)
+        host._validate_config(rb_g3, rb_broker)
+        observer._validate_observer_signer_anchor(rb_signer, rb_broker, rb_g3)
+        digest = auth._digest(canonical([rb_broker, rb_g3, rb_signer]))
+        return AttendedScmBindingResult(
+            ScmBindingState.READBACK_VERIFIED,
+            "INDEPENDENT_READBACK_MATCH",
+            registry_anchor_write=RegistryAnchorWriteState.NOT_ATTEMPTED,
+            bound_pid=live_after.pid,
+            bound_created_at=live_after.created_at,
+            anchor_digest=digest,
+        )
+    except Exception:
+        return AttendedScmBindingResult(
+            ScmBindingState.HOLD_RECONCILE,
+            "ADMIN_OR_HOST_PREREQUISITES_UNPROVEN",
+            registry_anchor_write=RegistryAnchorWriteState.NOT_ATTEMPTED,
+        )
+
+
+def attend_scm_pid_binding(spec: AttendedScmBindingSpec, *,
+                           clock=time.time) -> AttendedScmBindingResult:
+    """Windows admin-attended protected enrollment/readback stage for live SCM PID.
+
+    Verifies pre-existing signed release, public signer hashes, pre-installed
+    service binary, live SCM noninteractive account, and independent broker /
+    observer custodies before writing atomically into protected HKLM anchors.
+    Existing all-PRESENT anchors matching identical live pins return verified
+    READ-ONLY without writing. Dynamic PID/creation time is bound ONLY AFTER
+    independent native readback. Any changed, missing, partial, or ambiguous
+    state returns HOLD_RECONCILE with retry_allowed=False; any failure once the
+    first registry write may have begun reports UNKNOWN_EFFECT.
+    """
+    from ai_commerce.wakehub import g3_desktop_observer as observer
+    from ai_commerce.wakehub import g3_service_host as host
+
+    if type(spec) is not AttendedScmBindingSpec:
+        return AttendedScmBindingResult(
+            ScmBindingState.HOLD_RECONCILE,
+            "INVALID_BINDING_SPEC",
+            registry_anchor_write=RegistryAnchorWriteState.NOT_ATTEMPTED,
+        )
+    try:
+        live_before, scm_before, desired = _verify_preinstalled_prerequisites(spec, now=clock())
+    except Exception:
+        return AttendedScmBindingResult(
+            ScmBindingState.HOLD_RECONCILE,
+            "ADMIN_OR_HOST_PREREQUISITES_UNPROVEN",
+            registry_anchor_write=RegistryAnchorWriteState.NOT_ATTEMPTED,
+        )
+    # Inspect existing anchor state: must be either all ABSENT or all PRESENT
+    # with identical static pins (no partial/corrupt/drifted pin adoption).
+    try:
+        existing = _read_existing_anchors()
+        states = {state for state, _ in existing.values()}
+        if states == {"PRESENT"}:
+            if (canonical(_static_broker_pins(existing["broker"][1]))
+                    != canonical(_static_broker_pins(desired["broker"]))
+                    or canonical(existing["g3"][1]) != canonical(desired["g3"])
+                    or canonical(existing["observer_signer"][1]) != canonical(desired["observer_signer"])):
+                return AttendedScmBindingResult(
+                    ScmBindingState.HOLD_RECONCILE,
+                    "EXISTING_ANCHOR_AMBIGUOUS_OR_CHANGED",
+                    registry_anchor_write=RegistryAnchorWriteState.NOT_ATTEMPTED,
+                )
+            if canonical(existing["broker"][1]) == canonical(desired["broker"]):
+                scm_after = broker._scm_process()
+                live_after = broker.read_process_identity(scm_after["pid"])
+                if scm_after != scm_before or live_after != live_before:
+                    return AttendedScmBindingResult(
+                        ScmBindingState.HOLD_RECONCILE,
+                        "LIVE_SCM_CHANGED_BEFORE_WRITE",
+                        registry_anchor_write=RegistryAnchorWriteState.NOT_ATTEMPTED,
+                    )
+                rb_broker = existing["broker"][1]
+                rb_g3 = existing["g3"][1]
+                rb_signer = existing["observer_signer"][1]
+                facts = dict(server=asdict(live_after), client=asdict(spec.desktop_peer), scm=scm_after)
+                broker.validate_peer(rb_broker, facts)
+                host._validate_config(rb_g3, rb_broker)
+                observer._validate_observer_signer_anchor(rb_signer, rb_broker, rb_g3)
+                digest = auth._digest(canonical([rb_broker, rb_g3, rb_signer]))
+                return AttendedScmBindingResult(
+                    ScmBindingState.READBACK_VERIFIED,
+                    "INDEPENDENT_READBACK_MATCH",
+                    registry_anchor_write=RegistryAnchorWriteState.NOT_ATTEMPTED,
+                    bound_pid=live_after.pid,
+                    bound_created_at=live_after.created_at,
+                    anchor_digest=digest,
+                )
+        elif states != {"ABSENT"}:
+            return AttendedScmBindingResult(
+                ScmBindingState.HOLD_RECONCILE,
+                "EXISTING_ANCHOR_AMBIGUOUS_OR_CHANGED",
+                registry_anchor_write=RegistryAnchorWriteState.NOT_ATTEMPTED,
+            )
+    except Exception:
+        return AttendedScmBindingResult(
+            ScmBindingState.HOLD_RECONCILE,
+            "EXISTING_ANCHOR_AMBIGUOUS_OR_CHANGED",
+            registry_anchor_write=RegistryAnchorWriteState.NOT_ATTEMPTED,
+        )
+    # Re-verify live SCM PID/creation time immediately before atomic write.
+    try:
+        scm_pre = broker._scm_process()
+        live_pre = broker.read_process_identity(scm_pre["pid"])
+        if scm_pre != scm_before or live_pre != live_before:
+            return AttendedScmBindingResult(
+                ScmBindingState.HOLD_RECONCILE,
+                "LIVE_SCM_CHANGED_BEFORE_WRITE",
+                registry_anchor_write=RegistryAnchorWriteState.NOT_ATTEMPTED,
+            )
+    except Exception:
+        return AttendedScmBindingResult(
+            ScmBindingState.HOLD_RECONCILE,
+            "LIVE_SCM_CHANGED_BEFORE_WRITE",
+            registry_anchor_write=RegistryAnchorWriteState.NOT_ATTEMPTED,
+        )
+    # Protected registry writes: once the first write may have begun, any error
+    # or lost/unexpected ACK is UNKNOWN_EFFECT -> HOLD_RECONCILE, no rollback/retry.
+    expected_broker = canonical(desired["broker"])
+    expected_g3 = canonical(desired["g3"])
+    expected_signer = canonical(desired["observer_signer"])
+    try:
+        written_broker = broker._write_protected_anchor_value(broker.ANCHOR, "Anchor", desired["broker"])
+        written_g3 = broker._write_protected_anchor_value(G3_ANCHOR, "Anchor", desired["g3"])
+        written_signer = broker._write_protected_anchor_value(
+            G3_ANCHOR, observer.OBSERVER_SIGNER_ANCHOR_VALUE, desired["observer_signer"]
+        )
+    except Exception:
+        return AttendedScmBindingResult(
+            ScmBindingState.HOLD_RECONCILE,
+            "AMBIGUOUS_WRITE_RECONCILE_ONLY",
+            registry_anchor_write=RegistryAnchorWriteState.UNKNOWN_EFFECT,
+        )
+    if (written_broker != expected_broker
+            or written_g3 != expected_g3
+            or written_signer != expected_signer):
+        return AttendedScmBindingResult(
+            ScmBindingState.HOLD_RECONCILE,
+            "AMBIGUOUS_WRITE_RECONCILE_ONLY",
+            registry_anchor_write=RegistryAnchorWriteState.UNKNOWN_EFFECT,
+        )
+    # Independent post-write native readback: bind dynamic PID and report
+    # VERIFIED_WRITTEN ONLY AFTER match. Any mismatch/error is UNKNOWN_EFFECT.
+    try:
+        rb_broker = broker._read_broker_anchor()
+        rb_g3 = host._read_g3_config()
+        rb_signer = observer._read_observer_signer_anchor()
+        scm_after = broker._scm_process()
+        live_after = broker.read_process_identity(scm_after["pid"])
+        if (canonical(rb_broker) != written_broker
+                or canonical(rb_g3) != written_g3
+                or canonical(rb_signer) != written_signer
+                or scm_after != scm_before
+                or live_after != live_before):
+            return AttendedScmBindingResult(
+                ScmBindingState.HOLD_RECONCILE,
+                "POSTWRITE_READBACK_MISMATCH_RECONCILE_ONLY",
+                registry_anchor_write=RegistryAnchorWriteState.UNKNOWN_EFFECT,
+            )
+        facts = dict(server=asdict(live_after), client=asdict(spec.desktop_peer), scm=scm_after)
+        broker.validate_peer(rb_broker, facts)
+        host._validate_config(rb_g3, rb_broker)
+        observer._validate_observer_signer_anchor(rb_signer, rb_broker, rb_g3)
+        digest = auth._digest(canonical([rb_broker, rb_g3, rb_signer]))
+        return AttendedScmBindingResult(
+            ScmBindingState.PID_BOUND_READBACK_VERIFIED,
+            "PID_BOUND_AFTER_INDEPENDENT_READBACK",
+            registry_anchor_write=RegistryAnchorWriteState.VERIFIED_WRITTEN,
+            bound_pid=live_after.pid,
+            bound_created_at=live_after.created_at,
+            anchor_digest=digest,
+        )
+    except Exception:
+        return AttendedScmBindingResult(
+            ScmBindingState.HOLD_RECONCILE,
+            "POSTWRITE_READBACK_MISMATCH_RECONCILE_ONLY",
+            registry_anchor_write=RegistryAnchorWriteState.UNKNOWN_EFFECT,
+        )
+
+
+def _spec_from_dict(data: dict) -> AttendedScmBindingSpec:
+    shape(data, "pins target desktop_peer desktop_peer_sha256 logon_id verifier_path verifier_sha256 issuer_signers_path human_signers_path observer_signers_path broker_signers_path enrollment_path journal_path requests_path challenges_path private_key_path desktop_path observer_executable observer_key_path")
+    p = data["pins"]
+    shape(p, "source generation operator_sid observer_sid runner_sids service_sha256 observer_sha256 issuer_key human_key observer_key broker_key journal_id")
+    if type(p["runner_sids"]) is not list:
+        deny()
+    pins = EnrollmentPins(
+        op.SourceBinding(**p["source"]), p["generation"], p["operator_sid"], p["observer_sid"],
+        tuple(p["runner_sids"]), p["service_sha256"], p["observer_sha256"],
+        p["issuer_key"], p["human_key"], p["observer_key"], p["broker_key"], p["journal_id"],
+    )
+    return AttendedScmBindingSpec(
+        pins=pins,
+        target=op.PrivateTarget(**data["target"]),
+        desktop_peer=ProcessIdentity(**data["desktop_peer"]),
+        desktop_peer_sha256=data["desktop_peer_sha256"],
+        logon_id=data["logon_id"],
+        verifier_path=data["verifier_path"],
+        verifier_sha256=data["verifier_sha256"],
+        issuer_signers_path=data["issuer_signers_path"],
+        human_signers_path=data["human_signers_path"],
+        observer_signers_path=data["observer_signers_path"],
+        broker_signers_path=data["broker_signers_path"],
+        enrollment_path=data["enrollment_path"],
+        journal_path=data["journal_path"],
+        requests_path=data["requests_path"],
+        challenges_path=data["challenges_path"],
+        private_key_path=data["private_key_path"],
+        desktop_path=data["desktop_path"],
+        observer_executable=data["observer_executable"],
+        observer_key_path=data["observer_key_path"],
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Windows-callable admin-attended enrollment/readback CLI entrypoint."""
+    parser = argparse.ArgumentParser(prog="python -m ai_commerce.wakehub.g3_enrollment")
+    parser.add_argument("--mode", choices=("preflight", "readback", "bind-scm-pid"), default="preflight")
+    parser.add_argument("--spec", default=None)
+    args = parser.parse_args(argv)
+    if args.mode == "preflight":
+        sys.stdout.write(json.dumps(status_transport_preflight(), sort_keys=True) + "\n")
+        return 2
+    try:
+        if type(args.spec) is not str or not args.spec:
+            deny()
+        auth.windows_only()
+        broker._check_admin_token()
+        raw = WindowsPathCustody().check(args.spec).read_bytes()
+        spec = _spec_from_dict(decode(raw, 65536))
+    except Exception:
+        result = AttendedScmBindingResult(
+            ScmBindingState.HOLD_RECONCILE,
+            "ADMIN_OR_HOST_PREREQUISITES_UNPROVEN",
+            registry_anchor_write=RegistryAnchorWriteState.NOT_ATTEMPTED,
+        )
+    else:
+        result = (
+            collect_live_scm_readback(spec)
+            if args.mode == "readback"
+            else attend_scm_pid_binding(spec)
+        )
+    sys.stdout.write(result.to_public_json() + "\n")
+    return 0 if result.state in (ScmBindingState.READBACK_VERIFIED, ScmBindingState.PID_BOUND_READBACK_VERIFIED) else 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

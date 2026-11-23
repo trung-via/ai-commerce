@@ -20,12 +20,16 @@ import ctypes
 from ctypes import wintypes as wt
 from dataclasses import asdict
 import hashlib
+import math
 import os
 from pathlib import Path
 import re
 import sqlite3
+import subprocess
+import tempfile
 from uuid import UUID
 
+from ai_commerce.hostops_v3.auth import child_environment
 from ai_commerce.wakehub import native_authority as auth
 from ai_commerce.wakehub import native_inventory as inv
 from ai_commerce.wakehub import private_operator as op
@@ -37,8 +41,14 @@ from ai_commerce.wakehub.native_journal import (
 
 SERVICE = "AICommerceWakeHub9444Broker"
 PIPE = r"\Device\NamedPipe\AICommerce-WakeHub-9444-PrivateBroker-v1"
+OBSERVER_SIGNER_PIPE = r"\Device\NamedPipe\AICommerce-WakeHub-9444-ObserverSigner-v1"
 ANCHOR = r"SOFTWARE\AI-Commerce\WakeHubG2PrivateBroker"
 NAMESPACE = "wakehub-private-broker-9444-{}@ai-commerce"
+_ALLOWED_ANCHOR_WRITES = frozenset({
+    (ANCHOR, "Anchor"),
+    (r"SOFTWARE\AI-Commerce\WakeHubG3", "Anchor"),
+    (r"SOFTWARE\AI-Commerce\WakeHubG3", "ObserverSigner"),
+})
 
 
 def service_sid():
@@ -535,3 +545,176 @@ class BrokerRequests:
             if db.execute("UPDATE requests SET state='DONE',receipt=? WHERE nonce=? AND digest=? AND state='UNKNOWN'",
                     (canonical(decode(receipt.to_json().encode())), nonce, digest)).rowcount != 1:
                 deny()
+
+
+class ObserverCustody(WindowsPathCustody):
+    """Independent observer-SID key custody; excludes operator, runners and service.
+
+    Only OS_TRUSTED_SIDS and the pinned observer SID may appear on the protected
+    DACL of the observer signing key and its parent directory. Interactive
+    operator SIDs and the Session 0 broker service SID are unconditionally denied.
+    """
+    def __init__(self, observer_sid: str):
+        if (type(observer_sid) is not str
+                or not re.fullmatch(r"S-1-5-21-(?:[0-9]+-){3}[0-9]+", observer_sid)
+                or observer_sid in {*OS_TRUSTED_SIDS, service_sid()}):
+            deny()
+        super().__init__(observer_sid)
+
+    def check(self, path, *, directory=False):
+        path = super().check(path, directory=directory)
+        for item in ((path,) if directory else (path, path.parent)):
+            owner, aces = self._descriptor(str(item))
+            self.check_descriptor(owner, aces, {*OS_TRUSTED_SIDS, self.owner_sid}, private=True)
+            _protected_dacl(str(item), 1)
+            if not any(kind == 0 and not flags & 8 and sid == self.owner_sid
+                       and (mask & 0x10000000 or mask & 0x80000000
+                            or mask & 0x120089 == 0x120089 or mask & 0x1f01ff == 0x1f01ff)
+                       for kind, flags, mask, sid in aces):
+                deny()
+        return path
+
+
+def _check_observer_signer_pipe_acl(handle, observer_sid: str, operator_sid: str):
+    """Protected DACL on the observer-SID signing IPC pipe.
+
+    Owned by OS_TRUSTED_SIDS or observer_sid. Only operator_sid may hold
+    client read/write-data access; creating another server instance, replacing
+    the pipe, changing its ACL/owner, or granting any third SID is denied.
+    """
+    sid_pattern = r"S-1-5-21-(?:[0-9]+-){3}[0-9]+"
+    if (type(observer_sid) is not str or type(operator_sid) is not str
+            or observer_sid == operator_sid
+            or not re.fullmatch(sid_pattern, observer_sid)
+            or not re.fullmatch(sid_pattern, operator_sid)
+            or observer_sid in {*OS_TRUSTED_SIDS, service_sid()}
+            or operator_sid in {*OS_TRUSTED_SIDS, service_sid()}):
+        deny()
+    owner, aces = WindowsPathCustody._descriptor(handle, 1, handle=True)
+    if owner not in {*OS_TRUSTED_SIDS, observer_sid} or aces is None:
+        deny()
+    for kind, flags, mask, sid in aces:
+        if kind not in (0, 1):
+            deny()
+        if kind == 0 and not flags & 8:
+            if sid in {*OS_TRUSTED_SIDS, observer_sid}:
+                continue
+            if sid == operator_sid:
+                if mask & (0xD0000 | 0x10000000 | 0x40000000 | 4):
+                    deny()
+                continue
+            deny()
+    _protected_dacl(handle, 1, handle=True)
+
+
+def _check_admin_token():
+    """Require an elevated primary administrator token with no thread impersonation."""
+    auth.windows_only()
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    ptr = ctypes.c_void_p
+    close = _api(kernel, "CloseHandle", [wt.HANDLE], wt.BOOL)
+    free = _api(kernel, "LocalFree", [ptr], ptr)
+    thread = _api(kernel, "GetCurrentThread", [], wt.HANDLE)()
+    imp_token = wt.HANDLE()
+    if _api(adv, "OpenThreadToken", [wt.HANDLE, wt.DWORD, wt.BOOL, ctypes.POINTER(wt.HANDLE)], wt.BOOL)(
+            thread, 8, True, ctypes.byref(imp_token)):
+        close(imp_token)
+        deny()
+    if ctypes.get_last_error() != 1008:
+        deny()
+    process = _api(kernel, "GetCurrentProcess", [], wt.HANDLE)()
+    token = wt.HANDLE()
+    admin_sid = ptr()
+    try:
+        if not _api(adv, "OpenProcessToken", [wt.HANDLE, wt.DWORD, ctypes.POINTER(wt.HANDLE)], wt.BOOL)(
+                process, 8, ctypes.byref(token)):
+            deny()
+        get = _api(adv, "GetTokenInformation", [wt.HANDLE, ctypes.c_int, ptr, wt.DWORD, ctypes.POINTER(wt.DWORD)], wt.BOOL)
+        token_type, elevation, needed = wt.DWORD(), wt.DWORD(), wt.DWORD()
+        if (not get(token, 8, ctypes.byref(token_type), ctypes.sizeof(token_type), ctypes.byref(needed))
+                or needed.value != ctypes.sizeof(token_type) or token_type.value != 1):
+            deny()
+        if (not get(token, 20, ctypes.byref(elevation), ctypes.sizeof(elevation), ctypes.byref(needed))
+                or needed.value != ctypes.sizeof(elevation) or not elevation.value):
+            deny()
+        if not _api(adv, "ConvertStringSidToSidW", [wt.LPCWSTR, ctypes.POINTER(ptr)], wt.BOOL)(
+                "S-1-5-32-544", ctypes.byref(admin_sid)):
+            deny()
+        is_member = wt.BOOL()
+        if (not _api(adv, "CheckTokenMembership", [wt.HANDLE, ptr, ctypes.POINTER(wt.BOOL)], wt.BOOL)(
+                None, admin_sid, ctypes.byref(is_member)) or not is_member.value):
+            deny()
+    finally:
+        if admin_sid:
+            free(admin_sid)
+        if token:
+            close(token)
+
+
+def sign_with_enrolled_key(transcript: bytes, *, key_path: Path, verifier_path: Path,
+                           signers_path: Path, identity: str, namespace: str,
+                           expected_body: dict, timeout: float = 4.0) -> bytes:
+    """Sign an exact verified transcript with an ALREADY-ENROLLED private key.
+
+    Never generates private keys, never invokes a shell, and never returns key
+    material. Immediately verifies the resulting signature against the pinned
+    public signers file and exact domain namespace before returning.
+    """
+    if (type(transcript) is not bytes or not 0 < len(transcript) <= 65536
+            or type(expected_body) is not dict or transcript != auth.signing_bytes(expected_body)
+            or type(identity) is not str or not identity
+            or type(namespace) is not str or not namespace
+            or type(timeout) not in (int, float) or not math.isfinite(timeout)
+            or not 0 < timeout <= 5.0):
+        deny()
+    key_file, exe_file, signers_file = Path(key_path), Path(verifier_path), Path(signers_path)
+    allowed_verifiers = ("ssh-keygen.exe",) if os.name == "nt" else ("ssh-keygen.exe", "ssh-keygen")
+    if exe_file.name.casefold() not in allowed_verifiers:
+        deny()
+    try:
+        with tempfile.TemporaryDirectory(prefix="wakehub-g3-sign-") as folder:
+            payload = Path(folder) / "transcript.bin"
+            payload.write_bytes(transcript)
+            proc = subprocess.run(
+                [str(exe_file), "-Y", "sign", "-f", str(key_file), "-n", namespace, str(payload)],
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout,
+                check=False, env=child_environment(),
+            )
+            if proc.returncode != 0:
+                deny()
+            sig_file = Path(str(payload) + ".sig")
+            if not sig_file.is_file():
+                deny()
+            sig_bytes = sig_file.read_bytes()
+        if not 20 <= len(sig_bytes) <= 12288:
+            deny()
+        sig_b64 = base64.b64encode(sig_bytes).decode("ascii")
+        auth.verify_signature(auth.signing_payload(expected_body), sig_b64,
+                              signers_file, identity, namespace, exe_file)
+        return canonical(dict(body=expected_body, signature=sig_b64))
+    except Exception:
+        deny()
+
+
+def _write_protected_anchor_value(subkey: str, value_name: str, payload: dict) -> bytes:
+    """Atomically write one allowlisted REG_SZ value into an admin-protected HKLM key."""
+    auth.windows_only()
+    _check_admin_token()
+    if (subkey, value_name) not in _ALLOWED_ANCHOR_WRITES or type(payload) is not dict:
+        deny()
+    raw = canonical(payload)
+    if not 0 < len(raw) <= 32768:
+        deny()
+    import winreg
+    for suffix in (r"SOFTWARE", r"SOFTWARE\AI-Commerce", subkey):
+        WindowsPathCustody.check_descriptor(*WindowsPathCustody._descriptor("MACHINE\\" + suffix, 4), OS_TRUSTED_SIDS)
+    _protected_dacl("MACHINE\\" + subkey, 4)
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, subkey, 0,
+                        winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE | winreg.KEY_WOW64_64KEY) as key:
+        winreg.SetValueEx(key, value_name, 0, winreg.REG_SZ, raw.decode("ascii"))
+        winreg.FlushKey(key)
+    for suffix in (r"SOFTWARE", r"SOFTWARE\AI-Commerce", subkey):
+        WindowsPathCustody.check_descriptor(*WindowsPathCustody._descriptor("MACHINE\\" + suffix, 4), OS_TRUSTED_SIDS)
+    _protected_dacl("MACHINE\\" + subkey, 4)
+    return raw
