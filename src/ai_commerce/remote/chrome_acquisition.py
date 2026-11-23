@@ -4227,20 +4227,64 @@ $receipt | ConvertTo-Json -Compress
 _CLEAN_9444_FORENSIC_READ_SCRIPT = "$readRollbackCustody = $true\n" + _CLEAN_9444_TASK_RECONCILE_SCRIPT
 
 
-_CLEAN_9444_TASK_RESET = _CLEAN_9444_RECONCILE_INSPECTION + r"""
+_CLEAN_9444_TASK_RESET = _CLEAN_9444_TASK_INSPECTION + r"""
 function Test-ResetIdle($task) {
-    (Test-Ready $task) -or (!$task.Enabled -and $task.State -eq 1 -and $task.GetInstances(0).Count -eq 0)
+    $idleState = if ($task.Enabled) { 3 } else { 1 }
+    if ($task.Enabled -isnot [bool] -or $task.State -ne $idleState) {
+        return $false
+    }
+    $instances = $task.GetInstances(0)
+    return $null -ne $instances -and $instances.Count -is [int] -and $instances.Count -eq 0
 }
 
-function Get-ResetImage($task, $taskName) {
-    if (!$task) { return 'ABSENT' }
+function Get-ResetImage($task) {
+    if ($task.Name -cne $name -or $task.Path -cne ('\' + $name)) {
+        throw 'AUTOSTART_CONFLICT'
+    }
     $xml = [string]$task.Xml
     $acl = [string]$task.GetSecurityDescriptor(7)
-    if ($task.Name -cne $taskName -or $task.Path -cne ('\' + $taskName) -or
-        !$xml -or $xml.Length -gt 65536 -or !$acl -or $acl.Length -gt 2048) {
-        throw 'Unverified task image'
+    if (!$xml -or $xml.Length -gt 65536 -or !$acl -or $acl.Length -gt 2048) {
+        throw 'AUTOSTART_CONFLICT'
+    }
+    try { $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($acl) }
+    catch { throw 'AUTOSTART_CONFLICT' }
+    # The old DACL and action can drift. Verify custody before preserving the image.
+    if (!$descriptor.Owner -or $descriptor.Owner.Value -cne $sid -or
+        !(Test-Owner $task.Definition.Principal.UserId)) {
+        throw 'AUTOSTART_CONFLICT'
     }
     ConvertTo-Json -Compress -InputObject ([ordered]@{ Xml = $xml; SecurityDescriptor = $acl })
+}
+
+function Get-ResetSnapshot($task) {
+    if ($folder.Path -cne '\') { throw 'AUTOSTART_CONFLICT' }
+    $image = if ($task) { Get-ResetImage $task }
+    $matched = $false
+    $folders = [Collections.Generic.Stack[object]]::new()
+    $folders.Push($folder)
+    while ($folders.Count) {
+        $currentFolder = $folders.Pop()
+        foreach ($candidate in @($currentFolder.GetTasks(1))) {
+            if (!$candidate) { continue }
+            $candidateName = [string]$candidate.Name
+            if (!$candidateName) { throw 'AUTOSTART_CONFLICT' }
+            if ($candidateName -match '(?i)(WakeHub.*9444|9444.*WakeHub|AI-Commerce-WakeHub)') {
+                if ($matched -or !$task -or $currentFolder.Path -cne '\' -or
+                    (Get-ResetImage $candidate) -cne $image) { throw 'AUTOSTART_CONFLICT' }
+                $matched = $true
+            } elseif ($candidateName -like 'AI-Commerce-*' -and $candidateName -ine 'AI-Commerce-D5-CDP-AtLogon') {
+                $otherXml = [string]$candidate.Xml
+                if (!$otherXml -or $otherXml -match '(?i)(WakeHub-9444-Clean|--remote-debugging-port\s*[=:]\s*9444)') {
+                    throw 'AUTOSTART_CONFLICT'
+                }
+            }
+        }
+        foreach ($sub in @($currentFolder.GetFolders(0))) {
+            if ($sub) { $folders.Push($sub) }
+        }
+    }
+    if ($task -and !$matched) { throw 'AUTOSTART_CONFLICT' }
+    return $image
 }
 
 function Test-ResetOwnerContext {
@@ -4248,10 +4292,25 @@ function Test-ResetOwnerContext {
         [Diagnostics.Process]::GetCurrentProcess().SessionId -eq $session
 }
 
+function Get-ResetAutostartMarker($state) {
+    if (!$state) { return $false }
+    $markers = $state.GetValueNames()
+    if ('LaunchPending' -in $markers) { throw 'UNKNOWN_EFFECT' }
+    if ('AutostartPending' -notin $markers) { return $false }
+    if ($state.GetValueKind('AutostartPending') -ne [Microsoft.Win32.RegistryValueKind]::DWord -or
+        $state.GetValue('AutostartPending') -ne 1) { throw 'UNKNOWN_EFFECT' }
+    return $true
+}
+
+function Read-ResetAutostartMarker {
+    $state = Open-MigrationState $false
+    try { Get-ResetAutostartMarker $state }
+    finally { if ($state) { $state.Dispose() } }
+}
+
 $key = $null
 $prior = $null
 $effectPossible = $false
-$d5Name = 'AI-Commerce-D5-CDP-AtLogon'
 $resetKey = $env:AI_COMMERCE_TASK_REGISTRY + '-TaskReset'
 try {
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($resetKey, $true)
@@ -4260,64 +4319,19 @@ try {
         $key.GetValueKind('Backup') -ne [Microsoft.Win32.RegistryValueKind]::String)) {
         'UNKNOWN_EFFECT'; exit
     }
-    if ($folder.Path -cne '\' -or !(Test-DemandRuntime) -or
-        !(Test-TrustedPowerShell $env:AI_COMMERCE_TASK_POWERSHELL)) {
+    if (!(Test-ResetOwnerContext)) { 'WINDOWS_OWNER_CONTEXT_UNVERIFIED'; exit }
+    if (!(Test-DemandRuntime) -or !(Test-TrustedPowerShell $env:AI_COMMERCE_TASK_POWERSHELL)) {
         'AUTOSTART_RUNTIME_UNAVAILABLE'; exit
     }
-    foreach ($item in (Get-ReconcileRelevantTasks)) {
-        $candidate = [string]$item.Task.Name
-        if ($candidate -match '(?i)(WakeHub.*9444|9444.*WakeHub|AI-Commerce-WakeHub|AI-Commerce-D5-CDP|D5-CDP-AtLogon)' -and
-            (!$item.Root -or $candidate -cnotin @($name, $d5Name))) {
-            'AUTOSTART_CONFLICT'; exit
-        }
-    }
-    $prior = Open-MigrationState $true
-    $markers = if ($prior) { $prior.GetValueNames() }
-    if ('LaunchPending' -in $markers) { 'UNKNOWN_EFFECT'; exit }
-    $hadAutostart = 'AutostartPending' -in $markers
-    if ($hadAutostart -and ($prior.GetValueKind('AutostartPending') -ne [Microsoft.Win32.RegistryValueKind]::DWord -or
-            $prior.GetValue('AutostartPending') -ne 1)) { 'UNKNOWN_EFFECT'; exit }
-    $wakeBefore = Get-ResetImage $registered $name
-    $wakeReady = $registered -and (Test-Registration $registered) -and (Test-Ready $registered)
-    if ($registered -and !$wakeReady) {
-        if (!(Test-ResetIdle $registered)) { 'TASK_RESET_NOT_READY'; exit }
-        if ((Get-ReconcileRegistrationBaseStatus $registered $true) -cne 'OK') { 'AUTOSTART_CONFLICT'; exit }
-        $status = if ($registered.Definition.Triggers.Count -eq 0) {
-            Get-ReconcileDemandActionStatus $registered
-        } else {
-            Get-ReconcileLegacyStatus $registered
-        }
-        if ($status -cne 'OK') { 'AUTOSTART_CONFLICT'; exit }
-    }
-
-    $d5 = Read-Registration $d5Name
-    $d5Before = Get-ResetImage $d5 $d5Name
-    $d5Replacement = $null
-    if ($d5) {
-        $d5Enabled = $d5.Enabled
-        $allowDisabled = !$d5Enabled -and (Test-ResetIdle $d5)
-        $attestation = Get-D5AttestationResult $d5 $allowDisabled
-        if (!$attestation.ok) {
-            $pwsh = $env:AI_COMMERCE_TASK_POWERSHELL
-            $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($pwsh)
-            if ($attestation.reason -cne 'UNVERIFIED_EXE_PATH' -or !(Test-ResetIdle $d5) -or
-                $version.FileMajorPart -ne 7 -or $version.FileMinorPart -ne 7) {
-                'TASK_RESET_D5_UNVERIFIED'; exit
-            }
-            $replacementAttestation = Get-D5AttestationResult $d5 $allowDisabled $pwsh
-            if (!$replacementAttestation.ok) {
-                'TASK_RESET_D5_UNVERIFIED'; exit
-            }
-            $d5Replacement = $d5.Definition
-            $d5Replacement.Actions.Item(1).Path = $pwsh
-        }
-    }
-    if (!(Test-ResetOwnerContext)) { 'WINDOWS_OWNER_CONTEXT_UNVERIFIED'; exit }
-    if ($wakeReady -and !$d5Replacement -and !$hadAutostart) {
+    $hadAutostart = Read-ResetAutostartMarker
+    $wakeBefore = Get-ResetSnapshot $registered
+    if (!$registered -or !(Test-ResetIdle $registered)) { 'TASK_RESET_NOT_READY'; exit }
+    $wakeReady = Test-Registration $registered
+    if ($wakeReady -and !$hadAutostart) {
         $current = Read-Registration
-        if ((Get-ResetImage $current $name) -cne $wakeBefore -or !(Test-Ready $current) -or
-            (Get-ResetImage (Read-Registration $d5Name) $d5Name) -cne $d5Before -or
-            ($prior -and 'LaunchPending' -in $prior.GetValueNames())) {
+        if ((Get-ResetSnapshot $current) -cne $wakeBefore -or !(Test-Registration $current) -or
+            !(Test-ResetIdle $current) -or
+            (Read-ResetAutostartMarker) -or !(Test-ResetOwnerContext)) {
             'TASK_RESET_DRIFT'; exit
         }
         'TASK_RESET_ALREADY_READY'; exit
@@ -4327,61 +4341,43 @@ try {
     $effectPossible = $true
     $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($resetKey)
     if ($key.GetValueNames().Count -ne 0) { 'UNKNOWN_EFFECT'; exit }
-    $backup = @{ WakeHub = $wakeBefore; D5 = $d5Before; AutostartPending = $hadAutostart } | ConvertTo-Json -Compress
+    $backup = @{ WakeHub = $wakeBefore; AutostartPending = $hadAutostart } | ConvertTo-Json -Compress
     $key.SetValue('Backup', $backup, [Microsoft.Win32.RegistryValueKind]::String)
     $key.Flush()
     $current = Read-Registration
-    $currentD5 = Read-Registration $d5Name
-    if (!(Test-ResetOwnerContext) -or (Get-ResetImage $current $name) -cne $wakeBefore -or
-        (Get-ResetImage $currentD5 $d5Name) -cne $d5Before -or
-        ($prior -and 'LaunchPending' -in $prior.GetValueNames()) -or
-        ($current -and !(Test-ResetIdle $current)) -or ($d5Replacement -and !(Test-ResetIdle $currentD5))) {
+    if ($key.GetValueKind('Backup') -ne [Microsoft.Win32.RegistryValueKind]::String -or
+        $key.GetValue('Backup') -cne $backup -or (Read-ResetAutostartMarker) -ne $hadAutostart -or
+        (Get-ResetSnapshot $current) -cne $wakeBefore -or !(Test-ResetIdle $current) -or
+        !(Test-ResetOwnerContext)) {
         'UNKNOWN_EFFECT'; exit
     }
     if (!$wakeReady) {
-        if ($current) {
-            $folder.DeleteTask($name, 0)
-            if (Read-Registration) { 'UNKNOWN_EFFECT'; exit }
-        }
+        $folder.DeleteTask($name, 0)
+        if ((Read-Registration) -or !(Test-ResetOwnerContext) -or
+            (Read-ResetAutostartMarker) -ne $hadAutostart) { 'UNKNOWN_EFFECT'; exit }
         # TASK_CREATE | TASK_IGNORE_REGISTRATION_TRIGGERS.
         $null = $folder.RegisterTaskDefinition($name, $expected, 34, $sid, $null, 3, $sddl)
     }
-    if ($d5Replacement) {
-        $currentD5 = Read-Registration $d5Name
-        if (!(Test-ResetOwnerContext) -or (Get-ResetImage $currentD5 $d5Name) -cne $d5Before -or
-            !(Test-ResetIdle $currentD5) -or
-            (Get-D5AttestationResult $currentD5 $allowDisabled $pwsh).value -cne $replacementAttestation.value) {
-            'UNKNOWN_EFFECT'; exit
-        }
-        $d5Acl = $currentD5.GetSecurityDescriptor(7)
-        # TASK_UPDATE | TASK_DONT_ADD_PRINCIPAL_ACE | TASK_IGNORE_REGISTRATION_TRIGGERS.
-        $null = $folder.RegisterTaskDefinition($d5Name, $d5Replacement, 52, $sid, $null, 3, $d5Acl)
-        $d5After = Read-Registration $d5Name
-        if (!$d5After -or $d5After.Path -cne ('\' + $d5Name) -or
-            (Get-D5AttestationResult $d5After $allowDisabled).value -cne $replacementAttestation.value -or
-            $d5After.Enabled -ne $d5Enabled -or $d5After.GetSecurityDescriptor(7) -cne $d5Acl -or
-            $d5After.Definition.XmlText -cne $d5Replacement.XmlText) { 'UNKNOWN_EFFECT'; exit }
-    } elseif ((Get-ResetImage (Read-Registration $d5Name) $d5Name) -cne $d5Before) {
-        'UNKNOWN_EFFECT'; exit
-    }
     $after = Read-Registration
-    if (!(Test-ResetOwnerContext) -or !(Test-Registration $after) -or !(Test-Ready $after) -or
-        ($prior -and 'LaunchPending' -in $prior.GetValueNames()) -or
-        $after.Path -cne ('\' + $name)) { 'UNKNOWN_EFFECT'; exit }
+    if (!(Get-ResetSnapshot $after) -or !(Test-Registration $after) -or !(Test-ResetIdle $after) -or
+        !(Test-ResetOwnerContext)) { 'UNKNOWN_EFFECT'; exit }
 
     # Retire the stale install marker only after readback and private backup.
     # The original demand migration journal and Issue #1270 are historical evidence.
+    $prior = Open-MigrationState $hadAutostart
+    if ((Get-ResetAutostartMarker $prior) -ne $hadAutostart) { 'UNKNOWN_EFFECT'; exit }
     if ($hadAutostart) {
-        if ($prior.GetValue('AutostartPending') -ne 1) { 'UNKNOWN_EFFECT'; exit }
         $prior.DeleteValue('AutostartPending')
         $prior.Flush()
-        if ('AutostartPending' -in $prior.GetValueNames()) { 'UNKNOWN_EFFECT'; exit }
     }
+    if ((Read-ResetAutostartMarker) -or !(Test-ResetOwnerContext)) { 'UNKNOWN_EFFECT'; exit }
     $key.SetValue('Complete', 1, [Microsoft.Win32.RegistryValueKind]::DWord)
     $key.Flush()
-    'TASK_RESET_VERIFIED'
+    if ($wakeReady) { 'TASK_RESET_ALREADY_READY' } else { 'TASK_RESET_VERIFIED' }
 } catch {
-    if ($effectPossible) { 'UNKNOWN_EFFECT' } else { 'AUTOSTART_RUNTIME_UNAVAILABLE' }
+    if ($effectPossible -or $_.Exception.Message -ceq 'UNKNOWN_EFFECT') { 'UNKNOWN_EFFECT' }
+    elseif ($_.Exception.Message -ceq 'AUTOSTART_CONFLICT') { 'AUTOSTART_CONFLICT' }
+    else { 'AUTOSTART_RUNTIME_UNAVAILABLE' }
 } finally {
     if ($prior) { $prior.Dispose() }
     if ($key) { $key.Dispose() }
@@ -4556,7 +4552,7 @@ def _clean_task(owner: tuple[Path, int, str], target: _ChromeTarget,
         powershell = _powershell()
         trusted = None
     child_env = _clean_task_environment(owner, target, candidates, powershell,
-                                        trusted=trusted, include_legacy=migrate or reset)
+                                        trusted=trusted, include_legacy=migrate)
     child_env.update(AI_COMMERCE_TASK_START_SESSION=str(owner[1]) if start else "",
                      AI_COMMERCE_TASK_INSTALL="1" if install else "0")
     if reset:
