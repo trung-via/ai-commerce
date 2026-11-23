@@ -3311,7 +3311,7 @@ function Get-AttestedD5PowerShellAction($pwshPath, $argsLine, $workDir, $aiRoot,
     return $null
 }
 
-function Get-D5AttestationResult($d5, [bool]$allowDisabled = $false) {
+function Get-D5AttestationResult($d5, [bool]$allowDisabled = $false, $replacementPowerShell = $null) {
     try {
         if (!$d5 -or (!$allowDisabled -and !$d5.Enabled) -or $d5.Name -cne 'AI-Commerce-D5-CDP-AtLogon') {
             return @{ ok = $false; reason = 'UNVERIFIED_BASE' }
@@ -3398,6 +3398,17 @@ function Get-D5AttestationResult($d5, [bool]$allowDisabled = $false) {
         }
         if ($rawPath -in $trustedPowerShellPaths) {
             return Get-AttestedD5PowerShellActionResult $rawPath ([string]$a.Arguments) $d5Work $aiRoot $cleanProfile $d5FileOwners
+        }
+        if ($replacementPowerShell) {
+            # Accept only a former native Program Files PowerShell executable.
+            # All existing principal, ACL, trigger, profile and script checks still apply.
+            $installRoot = [IO.Path]::GetDirectoryName([IO.Path]::GetDirectoryName($replacementPowerShell))
+            $pattern = '^' + [regex]::Escape($installRoot) + '\\7(?:\.[0-9]+){0,2}\\pwsh\.exe$'
+            $legacyDir = $env:AI_COMMERCE_TASK_HISTORICAL_WORKDIR
+            if ($rawPath -imatch $pattern -or
+                ($legacyDir -and $rawPath -ieq [IO.Path]::Combine($legacyDir, 'powershell.exe'))) {
+                return Get-AttestedD5PowerShellActionResult $replacementPowerShell ([string]$a.Arguments) $d5Work $aiRoot $cleanProfile $d5FileOwners
+            }
         }
         return @{ ok = $false; reason = 'UNVERIFIED_EXE_PATH' }
     } catch { return @{ ok = $false; reason = 'UNVERIFIED' } }
@@ -3497,16 +3508,23 @@ try {
 """
 
 
-_CLEAN_9444_TASK_RECONCILE_SCRIPT = _CLEAN_9444_TASK_INSPECTION + _CLEAN_9444_D5_ATTESTATION + r"""
-function Get-ReconcileRegistrationBaseStatus($reg) {
+_CLEAN_9444_RECONCILE_INSPECTION = _CLEAN_9444_TASK_INSPECTION + _CLEAN_9444_D5_ATTESTATION + r"""
+function Get-ReconcileRegistrationBaseStatus($reg, [bool]$allowOwnedAcl = $false) {
     if (!$reg) { return 'CONFLICT' }
     try {
         $acl = [Security.AccessControl.RawSecurityDescriptor]::new($reg.GetSecurityDescriptor(7))
         $want = [Security.AccessControl.RawSecurityDescriptor]::new($sddl)
         if (!$acl.Owner) { return 'SD_UNVERIFIED' }
         if ($acl.Owner.Value -cne $sid) { return 'CONFLICT_BASE_OWNER' }
-        if ($null -eq $acl.DiscretionaryAcl -or $acl.GetSddlForm('Access') -cne $want.GetSddlForm('Access')) {
-            return 'CONFLICT_BASE_ACL'
+        if ($null -eq $acl.DiscretionaryAcl) { return 'CONFLICT_BASE_ACL' }
+        if ($acl.GetSddlForm('Access') -cne $want.GetSddlForm('Access')) {
+            if (!$allowOwnedAcl -or !$acl.DiscretionaryAcl.Count) { return 'CONFLICT_BASE_ACL' }
+            foreach ($ace in $acl.DiscretionaryAcl) {
+                if ($ace -isnot [Security.AccessControl.CommonAce] -or
+                    $ace.SecurityIdentifier.Value -cnotin @($sid, 'S-1-5-18', 'S-1-5-32-544')) {
+                    return 'CONFLICT_BASE_ACL'
+                }
+            }
         }
     } catch {
         return 'SD_UNVERIFIED'
@@ -4077,7 +4095,10 @@ function Get-ReconcileRelevantTasks {
     }
     return ,$all.ToArray()
 }
+"""
 
+
+_CLEAN_9444_TASK_RECONCILE_SCRIPT = _CLEAN_9444_RECONCILE_INSPECTION + r"""
 $taskState = 'UNAVAILABLE'
 $d5State = 'UNVERIFIED'
 $backupState = 'NO_TRUSTED_1270_CUSTODY'
@@ -4204,6 +4225,168 @@ $receipt | ConvertTo-Json -Compress
 """
 
 _CLEAN_9444_FORENSIC_READ_SCRIPT = "$readRollbackCustody = $true\n" + _CLEAN_9444_TASK_RECONCILE_SCRIPT
+
+
+_CLEAN_9444_TASK_RESET = _CLEAN_9444_RECONCILE_INSPECTION + r"""
+function Test-ResetIdle($task) {
+    (Test-Ready $task) -or (!$task.Enabled -and $task.State -eq 1 -and $task.GetInstances(0).Count -eq 0)
+}
+
+function Get-ResetImage($task, $taskName) {
+    if (!$task) { return 'ABSENT' }
+    $xml = [string]$task.Xml
+    $acl = [string]$task.GetSecurityDescriptor(7)
+    if ($task.Name -cne $taskName -or $task.Path -cne ('\' + $taskName) -or
+        !$xml -or $xml.Length -gt 65536 -or !$acl -or $acl.Length -gt 2048) {
+        throw 'Unverified task image'
+    }
+    ConvertTo-Json -Compress -InputObject ([ordered]@{ Xml = $xml; SecurityDescriptor = $acl })
+}
+
+function Test-ResetOwnerContext {
+    [Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ceq $sid -and
+        [Diagnostics.Process]::GetCurrentProcess().SessionId -eq $session
+}
+
+$key = $null
+$prior = $null
+$effectPossible = $false
+$d5Name = 'AI-Commerce-D5-CDP-AtLogon'
+$resetKey = $env:AI_COMMERCE_TASK_REGISTRY + '-TaskReset'
+try {
+    $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($resetKey, $true)
+    if ($key -and ($key.GetValue('Complete') -ne 1 -or !$key.GetValue('Backup') -or
+        $key.GetValueKind('Complete') -ne [Microsoft.Win32.RegistryValueKind]::DWord -or
+        $key.GetValueKind('Backup') -ne [Microsoft.Win32.RegistryValueKind]::String)) {
+        'UNKNOWN_EFFECT'; exit
+    }
+    if ($folder.Path -cne '\' -or !(Test-DemandRuntime) -or
+        !(Test-TrustedPowerShell $env:AI_COMMERCE_TASK_POWERSHELL)) {
+        'AUTOSTART_RUNTIME_UNAVAILABLE'; exit
+    }
+    foreach ($item in (Get-ReconcileRelevantTasks)) {
+        $candidate = [string]$item.Task.Name
+        if ($candidate -match '(?i)(WakeHub.*9444|9444.*WakeHub|AI-Commerce-WakeHub|AI-Commerce-D5-CDP|D5-CDP-AtLogon)' -and
+            (!$item.Root -or $candidate -cnotin @($name, $d5Name))) {
+            'AUTOSTART_CONFLICT'; exit
+        }
+    }
+    $prior = Open-MigrationState $true
+    $markers = if ($prior) { $prior.GetValueNames() }
+    if ('LaunchPending' -in $markers) { 'UNKNOWN_EFFECT'; exit }
+    $hadAutostart = 'AutostartPending' -in $markers
+    if ($hadAutostart -and ($prior.GetValueKind('AutostartPending') -ne [Microsoft.Win32.RegistryValueKind]::DWord -or
+            $prior.GetValue('AutostartPending') -ne 1)) { 'UNKNOWN_EFFECT'; exit }
+    $wakeBefore = Get-ResetImage $registered $name
+    $wakeReady = $registered -and (Test-Registration $registered) -and (Test-Ready $registered)
+    if ($registered -and !$wakeReady) {
+        if (!(Test-ResetIdle $registered)) { 'TASK_RESET_NOT_READY'; exit }
+        if ((Get-ReconcileRegistrationBaseStatus $registered $true) -cne 'OK') { 'AUTOSTART_CONFLICT'; exit }
+        $status = if ($registered.Definition.Triggers.Count -eq 0) {
+            Get-ReconcileDemandActionStatus $registered
+        } else {
+            Get-ReconcileLegacyStatus $registered
+        }
+        if ($status -cne 'OK') { 'AUTOSTART_CONFLICT'; exit }
+    }
+
+    $d5 = Read-Registration $d5Name
+    $d5Before = Get-ResetImage $d5 $d5Name
+    $d5Replacement = $null
+    if ($d5) {
+        $d5Enabled = $d5.Enabled
+        $allowDisabled = !$d5Enabled -and (Test-ResetIdle $d5)
+        $attestation = Get-D5AttestationResult $d5 $allowDisabled
+        if (!$attestation.ok) {
+            $pwsh = $env:AI_COMMERCE_TASK_POWERSHELL
+            $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($pwsh)
+            if ($attestation.reason -cne 'UNVERIFIED_EXE_PATH' -or !(Test-ResetIdle $d5) -or
+                $version.FileMajorPart -ne 7 -or $version.FileMinorPart -ne 7) {
+                'TASK_RESET_D5_UNVERIFIED'; exit
+            }
+            $replacementAttestation = Get-D5AttestationResult $d5 $allowDisabled $pwsh
+            if (!$replacementAttestation.ok) {
+                'TASK_RESET_D5_UNVERIFIED'; exit
+            }
+            $d5Replacement = $d5.Definition
+            $d5Replacement.Actions.Item(1).Path = $pwsh
+        }
+    }
+    if (!(Test-ResetOwnerContext)) { 'WINDOWS_OWNER_CONTEXT_UNVERIFIED'; exit }
+    if ($wakeReady -and !$d5Replacement -and !$hadAutostart) {
+        $current = Read-Registration
+        if ((Get-ResetImage $current $name) -cne $wakeBefore -or !(Test-Ready $current) -or
+            (Get-ResetImage (Read-Registration $d5Name) $d5Name) -cne $d5Before -or
+            ($prior -and 'LaunchPending' -in $prior.GetValueNames())) {
+            'TASK_RESET_DRIFT'; exit
+        }
+        'TASK_RESET_ALREADY_READY'; exit
+    }
+    if ($key) { 'TASK_RESET_DRIFT'; exit }
+
+    $effectPossible = $true
+    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($resetKey)
+    if ($key.GetValueNames().Count -ne 0) { 'UNKNOWN_EFFECT'; exit }
+    $backup = @{ WakeHub = $wakeBefore; D5 = $d5Before; AutostartPending = $hadAutostart } | ConvertTo-Json -Compress
+    $key.SetValue('Backup', $backup, [Microsoft.Win32.RegistryValueKind]::String)
+    $key.Flush()
+    $current = Read-Registration
+    $currentD5 = Read-Registration $d5Name
+    if (!(Test-ResetOwnerContext) -or (Get-ResetImage $current $name) -cne $wakeBefore -or
+        (Get-ResetImage $currentD5 $d5Name) -cne $d5Before -or
+        ($prior -and 'LaunchPending' -in $prior.GetValueNames()) -or
+        ($current -and !(Test-ResetIdle $current)) -or ($d5Replacement -and !(Test-ResetIdle $currentD5))) {
+        'UNKNOWN_EFFECT'; exit
+    }
+    if (!$wakeReady) {
+        if ($current) {
+            $folder.DeleteTask($name, 0)
+            if (Read-Registration) { 'UNKNOWN_EFFECT'; exit }
+        }
+        # TASK_CREATE | TASK_IGNORE_REGISTRATION_TRIGGERS.
+        $null = $folder.RegisterTaskDefinition($name, $expected, 34, $sid, $null, 3, $sddl)
+    }
+    if ($d5Replacement) {
+        $currentD5 = Read-Registration $d5Name
+        if (!(Test-ResetOwnerContext) -or (Get-ResetImage $currentD5 $d5Name) -cne $d5Before -or
+            !(Test-ResetIdle $currentD5) -or
+            (Get-D5AttestationResult $currentD5 $allowDisabled $pwsh).value -cne $replacementAttestation.value) {
+            'UNKNOWN_EFFECT'; exit
+        }
+        $d5Acl = $currentD5.GetSecurityDescriptor(7)
+        # TASK_UPDATE | TASK_DONT_ADD_PRINCIPAL_ACE | TASK_IGNORE_REGISTRATION_TRIGGERS.
+        $null = $folder.RegisterTaskDefinition($d5Name, $d5Replacement, 52, $sid, $null, 3, $d5Acl)
+        $d5After = Read-Registration $d5Name
+        if (!$d5After -or $d5After.Path -cne ('\' + $d5Name) -or
+            (Get-D5AttestationResult $d5After $allowDisabled).value -cne $replacementAttestation.value -or
+            $d5After.Enabled -ne $d5Enabled -or $d5After.GetSecurityDescriptor(7) -cne $d5Acl -or
+            $d5After.Definition.XmlText -cne $d5Replacement.XmlText) { 'UNKNOWN_EFFECT'; exit }
+    } elseif ((Get-ResetImage (Read-Registration $d5Name) $d5Name) -cne $d5Before) {
+        'UNKNOWN_EFFECT'; exit
+    }
+    $after = Read-Registration
+    if (!(Test-ResetOwnerContext) -or !(Test-Registration $after) -or !(Test-Ready $after) -or
+        ($prior -and 'LaunchPending' -in $prior.GetValueNames()) -or
+        $after.Path -cne ('\' + $name)) { 'UNKNOWN_EFFECT'; exit }
+
+    # Retire the stale install marker only after readback and private backup.
+    # The original demand migration journal and Issue #1270 are historical evidence.
+    if ($hadAutostart) {
+        if ($prior.GetValue('AutostartPending') -ne 1) { 'UNKNOWN_EFFECT'; exit }
+        $prior.DeleteValue('AutostartPending')
+        $prior.Flush()
+        if ('AutostartPending' -in $prior.GetValueNames()) { 'UNKNOWN_EFFECT'; exit }
+    }
+    $key.SetValue('Complete', 1, [Microsoft.Win32.RegistryValueKind]::DWord)
+    $key.Flush()
+    'TASK_RESET_VERIFIED'
+} catch {
+    if ($effectPossible) { 'UNKNOWN_EFFECT' } else { 'AUTOSTART_RUNTIME_UNAVAILABLE' }
+} finally {
+    if ($prior) { $prior.Dispose() }
+    if ($key) { $key.Dispose() }
+}
+"""
 
 
 def _clean_task_environment(owner: tuple[Path, int, str], target: _ChromeTarget,
@@ -4351,11 +4534,20 @@ def _clean_reconcile_read(owner: tuple[Path, int, str], target: _ChromeTarget,
 
 def _clean_task(owner: tuple[Path, int, str], target: _ChromeTarget,
                 candidates: tuple[Path, ...], *, install: bool, start: bool = False,
-                migrate: bool = False) -> str:
+                migrate: bool = False, reset: bool = False) -> str:
     """Operate on the fixed owner task using an exact native definition."""
-    if sum((install, start, migrate)) > 1:
+    if sum((install, start, migrate, reset)) > 1:
         raise _Clean9444Hold("AUTOSTART_RUNTIME_UNAVAILABLE")
-    if migrate:
+    if reset:
+        trusted = _trusted_powershells()
+        # The old registration cannot select the executable for its own reset.
+        versioned = [shell for shell in trusted if re.fullmatch(r"7\.7(?:\.[0-9]+)?", shell.parent.name)]
+        stable = [shell for shell in trusted if shell.parent.name == "7"]
+        selected = versioned or stable or trusted
+        if len(selected) != 1:
+            raise AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
+        powershell = selected[0]
+    elif migrate:
         trusted = _trusted_powershells()
         powershell = _powershell()
         if powershell not in trusted:
@@ -4364,15 +4556,17 @@ def _clean_task(owner: tuple[Path, int, str], target: _ChromeTarget,
         powershell = _powershell()
         trusted = None
     child_env = _clean_task_environment(owner, target, candidates, powershell,
-                                        trusted=trusted, include_legacy=migrate)
+                                        trusted=trusted, include_legacy=migrate or reset)
     child_env.update(AI_COMMERCE_TASK_START_SESSION=str(owner[1]) if start else "",
                      AI_COMMERCE_TASK_INSTALL="1" if install else "0")
-    if migrate:
+    if reset:
+        script = _CLEAN_9444_TASK_RESET
+    elif migrate:
         script = _CLEAN_9444_TASK_MIGRATION
     else:
         script = _CLEAN_9444_TASK_SCRIPT if install or start else _CLEAN_9444_TASK_READ_SCRIPT
     try:
-        if migrate:
+        if migrate or reset:
             stdin_runner = (
                 "[Console]::InputEncoding=[Text.UTF8Encoding]::new(); "
                 "& ([ScriptBlock]::Create([Console]::In.ReadToEnd()))"
@@ -4390,7 +4584,10 @@ def _clean_task(owner: tuple[Path, int, str], target: _ChromeTarget,
         code = result.stdout.strip().decode("ascii")
         expected = {"AUTOSTART_CONFLICT", "UNKNOWN_EFFECT", "WINDOWS_OWNER_CONTEXT_UNVERIFIED",
                     "AUTOSTART_RUNTIME_UNAVAILABLE"}
-        if migrate:
+        if reset:
+            expected.update(("TASK_RESET_VERIFIED", "TASK_RESET_ALREADY_READY", "TASK_RESET_D5_UNVERIFIED",
+                             "TASK_RESET_NOT_READY", "TASK_RESET_DRIFT"))
+        elif migrate:
             expected.update(("DEMAND_MIGRATED", "DEMAND_ALREADY_READY", "AUTOSTART_NOT_ENROLLED",
                              "TASK_MIGRATION_NOT_READY", "TASK_MIGRATION_AMBIGUOUS",
                              "TASK_MIGRATION_REPLAY"))
@@ -4404,7 +4601,7 @@ def _clean_task(owner: tuple[Path, int, str], target: _ChromeTarget,
             return code
     except (OSError, subprocess.TimeoutExpired, UnicodeError):
         pass
-    return "UNKNOWN_EFFECT" if install or start or migrate else "AUTOSTART_RUNTIME_UNAVAILABLE"
+    return "UNKNOWN_EFFECT" if install or start or migrate or reset else "AUTOSTART_RUNTIME_UNAVAILABLE"
 
 
 def install_clean_9444_autostart(*, opt_in: bool = False) -> dict:

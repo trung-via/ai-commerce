@@ -3108,7 +3108,8 @@ function Get-AuthenticodeSignature($LiteralPath) {
         )
         result = subprocess.run(
             [str(real_pwsh), *ca._CLEAN_POWERSHELL_FLAGS, stdin_runner],
-            input=harness_script, capture_output=True, text=True, encoding="utf-8", env=env, timeout=15)
+            # The offline Windows harness exceeded 15 s under 12 MT-01 workers.
+            input=harness_script, capture_output=True, text=True, encoding="utf-8", env=env, timeout=45)
     finally:
         shutil.rmtree(raw_root, ignore_errors=True)
     assert result.returncode == 0 and not result.stderr, result.stderr
@@ -3941,7 +3942,8 @@ function Get-AttestedPathCustodySddl($path, $allowedOwners, $expectFile = $false
         )
         result = subprocess.run(
             [str(real_pwsh), *ca._CLEAN_POWERSHELL_FLAGS, stdin_runner],
-            input=harness_script, capture_output=True, text=True, encoding="utf-8", env=env, timeout=15,
+            # The offline Windows harness exceeded 15 s under 12 MT-01 workers.
+            input=harness_script, capture_output=True, text=True, encoding="utf-8", env=env, timeout=45,
         )
     finally:
         shutil.rmtree(raw_root, ignore_errors=True)
