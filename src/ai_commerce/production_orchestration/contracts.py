@@ -11,6 +11,12 @@ import re
 from types import MappingProxyType
 from typing import ClassVar, Literal, Self
 
+from ai_commerce.production_runtime.state_machine import (
+    AuthorityKind,
+    AuthorityReceipt,
+    VerificationContext,
+)
+
 
 class OrchestrationError(ValueError):
     """Bounded diagnostic code without source content."""
@@ -516,3 +522,162 @@ class ProductionStageDispatched(_Record):
         require(self.receipt.spec == self.spec and self.receipt.completed_sha256 == self.completed_sha256,
                 "DISPATCH_RECEIPT_BINDING")
         require(self.receipt_sha256 == self.receipt.sha256, "DISPATCH_RECEIPT_HASH_MISMATCH")
+
+
+@dataclass(frozen=True, kw_only=True)
+class BrainAuthorityVerification:
+    """Distinct, independently supplied private Brain verification context.
+
+    Never deserialized from wire JSON or model output. Constructing this
+    dataclass validates structural bindings only; the orchestrator intake seam
+    re-checks every binding, revocation, freshness, exact decision bytes, and
+    B0.1 state_machine BRAIN_ACCEPTED transition fail-closed.
+    """
+    verification_context: VerificationContext
+    verifier_ref: str
+    transport_ref: str
+    authority_class: Literal["PRIVATE_VERIFIED_TRANSPORT", "TEST_ONLY_SYNTHETIC_VERIFIER"]
+    evidence_request_sha256: str
+    receipt_sha256: str
+    receipt_file_sha256: str
+    artifact_sha256: str
+    q4_qa_sha256: str
+    journal_id: str
+    journal_position: int
+    journal_checkpoint_sha256: str
+    journal_generation: int
+    decision_bytes_sha256: str
+    revocation_checked_at: int
+    revocation_ref: str
+    revoked: bool = False
+    max_revocation_age_seconds: int = 300
+
+    @property
+    def is_test_only(self) -> bool:
+        return self.authority_class == "TEST_ONLY_SYNTHETIC_VERIFIER"
+
+    def __post_init__(self) -> None:
+        require(type(self.verification_context) is VerificationContext, "TYPED_VERIFICATION_CONTEXT_REQUIRED")
+        for value in (self.verifier_ref, self.transport_ref, self.journal_id, self.revocation_ref):
+            _text(value)
+        require(
+            type(self.authority_class) is str
+            and self.authority_class in {"PRIVATE_VERIFIED_TRANSPORT", "TEST_ONLY_SYNTHETIC_VERIFIER"},
+            "INVALID_AUTHORITY_CLASS",
+        )
+        if self.authority_class == "TEST_ONLY_SYNTHETIC_VERIFIER":
+            require(
+                self.verifier_ref.startswith("TEST_ONLY:") and self.transport_ref.startswith("TEST_ONLY:"),
+                "TEST_ONLY_VERIFIER_LABEL_REQUIRED",
+            )
+        else:
+            require(
+                not self.verifier_ref.startswith("TEST_ONLY:") and not self.transport_ref.startswith("TEST_ONLY:"),
+                "TEST_ONLY_LABEL_FORBIDDEN_ON_PRIVATE_TRANSPORT",
+            )
+        for value in (
+            self.evidence_request_sha256,
+            self.receipt_sha256,
+            self.receipt_file_sha256,
+            self.artifact_sha256,
+            self.q4_qa_sha256,
+            self.journal_checkpoint_sha256,
+            self.decision_bytes_sha256,
+        ):
+            _hash(value)
+        require(type(self.journal_position) is int and self.journal_position >= 1, "INVALID_JOURNAL_CHECKPOINT")
+        require(type(self.journal_generation) is int and self.journal_generation >= 1, "INVALID_JOURNAL_CHECKPOINT")
+        require(type(self.revoked) is bool, "INVALID_REVOCATION_FLAG")
+        require(
+            type(self.revocation_checked_at) is int and 0 <= self.revocation_checked_at <= 2**63 - 1,
+            "INVALID_REVOCATION_TIME",
+        )
+        require(
+            type(self.max_revocation_age_seconds) is int and 1 <= self.max_revocation_age_seconds <= 300,
+            "INVALID_REVOCATION_WINDOW",
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
+class BrainDecisionIntakeResult:
+    """Typed fail-closed result of W3a BrainDecision.v1 intake."""
+    status: Literal["BRAIN_ACCEPTED", "AUTHENTICATED_BRAIN_TRANSPORT_UNAVAILABLE", "HOLD"]
+    state: Literal["WAIT_BRAIN", "READY_FOR_HUMAN_RELEASE", "UNKNOWN_EFFECT", "HOLD"]
+    reason: str
+    accepted: bool = False
+    idempotent_replay: bool = False
+    journey_id: str | None = None
+    source_sha: str | None = None
+    logical_identity: str | None = None
+    evidence_request_sha256: str | None = None
+    decision_id: str | None = None
+    decision_sha256: str | None = None
+    decision_bytes_sha256: str | None = None
+    event_id: str | None = None
+    accepted_receipt_sha256: str | None = None
+    accepted_receipt_file_sha256: str | None = None
+    accepted_receipt_ref: str | None = None
+    journal_seq: int | None = None
+    pulse_journal_checkpoint: dict | None = None
+    authority_class: Literal["NONE", "PRIVATE_VERIFIED_TRANSPORT", "TEST_ONLY_SYNTHETIC_VERIFIER"] = "NONE"
+    live_private_authority_proven: bool = False
+    rights_granted: Literal[False] = False
+    provider_grant: Literal[False] = False
+    publish_authorized: Literal[False] = False
+    spend_authorized: Literal[False] = False
+    network_calls_performed: Literal[0] = 0
+    publish_calls: Literal[0] = 0
+    paid_generation_calls: Literal[0] = 0
+    human_attended_required: Literal[False] = False
+
+    def __post_init__(self) -> None:
+        require(
+            type(self.status) is str
+            and self.status in {"BRAIN_ACCEPTED", "AUTHENTICATED_BRAIN_TRANSPORT_UNAVAILABLE", "HOLD"},
+            "INVALID_BRAIN_INTAKE_STATUS",
+        )
+        require(
+            type(self.state) is str
+            and self.state in {"WAIT_BRAIN", "READY_FOR_HUMAN_RELEASE", "UNKNOWN_EFFECT", "HOLD"},
+            "INVALID_BRAIN_INTAKE_STATE",
+        )
+        _text(self.reason)
+        require(type(self.accepted) is bool and self.accepted is (self.status == "BRAIN_ACCEPTED"),
+                "INVALID_BRAIN_INTAKE_STATUS")
+        require(type(self.idempotent_replay) is bool, "INVALID_BRAIN_INTAKE_STATUS")
+        require(
+            type(self.authority_class) is str
+            and self.authority_class in {"NONE", "PRIVATE_VERIFIED_TRANSPORT", "TEST_ONLY_SYNTHETIC_VERIFIER"},
+            "INVALID_AUTHORITY_CLASS",
+        )
+        require(type(self.live_private_authority_proven) is bool, "INVALID_AUTHORITY_CLASS")
+        if self.accepted:
+            require(self.state == "READY_FOR_HUMAN_RELEASE", "INVALID_BRAIN_INTAKE_STATE")
+            require(self.authority_class != "NONE", "INVALID_AUTHORITY_CLASS")
+            for value in (
+                self.journey_id, self.source_sha, self.logical_identity,
+                self.decision_id, self.event_id, self.accepted_receipt_ref,
+            ):
+                _text(value)
+            for value in (
+                self.evidence_request_sha256, self.decision_sha256, self.decision_bytes_sha256,
+                self.accepted_receipt_sha256, self.accepted_receipt_file_sha256,
+            ):
+                _hash(value)
+            require(type(self.journal_seq) is int and self.journal_seq >= 1, "INVALID_JOURNAL_SEQ")
+        else:
+            require(self.state != "READY_FOR_HUMAN_RELEASE", "INVALID_BRAIN_INTAKE_STATE")
+            require(self.live_private_authority_proven is False, "INVALID_AUTHORITY_CLASS")
+        if self.authority_class != "PRIVATE_VERIFIED_TRANSPORT":
+            require(self.live_private_authority_proven is False, "INVALID_AUTHORITY_CLASS")
+        require(
+            self.rights_granted is False
+            and self.provider_grant is False
+            and self.publish_authorized is False
+            and self.spend_authorized is False
+            and self.network_calls_performed == 0
+            and self.publish_calls == 0
+            and self.paid_generation_calls == 0
+            and self.human_attended_required is False,
+            "OFFLINE_AUTHORITY_VIOLATION",
+        )
