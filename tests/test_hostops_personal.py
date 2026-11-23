@@ -3445,6 +3445,12 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
              "VALID_BUT_UNBOUND+DEMAND_READY+D5_ENABLED+JOURNAL_COMPLETE", "OBSERVED"),
             (("DEMAND_READY", "FRESH", "UNVERIFIED_EXE", "JOURNAL_ABSENT"),
              "JOURNAL_ABSENT+DEMAND_READY+D5_UNVERIFIED_EXE+JOURNAL_FRESH", "HOLD"),
+            (("CONFLICT_BASE_ACL", "COMPLETE", "ENABLED_ATTESTED", "VALID_BUT_UNBOUND"),
+             "VALID_BUT_UNBOUND+TASK_CONFLICT_ACL+D5_ENABLED+JOURNAL_MISMATCH", "HOLD"),
+            (("SD_UNVERIFIED", "COMPLETE", "ENABLED_ATTESTED", "VALID_BUT_UNBOUND"),
+             "VALID_BUT_UNBOUND+TASK_SD_UNVERIFIED+D5_ENABLED+JOURNAL_MISMATCH", "HOLD"),
+            (("DEMAND_READY", "COMPLETE", "UNVERIFIED_EXE_PATH", "VALID_BUT_UNBOUND"),
+             "VALID_BUT_UNBOUND+DEMAND_READY+D5_UNVERIFIED_EXE_PATH+JOURNAL_COMPLETE", "HOLD"),
             (("MULTIPLE_CANDIDATES", "ROLLBACK_ONLY", "ENABLED_ATTESTED", "VALID_BUT_UNBOUND"),
              "VALID_BUT_UNBOUND+TASK_MULTIPLE+D5_ENABLED+ROLLBACK_ONLY", "HOLD"),
             (("FOREIGN_CANDIDATE", "MISMATCH", "ABSENT", "NO_TRUSTED_1270_CUSTODY"),
@@ -3466,6 +3472,32 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
                 self.reconcile.assert_called_once_with(self.owner, self.target, self.candidates, forensic=True)
         self.task.assert_not_called()
         self.record.assert_not_called()
+        self.probe.assert_not_called()
+
+    def test_forensic_read_requires_stable_process_identity_for_observed(self):
+        self.reconcile.return_value = {
+            "task": "DEMAND_READY", "journal": "COMPLETE", "d5": "ENABLED_ATTESTED", "backup": "VALID_BUT_UNBOUND",
+        }
+        identity = (17, self.target.executable, "created", "PRIVATE")
+        for second, status, observation in (
+            (("OWNED", identity), "OBSERVED", "PENDING_CLEAR"),
+            (("OWNED", (18, *identity[1:])), "HOLD", "PROCESS_IDENTITY_UNVERIFIED"),
+            (self.acq._Clean9444Hold("BROWSER_OWNERSHIP_UNPROVEN"), "HOLD", "PROCESS_IDENTITY_UNVERIFIED"),
+        ):
+            with self.subTest(status=status, second=second):
+                self.inventory.reset_mock()
+                self.inventory.side_effect = (("OWNED", identity), second)
+                receipt = self.invoke_forensic()
+                self.assertEqual(receipt["status"], status)
+                self.assertEqual(receipt["code"], (
+                    "UNKNOWN_EFFECT+VALID_BUT_UNBOUND+DEMAND_READY+D5_ENABLED+JOURNAL_COMPLETE+" + observation
+                ))
+                self.assertEqual(receipt["source_sha"], self.sha)
+                self.assertEqual(self.inventory.call_args_list, [
+                    call(self.target, self.candidates, self.owner[1], self.owner[2]),
+                ] * 2)
+        self.record.assert_not_called()
+        self.task.assert_not_called()
         self.probe.assert_not_called()
 
     def test_forensic_read_holds_when_pending_markers_or_owner_change(self):
