@@ -4165,6 +4165,9 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
             for reply, code, status in (
                 ("TASK_RESET_VERIFIED", "TASK_RESET_VERIFIED", "OBSERVED"),
                 ("TASK_RESET_ALREADY_READY", "TASK_RESET_ALREADY_READY", "OBSERVED"),
+                ("AUTOSTART_CONFLICT", "AUTOSTART_CONFLICT", "HOLD"),
+                ("TASK_RESET_NOT_READY", "TASK_RESET_NOT_READY", "HOLD"),
+                ("TASK_RESET_DRIFT", "TASK_RESET_DRIFT", "HOLD"),
                 ("TASK_RESET_D5_UNVERIFIED", "TASK_RESET_D5_UNVERIFIED", "HOLD"),
                 ("PRIVATE result", "UNKNOWN_EFFECT", "HOLD"),
                 ("DEMAND_MIGRATED", "UNKNOWN_EFFECT", "HOLD"),
@@ -4175,6 +4178,7 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
                     self.task.return_value = reply
                     receipt = self.invoke(approved)
                     self.assertEqual((receipt["operation"], receipt["code"], receipt["status"]), (op, code, status))
+                    self.assertEqual(receipt["cdp_port"], 9444)
                     self.assertEqual(receipt["approval_channel"], "OWNER_GITHUB_COMMENT")
                     self.assertEqual(receipt["source_sha"], self.sha)
                     self.assertFalse(receipt["wake_sent"])
