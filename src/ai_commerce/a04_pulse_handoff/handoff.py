@@ -1276,3 +1276,207 @@ def validate_a04_pulse_handoff_packet(
         pulse_receiver_execution=PULSE_RECEIVER_EXECUTION,
         wait_brain_claimed=False,
     )
+
+
+PULSE_LOCAL_ROUTE_ID = "a04-to-pulse-offline"
+PULSE_LOCAL_CONSUMER_ID = (
+    "ai_commerce.production_runtime.attended_worker:receive_a04_pulse_handoff"
+)
+PULSE_LOCAL_CONSUMER_PATH = "src/ai_commerce/production_runtime/attended_worker.py"
+PULSE_INTAKE_CONTRACT_VERSION = "A04PulseAutonomousOfflineIntake.v1"
+PULSE_OFFLINE_TOOL = "tool:a06-e01-offline-local-stills"
+
+_SANITIZED_JOURNEY_RE = re.compile(r"journey:[0-9a-f]{32,64}")
+_SANITIZED_PRODUCT_RE = re.compile(r"product:[0-9a-f]{64}")
+_SANITIZED_ASSET_RE = re.compile(r"asset:[0-9a-f]{64}")
+_SANITIZED_RIGHTS_RE = re.compile(r"rights:[0-9a-f]{64}")
+_SANITIZED_PROVENANCE_REF_RE = re.compile(r"(?:human|fixture|local|directive):[0-9a-f]{32,64}")
+
+
+@dataclass(frozen=True, kw_only=True)
+class A04PulseReceiverAuthorization:
+    """Distinct caller authorization for bounded autonomous LOCAL/OFFLINE PULSE intake.
+
+    Explicitly separates autonomous local offline dispatch from legacy B0.3
+    ``human_attended=True`` CLI execution and binds exact pinned source_sha,
+    packet identity, logical identity, and consumer route. Never grants
+    network, spend, publish, provider entitlement, or Brain approval.
+    """
+
+    schema_version: str = PULSE_INTAKE_CONTRACT_VERSION
+    authorization_ref: str
+    caller_id: str
+    journey_id: str
+    cycle_id: str
+    job_id: str
+    attempt: int
+    source_sha: str
+    packet_id: str
+    packet_sha256: str
+    logical_identity: str
+    route_id: str = PULSE_LOCAL_ROUTE_ID
+    consumer_id: str = PULSE_LOCAL_CONSUMER_ID
+    mode: str = "AUTONOMOUS_OFFLINE_LOCAL"
+    human_attended: bool = False
+    allow_network: bool = False
+    allow_spend: bool = False
+    allow_publish: bool = False
+    provider_entitlement: bool = False
+
+    def __post_init__(self) -> None:
+        _require(
+            self.schema_version == PULSE_INTAKE_CONTRACT_VERSION,
+            "INVALID_RECEIVER_AUTH_SCHEMA",
+        )
+        _require_ref(self.authorization_ref, "INVALID_RECEIVER_AUTH_REF")
+        _require_ref(self.caller_id, "INVALID_RECEIVER_CALLER")
+        _require(
+            type(self.journey_id) is str
+            and _SANITIZED_JOURNEY_RE.fullmatch(self.journey_id) is not None,
+            "SANITIZED_JOURNEY_ID_REQUIRED",
+        )
+        _require_text(self.cycle_id, "INVALID_CYCLE_ID")
+        _require_text(self.job_id, "INVALID_JOB_ID")
+        _require_pos_int(self.attempt, "INVALID_ATTEMPT")
+        _require_source_sha(self.source_sha, "INVALID_SOURCE_SHA")
+        _require(
+            type(self.packet_id) is str and _PACKET_ID_RE.fullmatch(self.packet_id) is not None,
+            "INVALID_PACKET_ID",
+        )
+        _require_sha256(self.packet_sha256, "INVALID_PACKET_SHA256")
+        _require(
+            type(self.logical_identity) is str
+            and _LOGICAL_ID_RE.fullmatch(self.logical_identity) is not None,
+            "INVALID_LOGICAL_IDENTITY",
+        )
+        _require(self.route_id == PULSE_LOCAL_ROUTE_ID, "INVALID_HANDOFF_ROUTE")
+        _require(self.consumer_id == PULSE_LOCAL_CONSUMER_ID, "INVALID_PULSE_CONSUMER")
+        _require(self.mode == "AUTONOMOUS_OFFLINE_LOCAL", "OFFLINE_AUTHORITY_VIOLATION")
+        _require(self.human_attended is False, "AUTONOMOUS_MODE_CANNOT_CLAIM_HUMAN_ATTENDED")
+        _require(
+            self.allow_network is False
+            and self.allow_spend is False
+            and self.allow_publish is False
+            and self.provider_entitlement is False,
+            "OFFLINE_AUTHORITY_VIOLATION",
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {f.name: getattr(self, f.name) for f in fields(self)}
+
+    @property
+    def digest(self) -> str:
+        return sha256_bytes(canonical_handoff_bytes(self.to_dict()))
+
+    @classmethod
+    def from_dict(cls, record: object) -> A04PulseReceiverAuthorization:
+        names = {f.name for f in fields(cls)}
+        _require(type(record) is dict and set(record) == names, "INVALID_RECEIVER_AUTH_FIELDS")
+        return cls(**record)
+
+
+def validate_a04_pulse_receiver_intake(
+    packet: A04PulseHandoffPacket | Mapping[str, object] | bytes,
+    *,
+    a04_receipt: A04CreativeHandoffReceipt | Mapping[str, object] | bytes,
+    directive: ValidatedContract | Mapping[str, object] | bytes,
+    authorization: A04PulseReceiverAuthorization,
+    expected_source_sha: str,
+    directive_bytes: bytes | None = None,
+    receipt_bytes: bytes | None = None,
+    package_bytes: bytes | None = None,
+    a03_result_bytes: bytes | None = None,
+    asset_bytes_by_ref: Mapping[str, bytes] | None = None,
+    rights_bytes_by_ref: Mapping[str, bytes] | None = None,
+    expected_journey_id: str | None = None,
+    expected_cycle_id: str | None = None,
+    expected_directive_version: int | None = None,
+    min_directive_version: int | None = None,
+    expected_package_revision: int | None = None,
+    min_package_revision: int | None = None,
+    seen_identities: Collection[str] | None = None,
+    seen_packets: Sequence[A04PulseHandoffPacket] | None = None,
+) -> A04PulseHandoffValidationResult:
+    """Strict pure validation for autonomous LOCAL/OFFLINE PULSE receiver admission."""
+    _require(
+        type(authorization) is A04PulseReceiverAuthorization,
+        "RECEIVER_AUTHORIZATION_REQUIRED",
+    )
+    _require_source_sha(expected_source_sha, "STALE_OR_MISMATCHED_SOURCE_SHA")
+    _require(
+        authorization.source_sha == expected_source_sha,
+        "STALE_OR_MISMATCHED_SOURCE_SHA",
+    )
+    if expected_journey_id is not None:
+        _require(authorization.journey_id == expected_journey_id, "JOURNEY_MISMATCH")
+    if expected_cycle_id is not None:
+        _require(authorization.cycle_id == expected_cycle_id, "CYCLE_MISMATCH")
+
+    result = validate_a04_pulse_handoff_packet(
+        packet,
+        a04_receipt=a04_receipt,
+        directive=directive,
+        directive_bytes=directive_bytes,
+        receipt_bytes=receipt_bytes,
+        package_bytes=package_bytes,
+        a03_result_bytes=a03_result_bytes,
+        asset_bytes_by_ref=asset_bytes_by_ref,
+        rights_bytes_by_ref=rights_bytes_by_ref,
+        expected_source_sha=expected_source_sha,
+        expected_journey_id=authorization.journey_id,
+        expected_cycle_id=authorization.cycle_id,
+        expected_directive_version=expected_directive_version,
+        min_directive_version=min_directive_version,
+        expected_package_revision=expected_package_revision,
+        min_package_revision=min_package_revision,
+        seen_identities=seen_identities,
+        seen_packets=seen_packets,
+    )
+    checked = result.packet
+    _require(
+        authorization.journey_id == checked.journey_id
+        and authorization.cycle_id == checked.cycle_id
+        and authorization.job_id == checked.job_id
+        and authorization.attempt == checked.attempt
+        and authorization.source_sha == checked.source_sha
+        and authorization.packet_id == checked.packet_id
+        and authorization.packet_sha256 == checked.packet_sha256
+        and authorization.logical_identity == checked.logical_identity,
+        "RECEIVER_AUTH_PACKET_MISMATCH",
+    )
+    _require(
+        _SANITIZED_JOURNEY_RE.fullmatch(checked.journey_id) is not None,
+        "SANITIZED_JOURNEY_ID_REQUIRED",
+    )
+    _require(
+        checked.product_ref is None
+        or _SANITIZED_PRODUCT_RE.fullmatch(checked.product_ref) is not None,
+        "OPAQUE_PRODUCT_REQUIRED",
+    )
+    _require(
+        checked.scope.action_class == "EXPORT_DRAFT"
+        and checked.scope.action_classes == ("EXPORT_DRAFT",)
+        and checked.scope.provider_ref is None
+        and checked.scope.account_ref is None
+        and checked.scope.surface is None
+        and checked.scope.asset_sha256 is None,
+        "OFFLINE_EXPORT_SCOPE_REQUIRED",
+    )
+    _require(
+        checked.scope.allowed_tools == (PULSE_OFFLINE_TOOL,),
+        "OFFLINE_TOOL_ALLOWLIST_REQUIRED",
+    )
+    _require(
+        _SANITIZED_PROVENANCE_REF_RE.fullmatch(checked.provenance.directive_actor_ref) is not None
+        and _SANITIZED_PROVENANCE_REF_RE.fullmatch(checked.provenance.directive_source_ref) is not None,
+        "SANITIZED_SOURCE_REF_REQUIRED",
+    )
+    _require(1 <= len(checked.assets) <= 4, "ASSET_SELECTION_MISMATCH")
+    for pin in checked.assets:
+        _require(_SANITIZED_ASSET_RE.fullmatch(pin.asset_ref) is not None, "ASSET_SELECTION_MISMATCH")
+        if pin.rights_ref is not None:
+            _require(
+                _SANITIZED_RIGHTS_RE.fullmatch(pin.rights_ref) is not None,
+                "SANITIZED_RIGHTS_REF_REQUIRED",
+            )
+    return result

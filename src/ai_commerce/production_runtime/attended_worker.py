@@ -10,12 +10,24 @@ from hashlib import sha256
 import json
 import re
 
+from ai_commerce.a04_pulse_handoff.handoff import (
+    A04PulseHandoffError,
+    A04PulseReceiverAuthorization,
+    validate_a04_pulse_receiver_intake,
+)
 from ..e2e import service
 from .contracts import MAX_BYTES, canonical_bytes, parse_contract
 from .journal import Checkpoint, Journal
 from .recovery import replay_verified
 from .state_machine import Event, EventKind, EvidencePin
-from .receipt import evidence_packet, export_packet, put_new
+from .receipt import (
+    autonomous_evidence_packet,
+    evidence_packet,
+    export_autonomous_packet,
+    export_packet,
+    parse_autonomous_evidence_packet,
+    put_new,
+)
 
 # Literal stdlib dependencies, matching B0.2's frozen AST compatibility seam.
 # Tests audit every literal load and actual child-process/network boundary.
@@ -413,7 +425,7 @@ def _summary(result, checked=None):
             "provider_network_calls": 0, "paid_generation_calls": 0, "publish_calls": 0}
 
 
-def _complete(root, directive, intent, journal, lease, *, allow_render, assets):
+def _complete(root, directive, intent, journal, lease, *, allow_render, assets, q4_qa=False):
     _, _, current = _read(root, directive, intent)
     if current.state == "INPUT_VALIDATED":
         _need(allow_render, "PRE_START_STOPPED_NO_TOOL_RUN")
@@ -438,6 +450,11 @@ def _complete(root, directive, intent, journal, lease, *, allow_render, assets):
     except Exception:
         raise WorkerHold("PENDING_OFFLINE_EFFECT_RECONCILIATION") from None
     pins = _pins(intent, checked)
+    qa_pins = pins
+    q4_result = None
+    if q4_qa:
+        q4_result = _q4_technical_qa(_render_path(root, intent), checked, intent)
+        qa_pins = _autonomous_pins(intent, checked, q4_result)
     _, _, current = _read(root, directive, intent)
     if current.state == "RUNNING":
         journal.append_event(Event("event:output-ready", EventKind.OUTPUT_READY,
@@ -449,8 +466,11 @@ def _complete(root, directive, intent, journal, lease, *, allow_render, assets):
         _need(current.snapshot.evidence == pins, "OUTPUT_EVIDENCE_CHANGED")
     # This is a new technical read after OUTPUT_READY, never a second render.
     _need(_verify(root, directive, intent) == checked, "OUTPUT_EVIDENCE_CHANGED")
+    if q4_qa:
+        _need(_q4_technical_qa(_render_path(root, intent), checked, intent) == q4_result,
+              "Q4_TECHNICAL_QA_CHANGED")
     journal.append_event(Event("event:qa-passed", EventKind.QA_PASSED, intent["journey_id"],
-        intent["source_sha"], evidence=pins), directive=directive, lease=lease,
+        intent["source_sha"], evidence=qa_pins), directive=directive, lease=lease,
         at=_now(), expected_sequence=3)
     _checkpoint(root, journal)
     _step("after_wait")
@@ -545,3 +565,446 @@ def export_once(*, private_dir, destination, **inputs):
         _local(str(dest / name), missing=True)
     receipt, packet = evidence_packet(directive, result, intent=intent, verification=checked, history=history)
     return export_packet(dest, receipt, packet)
+
+
+def _q4_technical_qa(dest, checked, intent):
+    """Fail-closed Q4 technical QA pin derived from verified A06/FFmpeg custody."""
+    try:
+        record = service.inspect(dest)
+        _need(record.get("state") == "DELIVERED", "Q4_TECHNICAL_QA_FAILED")
+        render_ref = record["render"]["manifest_ref"]
+        manifest_path = _local(str(dest / "custody" / render_ref), under=dest)
+        manifest = _json(manifest_path, canonical=False)
+        _need(
+            manifest.get("state") == "SUCCEEDED"
+            and manifest.get("output", {}).get("sha256") == checked["artifact_sha256"]
+            and checked.get("ffprobe_full_decode") is True
+            and checked.get("generation_performed") is False
+            and checked.get("publication_status") == "NOT_ATTEMPTED",
+            "Q4_TECHNICAL_QA_FAILED",
+        )
+        ver = manifest["output"]["verification"]
+        expected_frames = PARAMETERS["frames"] * len(intent["assets"])
+        _need(
+            type(ver) is dict
+            and ver.get("codec") == "h264"
+            and ver.get("pixel_format") == "yuv420p"
+            and ver.get("width") == PARAMETERS["width"]
+            and ver.get("height") == PARAMETERS["height"]
+            and ver.get("fps") == PARAMETERS["fps"]
+            and ver.get("frame_count") == expected_frames
+            and (ver.get("audio") is None if not PARAMETERS["silence"] else type(ver.get("audio")) is dict),
+            "Q4_TECHNICAL_QA_FAILED",
+        )
+        body = {
+            "schema_version": "Q4TechnicalQA.v1",
+            "status": "TECHNICAL_QA_PASSED",
+            "ffprobe_full_decode": True,
+            "artifact_sha256": checked["artifact_sha256"],
+            "verification_ref": checked["verification_ref"],
+            "manifest_sha256": checked["manifest_sha256"],
+            "tree_sha256": checked["tree_sha256"],
+            "codec": ver["codec"],
+            "pixel_format": ver["pixel_format"],
+            "width": ver["width"],
+            "height": ver["height"],
+            "fps": ver["fps"],
+            "frame_count": ver["frame_count"],
+            "duration": ver["duration"],
+            "audio_stream": ver["audio"],
+            "audio_mode": intent["audio_mode"],
+            "cta_mode": intent["cta_mode"],
+            "origin": "LOCAL_IMPORT",
+            "generation_performed": False,
+            "publication_status": "NOT_ATTEMPTED",
+            "semantic_approval": "NOT_ATTEMPTED",
+        }
+        qa_sha = sha256(canonical_bytes(body)).hexdigest()
+        return {**body, "qa_ref": "q4:" + qa_sha, "qa_sha256": qa_sha}
+    except WorkerHold:
+        raise
+    except Exception:
+        raise WorkerHold("Q4_TECHNICAL_QA_FAILED") from None
+
+
+def _autonomous_pins(intent, checked, q4_qa):
+    evidence_type = intent["evidence_type"]
+    return (
+        *_pins(intent, checked),
+        EvidencePin("MEDIA_CREATIVE", q4_qa["qa_ref"], q4_qa["qa_sha256"], evidence_type),
+    )
+
+
+def _autonomous_inputs(
+    *,
+    authorization,
+    packet_path,
+    a04_receipt_path,
+    directive_path,
+    assets,
+    rights=(),
+    asset_root,
+    source_sha,
+    package_path=None,
+    a03_result_path=None,
+):
+    """Versioned, bounded autonomous LOCAL/OFFLINE intake with exact source binding.
+
+    Never mutates legacy SOURCE_SHA and never silently sets human_attended=True.
+    Requires distinct A04PulseReceiverAuthorization (human_attended=False) and
+    re-verifies exact raw bytes for packet, A04 receipt, CreativeDirective,
+    authorized local PNGs, and fresh local rights evidence under private custody.
+    """
+    _need(type(authorization) is A04PulseReceiverAuthorization, "RECEIVER_AUTHORIZATION_REQUIRED")
+    _need(authorization.human_attended is False, "AUTONOMOUS_MODE_CANNOT_CLAIM_HUMAN_ATTENDED")
+    _need(type(source_sha) is str and re.fullmatch(r"[0-9a-f]{40}", source_sha) is not None, "SOURCE_SHA_MISMATCH")
+    _need(source_sha == authorization.source_sha, "SOURCE_SHA_MISMATCH")
+
+    repo = Path(__file__).resolve().parents[3]
+    for label_path in (packet_path, a04_receipt_path, directive_path):
+        checked_path = _local(str(label_path))
+        _need(repo not in checked_path.parents, "PRIVATE_DIRECTIVE_OUTSIDE_REPOSITORY_REQUIRED")
+    packet_raw = _bytes(_local(str(packet_path)))
+    a04_receipt_raw = _bytes(_local(str(a04_receipt_path)))
+    directive_raw = _bytes(_local(str(directive_path)))
+
+    package_raw = None
+    if package_path is not None:
+        pkg_p = _local(str(package_path))
+        _need(repo not in pkg_p.parents, "PRIVATE_DIRECTIVE_OUTSIDE_REPOSITORY_REQUIRED")
+        package_raw = _bytes(pkg_p, MAX_ASSET_BYTES)
+    a03_result_raw = None
+    if a03_result_path is not None:
+        res_p = _local(str(a03_result_path))
+        _need(repo not in res_p.parents, "PRIVATE_DIRECTIVE_OUTSIDE_REPOSITORY_REQUIRED")
+        a03_result_raw = _bytes(res_p, MAX_ASSET_BYTES)
+
+    directive = parse_contract("CreativeDirective", directive_raw)
+    value = directive.to_dict()
+    _need(value["source_sha"] == source_sha, "DIRECTIVE_SOURCE_MISMATCH")
+    _need(re.fullmatch(r"journey:[0-9a-f]{32,64}", value["journey_id"]) is not None,
+          "SANITIZED_JOURNEY_ID_REQUIRED")
+    _need(value["creative"]["product_ref"] is None or re.fullmatch(
+        r"product:[0-9a-f]{64}", value["creative"]["product_ref"]) is not None, "OPAQUE_PRODUCT_REQUIRED")
+    _need(value["scope"] == {"action_class": "EXPORT_DRAFT", "provider_ref": None,
+          "account_ref": None, "surface": None, "asset_sha256": None}
+          and value["action_classes"] == ["EXPORT_DRAFT"], "OFFLINE_EXPORT_SCOPE_REQUIRED")
+    _need(value["allowed_tools"] == [TOOL], "OFFLINE_TOOL_ALLOWLIST_REQUIRED")
+    origin = value["provenance"]
+    _need((origin["actor"], origin["evidence_type"]) in
+          {("HUMAN", "HUMAN_SUPPLIED"), ("FIXTURE", "SYNTHETIC_FIXTURE")}, "LOCAL_PROVENANCE_REQUIRED")
+    for key in ("actor_ref", "source_ref"):
+        _need(re.fullmatch(r"(?:human|fixture|local|directive):[0-9a-f]{32,64}", origin[key]) is not None,
+              "SANITIZED_SOURCE_REF_REQUIRED")
+
+    root = _private(str(asset_root))
+    chosen, right_files = _mapping(tuple(assets)), _mapping(tuple(rights))
+    _need(1 <= len(value["assets"]) <= 4 and len(chosen) == len(value["assets"]), "ASSET_SELECTION_MISMATCH")
+    paths, pins, used_rights = [], [], set()
+    asset_bytes_by_ref, rights_bytes_by_ref = {}, {}
+    for asset in value["assets"]:
+        _need(asset["ref"] in chosen and re.fullmatch(r"asset:[0-9a-f]{64}", asset["ref"]) is not None,
+              "ASSET_SELECTION_MISMATCH")
+        path = _local(chosen[asset["ref"]], under=root)
+        _need(path.suffix.lower() == ".png", "LOCAL_PNG_REQUIRED")
+        image = _bytes(path, MAX_ASSET_BYTES)
+        _need(image.startswith(b"\x89PNG\r\n\x1a\n") and len(image) >= 24, "LOCAL_PNG_INVALID")
+        width, height = int.from_bytes(image[16:20]), int.from_bytes(image[20:24])
+        _need(0 < width <= 1024 and 0 < height <= 1024, "LOCAL_PNG_DIMENSION_LIMIT")
+        _need(sha256(image).hexdigest() == asset["sha256"], "ASSET_HASH_MISMATCH")
+        _need(asset["evidence_type"] in {"SYNTHETIC_FIXTURE", "HUMAN_SUPPLIED"}, "ASSET_ORIGIN_UNPROVEN")
+        asset_bytes_by_ref[asset["ref"]] = image
+        right = asset["rights"]
+        if asset["evidence_type"] == "SYNTHETIC_FIXTURE":
+            _need(origin["evidence_type"] == "SYNTHETIC_FIXTURE" and right == {
+                "status": "NOT_APPLICABLE", "ref": None, "sha256": None}, "FIXTURE_RIGHTS_REQUIRED")
+        else:
+            _need(right["status"] == "GRANTED" and right["ref"] in right_files, "LOCAL_RIGHTS_EVIDENCE_REQUIRED")
+            _need(re.fullmatch(r"rights:[0-9a-f]{64}", right["ref"]) is not None, "SANITIZED_RIGHTS_REF_REQUIRED")
+            claim_path = _local(right_files[right["ref"]], under=root)
+            claim_raw = _bytes(claim_path)
+            _need(sha256(claim_raw).hexdigest() == right["sha256"], "RIGHTS_HASH_MISMATCH")
+            claim = _json(claim_path)
+            _need(set(claim) == {"schema_version", "asset_sha256", "source_sha", "scope", "status", "valid_from", "expires_at"}
+                  and claim["schema_version"] == "LocalStillRights.v1"
+                  and claim["asset_sha256"] == asset["sha256"] and claim["source_sha"] == source_sha
+                  and claim["scope"] == "OFFLINE_LOCAL_RENDER" and claim["status"] == "GRANTED",
+                  "LOCAL_RIGHTS_SCOPE_MISMATCH")
+            _need(type(claim["valid_from"]) is int and type(claim["expires_at"]) is int
+                  and 0 <= claim["valid_from"] <= _now() < claim["expires_at"], "LOCAL_RIGHTS_EXPIRED")
+            used_rights.add(right["ref"])
+            rights_bytes_by_ref[right["ref"]] = claim_raw
+        paths.append(path)
+        pins.append({"sha256": asset["sha256"], "evidence_type": asset["evidence_type"],
+                     "rights_sha256": right["sha256"]})
+    _need(used_rights == set(right_files) and len(set(paths)) == len(paths), "LOCAL_INPUT_SET_MISMATCH")
+
+    try:
+        validated = validate_a04_pulse_receiver_intake(
+            packet_raw,
+            a04_receipt=a04_receipt_raw,
+            directive=directive_raw,
+            authorization=authorization,
+            expected_source_sha=source_sha,
+            directive_bytes=directive_raw,
+            receipt_bytes=a04_receipt_raw,
+            package_bytes=package_raw,
+            a03_result_bytes=a03_result_raw,
+            asset_bytes_by_ref=asset_bytes_by_ref,
+            rights_bytes_by_ref=rights_bytes_by_ref,
+            expected_journey_id=authorization.journey_id,
+            expected_cycle_id=authorization.cycle_id,
+        )
+    except A04PulseHandoffError as exc:
+        raise WorkerHold(exc.code) from None
+
+    packet = validated.packet
+    directive_record_sha = sha256(directive.raw).hexdigest()
+    identity = sha256(
+        canonical_bytes({
+            "directive_record_sha256": directive_record_sha,
+            "packet_id": packet.packet_id,
+            "packet_sha256": packet.packet_sha256,
+            "logical_identity": packet.logical_identity,
+            "source_sha": source_sha,
+        })
+    ).hexdigest()
+    intent = {
+        "schema_version": "A04PulseAutonomousOfflineIntent.v1",
+        "intake_mode": "AUTONOMOUS_OFFLINE_LOCAL",
+        "human_attended": False,
+        "source_sha": source_sha,
+        "journey_id": value["journey_id"],
+        "cycle_id": packet.cycle_id,
+        "job_id": packet.job_id,
+        "attempt": packet.attempt,
+        "packet_id": packet.packet_id,
+        "packet_sha256": packet.packet_sha256,
+        "packet_file_sha256": sha256(packet_raw).hexdigest(),
+        "logical_identity": packet.logical_identity,
+        "a04_receipt_id": packet.a04_receipt_id,
+        "a04_receipt_digest": packet.a04_receipt_digest,
+        "authorization_ref": authorization.authorization_ref,
+        "authorization_sha256": authorization.digest,
+        "directive_sha256": value["directive_sha256"],
+        "directive_version": value["directive_version"],
+        "scope": value["scope"],
+        "directive_file_sha256": sha256(directive_raw).hexdigest(),
+        "directive_record_sha256": directive_record_sha,
+        "runtime_sha256": _runtime_hash(),
+        "assets": pins,
+        "tool": TOOL,
+        "audio_mode": packet.audio_mode,
+        "cta_mode": packet.cta_mode,
+        "evidence_type": "SYNTHETIC_FIXTURE" if origin["evidence_type"] == "SYNTHETIC_FIXTURE"
+            or any(p["evidence_type"] == "SYNTHETIC_FIXTURE" for p in pins) else "HUMAN_SUPPLIED",
+        "parameters": PARAMETERS,
+        "render_ref": "local:e01-" + identity[:24],
+        "journal_id": "journal:" + identity[:32],
+    }
+    return directive, tuple(paths), intent
+
+
+def _autonomous_export_and_summary(root, dest, directive, intent, history, result, checked, q4_qa, *, write):
+    receipt, evidence_raw = autonomous_evidence_packet(
+        directive, result, intent=intent, verification=checked, q4_qa=q4_qa, history=history
+    )
+    if write:
+        for name in ("ProductJourneyReceipt.v1.json", "autonomous-offline-evidence.json"):
+            _local(str(dest / name), missing=True)
+        exported = export_autonomous_packet(dest, receipt, evidence_raw)
+    else:
+        receipt_path = _local(str(dest / "ProductJourneyReceipt.v1.json"))
+        evidence_path = _local(str(dest / "autonomous-offline-evidence.json"))
+        _need(_bytes(receipt_path) == receipt.raw, "RECEIPT_READBACK_MISMATCH")
+        _need(_bytes(evidence_path) == evidence_raw, "RECEIPT_READBACK_MISMATCH")
+        parsed_ev = parse_autonomous_evidence_packet(evidence_raw)
+        exported = {
+            "receipt_sha256": receipt.to_dict()["receipt_sha256"],
+            "receipt_file_sha256": sha256(receipt.raw).hexdigest(),
+            "evidence_sha256": parsed_ev["evidence_sha256"],
+            "evidence_file_sha256": sha256(evidence_raw).hexdigest(),
+        }
+    parsed_ev = parse_autonomous_evidence_packet(evidence_raw)
+    return {
+        "schema_version": "A04PulseReceiverReceipt.v1",
+        "intake_mode": "AUTONOMOUS_OFFLINE_LOCAL",
+        "human_attended": False,
+        "state": result.state,
+        "code": result.state,
+        "journey_id": intent["journey_id"],
+        "source_sha": intent["source_sha"],
+        "packet_id": intent["packet_id"],
+        "packet_sha256": intent["packet_sha256"],
+        "logical_identity": intent["logical_identity"],
+        "a04_receipt_id": intent["a04_receipt_id"],
+        "a04_receipt_digest": intent["a04_receipt_digest"],
+        "authorization_ref": intent["authorization_ref"],
+        "authorization_sha256": intent["authorization_sha256"],
+        "journal_id": intent["journal_id"],
+        "journal_sequence": len(result.event_sequence),
+        "journal_checkpoint": parsed_ev["journal_checkpoint"],
+        "evidence_sha256": result.evidence_sha256,
+        "artifact_sha256": checked["artifact_sha256"],
+        "q4_qa_ref": q4_qa["qa_ref"],
+        "q4_qa_sha256": q4_qa["qa_sha256"],
+        "receipt_sha256": exported["receipt_sha256"],
+        "receipt_file_sha256": exported["receipt_file_sha256"],
+        "evidence_packet_sha256": exported["evidence_sha256"],
+        "evidence_file_sha256": exported["evidence_file_sha256"],
+        "brain_decision": None,
+        "provider_network_calls": 0,
+        "paid_generation_calls": 0,
+        "publish_calls": 0,
+    }
+
+
+def receive_a04_pulse_handoff(*, private_dir, export_dir, **inputs):
+    """Execute one bounded autonomous LOCAL/OFFLINE A04 -> PULSE handoff to WAIT_BRAIN."""
+    directive, assets, intent = _autonomous_inputs(**inputs)
+    root, dest = _private(str(private_dir)), _private(str(export_dir))
+    _need(dest != root and root not in dest.parents and dest not in root.parents,
+          "SEPARATE_EXPORT_DIRECTORY_REQUIRED")
+    with _Lock(root, create=True):
+        _need({p.name for p in root.iterdir()} == {".attended.lock"}, "NEW_PRIVATE_DIRECTORY_REQUIRED")
+        put_new(root / "intent.json", canonical_bytes(intent))
+        journal = Journal.create(
+            str(root / "journal.sqlite"),
+            journal_id=intent["journal_id"],
+            source_sha=intent["source_sha"],
+        )
+        _checkpoint(root, journal)
+        lease = journal.acquire(
+            owner="worker:" + uuid.uuid4().hex,
+            at=_now(),
+            ttl=300,
+            event_id="lease:" + uuid.uuid4().hex,
+        )
+        _checkpoint(root, journal)
+        journal.create_journey(
+            directive,
+            directive_ref="directive:" + intent["directive_sha256"],
+            lease=lease,
+            at=_now(),
+            event_id="event:input-accepted",
+        )
+        _checkpoint(root, journal)
+        # Do not release the fencing lease after an interrupted native A06 effect.
+        # An ambiguous crash must be reconciled against this generation first.
+        checked = _complete(
+            root, directive, intent, journal, lease,
+            allow_render=True, assets=assets, q4_qa=True,
+        )
+        journal.release(lease, at=_now(), event_id="lease:" + uuid.uuid4().hex)
+        _checkpoint(root, journal)
+        _, history, result = _read(root, directive, intent)
+        _need(result.state == "WAIT_BRAIN", "WAIT_BRAIN_REQUIRED")
+        q4_qa = _q4_technical_qa(_render_path(root, intent), checked, intent)
+        _need(result.snapshot.evidence == _autonomous_pins(intent, checked, q4_qa), "OUTPUT_EVIDENCE_CHANGED")
+        return _autonomous_export_and_summary(
+            root, dest, directive, intent, history, result, checked, q4_qa, write=True
+        )
+
+
+def inspect_a04_pulse_handoff(*, private_dir, export_dir=None, expected_generation=None, **inputs):
+    """Read-only journal/MP4/Q4/receipt verification for autonomous A04 -> PULSE handoff."""
+    directive, _, intent = _autonomous_inputs(**inputs)
+    root = _private(str(private_dir))
+    _, history, result = _read(root, directive, intent, expected_generation)
+    checked = None
+    q4_qa = None
+    if result.state in {"RUNNING", "TECHNICAL_QA", "WAIT_BRAIN"}:
+        try:
+            checked = _verify(root, directive, intent)
+        except Exception:
+            raise WorkerHold("PENDING_OFFLINE_EFFECT_RECONCILIATION") from None
+        if result.state == "TECHNICAL_QA":
+            _need(result.snapshot.evidence == _pins(intent, checked), "OUTPUT_EVIDENCE_CHANGED")
+        elif result.state == "WAIT_BRAIN":
+            q4_qa = _q4_technical_qa(_render_path(root, intent), checked, intent)
+            _need(result.snapshot.evidence == _autonomous_pins(intent, checked, q4_qa), "OUTPUT_EVIDENCE_CHANGED")
+    if export_dir is not None:
+        dest = _private(str(export_dir))
+        _need(dest != root and root not in dest.parents and dest not in root.parents,
+              "SEPARATE_EXPORT_DIRECTORY_REQUIRED")
+        _need(result.state == "WAIT_BRAIN", "WAIT_BRAIN_REQUIRED")
+        return _autonomous_export_and_summary(
+            root, dest, directive, intent, history, result, checked, q4_qa, write=False
+        )
+    return {
+        **_summary(result, checked),
+        "intake_mode": "AUTONOMOUS_OFFLINE_LOCAL",
+        "human_attended": False,
+        "q4_qa_ref": q4_qa["qa_ref"] if q4_qa else None,
+        "q4_qa_sha256": q4_qa["qa_sha256"] if q4_qa else None,
+    }
+
+
+def resume_a04_pulse_handoff(
+    *,
+    private_dir,
+    export_dir,
+    reconcile_stopped_generation=None,
+    expected_generation=None,
+    **inputs,
+):
+    """Converge a stopped autonomous receiver without ever rendering a second time."""
+    directive, assets, intent = _autonomous_inputs(**inputs)
+    root, dest = _private(str(private_dir)), _private(str(export_dir))
+    _need(dest != root and root not in dest.parents and dest not in root.parents,
+          "SEPARATE_EXPORT_DIRECTORY_REQUIRED")
+    with _Lock(root):
+        journal, history, result = _read(root, directive, intent, expected_generation)
+        if result.state == "WAIT_BRAIN":
+            _need(
+                reconcile_stopped_generation is None
+                or (
+                    history.lease is not None
+                    and type(reconcile_stopped_generation) is int
+                    and reconcile_stopped_generation == history.lease.generation
+                ),
+                "STALE_FENCING_GENERATION",
+            )
+            checked = _verify(root, directive, intent)
+            q4_qa = _q4_technical_qa(_render_path(root, intent), checked, intent)
+            _need(result.snapshot.evidence == _autonomous_pins(intent, checked, q4_qa), "OUTPUT_EVIDENCE_CHANGED")
+            return _autonomous_export_and_summary(
+                root, dest, directive, intent, history, result, checked, q4_qa, write=True
+            )
+        _need(result.state != "INPUT_VALIDATED", "PRE_START_STOPPED_NO_TOOL_RUN")
+        # Definitive complete verified MP4 + Q4 QA is required BEFORE any mutation.
+        checked = _verify(root, directive, intent)
+        _q4_technical_qa(_render_path(root, intent), checked, intent)
+        if history.lease is not None:
+            _need(
+                type(reconcile_stopped_generation) is int
+                and reconcile_stopped_generation == history.lease.generation,
+                "STALE_LEASE_ATTENDED_RECONCILIATION_REQUIRED",
+            )
+            if _now() < history.lease.expires_at:
+                journal.release(history.lease, at=_now(), event_id="lease:" + uuid.uuid4().hex)
+                _checkpoint(root, journal)
+        else:
+            _need(reconcile_stopped_generation is None, "STALE_FENCING_GENERATION")
+        lease = journal.acquire(
+            owner="worker:" + uuid.uuid4().hex,
+            at=_now(),
+            ttl=300,
+            event_id="lease:" + uuid.uuid4().hex,
+        )
+        _checkpoint(root, journal)
+        # A second interrupted recovery also remains fenced until its exact
+        # generation is reconciled; never clear an ambiguous native effect.
+        checked = _complete(
+            root, directive, intent, journal, lease,
+            allow_render=False, assets=assets, q4_qa=True,
+        )
+        journal.release(lease, at=_now(), event_id="lease:" + uuid.uuid4().hex)
+        _checkpoint(root, journal)
+        _, history, result = _read(root, directive, intent)
+        _need(result.state == "WAIT_BRAIN", "WAIT_BRAIN_REQUIRED")
+        q4_qa = _q4_technical_qa(_render_path(root, intent), checked, intent)
+        _need(result.snapshot.evidence == _autonomous_pins(intent, checked, q4_qa), "OUTPUT_EVIDENCE_CHANGED")
+        return _autonomous_export_and_summary(
+            root, dest, directive, intent, history, result, checked, q4_qa, write=True
+        )

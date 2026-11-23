@@ -49,7 +49,7 @@ def put_new(path, raw):
         temporary.unlink(missing_ok=True)
 
 
-def seal_wait_receipt(directive, recovery):
+def seal_wait_receipt(directive, recovery, *, actor_ref=None):
     """Use the unchanged B0.1 wire schema and its exact seal/parse functions."""
     if (recovery.state != "WAIT_BRAIN" or recovery.snapshot is None
             or recovery.snapshot.brain_decision is not None
@@ -58,6 +58,10 @@ def seal_wait_receipt(directive, recovery):
     value = directive.to_dict()
     fixture = any(p.evidence_type == "SYNTHETIC_FIXTURE" for p in recovery.snapshot.evidence)
     evidence_type = "SYNTHETIC_FIXTURE" if fixture else "HUMAN_SUPPLIED"
+    resolved_actor_ref = (
+        actor_ref if actor_ref is not None
+        else ("fixture:attended-offline" if fixture else "human:attended-transfer-claim")
+    )
     sealed = seal_contract("ProductJourneyReceipt", {
         "schema_version": "ProductJourneyReceipt.v1",
         **{k: value[k] for k in ("journey_id", "source_sha", "directive_version", "directive_sha256", "scope")},
@@ -69,7 +73,7 @@ def seal_wait_receipt(directive, recovery):
         "authorization": draft_authorization(),
         "provenance": {"evidence_type": evidence_type,
             "actor": "FIXTURE" if fixture else "HUMAN",
-            "actor_ref": "fixture:attended-offline" if fixture else "human:attended-transfer-claim",
+            "actor_ref": resolved_actor_ref,
             "source_ref": "directive:" + value["directive_sha256"], "source_sha": value["source_sha"]},
     })
     return parse_contract("ProductJourneyReceipt", sealed.raw)
@@ -391,6 +395,274 @@ def recheck_wait_brain_handoff(sealed, **inputs):
     except Exception:
         raise ReceiptHold("B15_PACKET_INVALID") from None
     current = inspect_wait_brain_handoff(**inputs)
+    if current != sealed:
+        raise ReceiptHold("B15_CURRENT_REPLAY_REQUIRED")
+    return current
+
+
+AUTONOMOUS_EVIDENCE_SCHEMA = "A04PulseAutonomousOfflineEvidence.v1"
+B15_AUTONOMOUS_SCHEMA = "B15AutonomousOfflineWaitBrainEvidence.v1"
+
+
+def autonomous_evidence_packet(directive, recovery, *, intent, verification, q4_qa, history):
+    """Autonomous LOCAL/OFFLINE companion envelope; explicitly human_attended=False.
+
+    Preserves the frozen B0.1 ProductJourneyReceipt.v1 schema and B0.3 attended
+    envelope untouched while binding packet, A04 receipt, distinct caller
+    authorization, playable MP4 verification, Q4 technical QA, and journal pins.
+    """
+    fixture = any(p.evidence_type == "SYNTHETIC_FIXTURE" for p in recovery.snapshot.evidence)
+    actor_ref = "fixture:a04-pulse-offline" if fixture else "human:a04-pulse-offline"
+    receipt = seal_wait_receipt(directive, recovery, actor_ref=actor_ref)
+    rows = [r for r in history.records if r.journey_id == receipt.to_dict()["journey_id"]]
+    if len(rows) != 4 or rows[-1].data().get("kind") != "QA_PASSED":
+        raise ReceiptHold("EXACT_OFFLINE_SEQUENCE_REQUIRED")
+    last = rows[-1]
+    body = {
+        "schema_version": AUTONOMOUS_EVIDENCE_SCHEMA,
+        "intake_mode": "AUTONOMOUS_OFFLINE_LOCAL",
+        "human_attended": False,
+        "packet_id": intent["packet_id"],
+        "packet_sha256": intent["packet_sha256"],
+        "packet_file_sha256": intent["packet_file_sha256"],
+        "logical_identity": intent["logical_identity"],
+        "a04_receipt_id": intent["a04_receipt_id"],
+        "a04_receipt_digest": intent["a04_receipt_digest"],
+        "authorization_ref": intent["authorization_ref"],
+        "authorization_sha256": intent["authorization_sha256"],
+        "receipt_file_sha256": sha256(receipt.raw).hexdigest(),
+        "receipt_sha256": receipt.to_dict()["receipt_sha256"],
+        "intent_sha256": sha256(canonical_bytes(intent)).hexdigest(),
+        "directive_file_sha256": intent["directive_file_sha256"],
+        "runtime_sha256": intent["runtime_sha256"],
+        "local_artifact": verification,
+        "q4_technical_qa": q4_qa,
+        "journal_checkpoint": {
+            "journal_id": intent["journal_id"],
+            "source_sha": intent["source_sha"],
+            "position": last.position,
+            "sha256": last.sha256,
+            "generation": last.generation,
+        },
+        "journal_sequence": [
+            {"sequence": r.sequence, "event_id": r.event_id, "sha256": r.sha256}
+            for r in rows
+        ],
+        "source_origin": "LOCAL_IMPORT",
+        "generation_performed": False,
+        "provider_network_calls": 0,
+        "paid_generation_calls": 0,
+        "publish_calls": 0,
+        "brain_identity_authenticated": False,
+        "brain_decision": None,
+        "anti_rollback_proof": "NOT_PROVEN",
+    }
+    packet = {**body, "evidence_sha256": sha256(canonical_bytes(body)).hexdigest()}
+    return receipt, canonical_bytes(packet)
+
+
+def parse_autonomous_evidence_packet(raw):
+    """Fail-closed validation of canonical autonomous offline evidence bytes."""
+    def pairs(items):
+        value = {}
+        for key, part in items:
+            if key in value:
+                raise ReceiptHold("AUTONOMOUS_EVIDENCE_INVALID")
+            value[key] = part
+        return value
+    try:
+        value = json.loads(raw, object_pairs_hook=pairs)
+        body = {k: v for k, v in value.items() if k != "evidence_sha256"}
+        expected = {
+            "schema_version", "intake_mode", "human_attended",
+            "packet_id", "packet_sha256", "packet_file_sha256", "logical_identity",
+            "a04_receipt_id", "a04_receipt_digest",
+            "authorization_ref", "authorization_sha256",
+            "receipt_file_sha256", "receipt_sha256", "intent_sha256",
+            "directive_file_sha256", "runtime_sha256",
+            "local_artifact", "q4_technical_qa",
+            "journal_checkpoint", "journal_sequence",
+            "source_origin", "generation_performed",
+            "provider_network_calls", "paid_generation_calls", "publish_calls",
+            "brain_identity_authenticated", "brain_decision",
+            "anti_rollback_proof", "evidence_sha256",
+        }
+        q4 = value.get("q4_technical_qa")
+        if (
+            set(value) != expected
+            or canonical_bytes(value) != raw
+            or value["schema_version"] != AUTONOMOUS_EVIDENCE_SCHEMA
+            or value["intake_mode"] != "AUTONOMOUS_OFFLINE_LOCAL"
+            or value["human_attended"] is not False
+            or value["evidence_sha256"] != sha256(canonical_bytes(body)).hexdigest()
+            or value["brain_identity_authenticated"] is not False
+            or value["brain_decision"] is not None
+            or value["generation_performed"] is not False
+            or value["source_origin"] != "LOCAL_IMPORT"
+            or value["anti_rollback_proof"] != "NOT_PROVEN"
+            or any(
+                type(value[k]) is not int or value[k] != 0
+                for k in ("provider_network_calls", "paid_generation_calls", "publish_calls")
+            )
+            or type(q4) is not dict
+            or q4.get("schema_version") != "Q4TechnicalQA.v1"
+            or q4.get("status") != "TECHNICAL_QA_PASSED"
+            or q4.get("ffprobe_full_decode") is not True
+            or q4.get("generation_performed") is not False
+            or q4.get("publication_status") != "NOT_ATTEMPTED"
+            or q4.get("semantic_approval") != "NOT_ATTEMPTED"
+        ):
+            raise ReceiptHold("AUTONOMOUS_EVIDENCE_INVALID")
+        q4_body = {k: v for k, v in q4.items() if k not in {"qa_ref", "qa_sha256"}}
+        q4_expected_sha = sha256(canonical_bytes(q4_body)).hexdigest()
+        if q4.get("qa_sha256") != q4_expected_sha or q4.get("qa_ref") != "q4:" + q4_expected_sha:
+            raise ReceiptHold("AUTONOMOUS_EVIDENCE_INVALID")
+        return value
+    except ReceiptHold:
+        raise
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise ReceiptHold("AUTONOMOUS_EVIDENCE_INVALID") from None
+
+
+def export_autonomous_packet(destination, receipt, packet):
+    record = parse_contract("ProductJourneyReceipt", receipt.raw).to_dict()
+    if (
+        record["state"] != "WAIT_BRAIN"
+        or record["brain_decision"] is not None
+        or record["effect"]["status"] != "NONE"
+    ):
+        raise ReceiptHold("WAIT_BRAIN_REQUIRED")
+    value = parse_autonomous_evidence_packet(packet)
+    if value["receipt_file_sha256"] != sha256(receipt.raw).hexdigest():
+        raise ReceiptHold("PACKET_RECEIPT_MISMATCH")
+    put_new(Path(destination) / "ProductJourneyReceipt.v1.json", receipt.raw)
+    put_new(Path(destination) / "autonomous-offline-evidence.json", packet)
+    return {
+        "state": "WAIT_BRAIN",
+        "code": "WAIT_BRAIN",
+        "receipt_sha256": receipt.to_dict()["receipt_sha256"],
+        "receipt_file_sha256": sha256(receipt.raw).hexdigest(),
+        "evidence_sha256": value["evidence_sha256"],
+        "evidence_file_sha256": sha256(packet).hexdigest(),
+    }
+
+
+def _b15_autonomous_pair(private_dir, receipt_path, evidence_path, inputs):
+    from . import attended_worker as worker
+
+    required = {
+        "authorization", "packet_path", "a04_receipt_path",
+        "directive_path", "assets", "rights", "asset_root", "source_sha",
+    }
+    optional = {"package_path", "a03_result_path"}
+    _b15_need(required <= set(inputs) <= required | optional)
+    root = worker._private(private_dir)
+    source_root = Path(worker.__file__).parent.parent
+    source_digest = _b15_tree(source_root, sources=True)
+    private_digest = _b15_tree(root)
+    paths = [
+        inputs["packet_path"], inputs["a04_receipt_path"], inputs["directive_path"],
+        *worker._mapping(inputs["assets"]).values(),
+        *worker._mapping(inputs["rights"]).values(),
+    ]
+    for opt in ("package_path", "a03_result_path"):
+        if inputs.get(opt) is not None:
+            paths.append(inputs[opt])
+    input_digests = [_b15_file(p, worker.MAX_ASSET_BYTES) for p in paths]
+    receipt_raw = _b15_file(receipt_path, worker.MAX_BYTES, capture=True)
+    packet_raw = _b15_file(evidence_path, worker.MAX_BYTES, capture=True)
+    _b15_json(receipt_raw, worker.MAX_BYTES)
+    _b15_json(packet_raw, worker.MAX_BYTES)
+    directive, _, intent = worker._autonomous_inputs(**inputs)
+    _b15_need(source_digest == intent["runtime_sha256"])
+    _, history, recovery = worker._read(root, directive, intent)
+    _b15_need(recovery.state == "WAIT_BRAIN")
+    checked = worker._verify(root, directive, intent)
+    q4_qa = worker._q4_technical_qa(worker._render_path(root, intent), checked, intent)
+    _b15_need(recovery.snapshot.evidence == worker._autonomous_pins(intent, checked, q4_qa))
+    current_receipt, current_packet = autonomous_evidence_packet(
+        directive, recovery, intent=intent, verification=checked, q4_qa=q4_qa, history=history
+    )
+    _b15_need(current_receipt.raw == receipt_raw and current_packet == packet_raw)
+    packet = parse_autonomous_evidence_packet(packet_raw)
+    _b15_need(
+        input_digests == [_b15_file(p, worker.MAX_ASSET_BYTES) for p in paths]
+        and source_digest == _b15_tree(source_root, sources=True)
+        and private_digest == _b15_tree(root)
+        and receipt_raw == _b15_file(receipt_path, worker.MAX_BYTES, capture=True)
+        and packet_raw == _b15_file(evidence_path, worker.MAX_BYTES, capture=True)
+    )
+    value = directive.to_dict()
+    return {
+        "journey_id": value["journey_id"],
+        "source_sha": value["source_sha"],
+        "packet_id": intent["packet_id"],
+        "packet_sha256": intent["packet_sha256"],
+        "logical_identity": intent["logical_identity"],
+        "a04_receipt_id": intent["a04_receipt_id"],
+        "a04_receipt_digest": intent["a04_receipt_digest"],
+        "authorization_ref": intent["authorization_ref"],
+        "authorization_sha256": intent["authorization_sha256"],
+        "directive_version": value["directive_version"],
+        "directive_sha256": value["directive_sha256"],
+        "directive_file_sha256": intent["directive_file_sha256"],
+        "runtime_sha256": source_digest,
+        "intent_sha256": packet["intent_sha256"],
+        "receipt_file_sha256": sha256(receipt_raw).hexdigest(),
+        "receipt_sha256": current_receipt.to_dict()["receipt_sha256"],
+        "autonomous_evidence_file_sha256": sha256(packet_raw).hexdigest(),
+        "autonomous_evidence_sha256": packet["evidence_sha256"],
+        "journal_checkpoint": packet["journal_checkpoint"],
+        "journal_sequence": packet["journal_sequence"],
+        "retained_state_sha256": private_digest,
+        "local_artifact": checked,
+        "q4_technical_qa": q4_qa,
+        "provenance_class": intent["evidence_type"],
+        "product_ref": value["creative"]["product_ref"],
+        "human_attended": False,
+    }
+
+
+def inspect_autonomous_wait_brain_handoff(*, private_dir, receipt_path, evidence_path, **inputs):
+    """Read-only B1.5 replay verifier for autonomous A04 -> PULSE WAIT_BRAIN pairs."""
+    try:
+        original = _b15_autonomous_pair(private_dir, receipt_path, evidence_path, inputs)
+        _b15_need(original == _b15_autonomous_pair(private_dir, receipt_path, evidence_path, inputs))
+        body = {
+            "schema_version": B15_AUTONOMOUS_SCHEMA,
+            "intake_mode": "AUTONOMOUS_OFFLINE_LOCAL",
+            "human_attended": False,
+            "state": "WAIT_BRAIN_DRAFT_ONLY",
+            "original": original,
+            "audio_link": "AUDIO_LINK_UNVERIFIED",
+            "unproven": dict(B15_UNPROVEN),
+            "source_origin": "LOCAL_IMPORT",
+            "generation_performed": False,
+            "provider_network_calls": 0,
+            "paid_generation_calls": 0,
+            "publish_calls": 0,
+            "brain_decision": None,
+            "brain_identity_authenticated": False,
+            "authorization": draft_authorization(),
+            "authority": "NO_EXTERNAL_EFFECT_OR_CONSENT",
+        }
+        raw = canonical_bytes({**body, "packet_sha256": sha256(canonical_bytes(body)).hexdigest()})
+        _b15_need(len(raw) <= B15_MAX_BYTES)
+        return raw
+    except Exception:
+        raise ReceiptHold("B15_CURRENT_SOURCE_HOLD") from None
+
+
+def recheck_autonomous_wait_brain_handoff(sealed, **inputs):
+    """Replay all original sources for autonomous WAIT_BRAIN evidence."""
+    try:
+        prior = _b15_json(sealed, B15_MAX_BYTES)
+        _b15_need(prior["schema_version"] == B15_AUTONOMOUS_SCHEMA)
+        body = {k: v for k, v in prior.items() if k != "packet_sha256"}
+        _b15_need(prior["packet_sha256"] == sha256(canonical_bytes(body)).hexdigest())
+    except Exception:
+        raise ReceiptHold("B15_PACKET_INVALID") from None
+    current = inspect_autonomous_wait_brain_handoff(**inputs)
     if current != sealed:
         raise ReceiptHold("B15_CURRENT_REPLAY_REQUIRED")
     return current

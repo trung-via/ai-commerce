@@ -1392,3 +1392,432 @@ def test_r4_p0_detached_a04_snapshot_never_dispatches_or_self_attests(a03_r3_cas
     )
     with pytest.raises(OrchestrationError, match="RECEIPT_NOT_VERIFIED"):
         orch.record_receipt(untrusted_receipt)
+
+
+def _w2_png_bytes(red: int = 120) -> bytes:
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, content: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(content))
+            + kind
+            + content
+            + struct.pack(">I", zlib.crc32(kind + content) & 0xFFFFFFFF)
+        )
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 16, 16, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress((b"\x00" + bytes((red, 30, 180)) * 16) * 16))
+        + chunk(b"IEND", b"")
+    )
+
+
+def _w2_require_windows_media() -> None:
+    import sys
+
+    assert sys.platform == "win32", "MATERIAL_UNPROVEN_WINDOWS_REQUIRED"
+    assert shutil.which("ffmpeg") and shutil.which("ffprobe"), "MATERIAL_UNPROVEN_FFMPEG_REQUIRED"
+
+
+@pytest.fixture
+def w2_pulse_case(tmp_path, monkeypatch, _a03_r3_template):
+    """Composed A03 (CREATIVE_COMPLETE) -> A04 (persisted receipt) -> PULSE offline fixture."""
+    import time
+    from ai_commerce.creative import CreativeSidecarStore, run_creative_production
+    from ai_commerce.production_runtime import attended_worker
+    from ai_commerce.production_runtime.contracts import (
+        canonical_bytes as pulse_canonical_bytes,
+        draft_authorization,
+        seal_contract,
+    )
+
+    source_sha = "95f4f5d9d448410305fbfa809c25ea331008723c"
+    journey_id = "journey:" + "11" * 16
+    cycle_id = "cycle:w2-pulse-02"
+    job_id = "job:w2-pulse-02"
+
+    creative_root = tmp_path / "creative"
+    shutil.copytree(_a03_r3_template["creative_dir"], creative_root)
+    with pytest.MonkeyPatch.context() as mp:
+        h, cli, _, reasoner = _make_r4_cli(tmp_path / "synthetic-cli-host", mp)
+        sidecars = CreativeSidecarStore(creative_root)
+        prod_job = h.production_job(
+            _a03_r3_template["cycle"],
+            journey_id=journey_id,
+            cycle_id=cycle_id,
+            job_id=job_id,
+            attempt=1,
+            configuration=cli.config,
+            purpose="PRODUCTION",
+        )
+        a04_grant = LocalAuthorization(
+            journey_id=journey_id,
+            cycle_id=cycle_id,
+            job_id=job_id,
+            source_sha=source_sha,
+            authorization_ref="fixture:w2-a04-grant",
+            route_id="a03-to-a04",
+        )
+        a04_state_dir = tmp_path / "production-a04"
+        a04_owner = ProductionPipelineOrchestrator(
+            state_dir=a04_state_dir, source_sha=source_sha, local_authorization=a04_grant,
+        )
+        prod_result = run_creative_production(
+            prod_job, sidecars, reasoner,
+            authorization=_a03_r3_template["cli_grant"],
+            production=a04_owner,
+        )
+    assert prod_result.status == "CREATIVE_COMPLETE" and prod_result.package is not None
+    assert a04_owner.last_result is not None and a04_owner.last_result.status == "SUCCESS"
+    a04_receipt = a04_owner.last_result.receiver_receipt
+    a04_receipt_path = Path(a04_owner.last_result.event.receipt.artifact_ref)
+    assert a04_receipt.audio_mode == "SILENCE"
+
+    asset_dir = tmp_path / "private-assets"
+    asset_dir.mkdir()
+    png_path = asset_dir / "authorized-still.png"
+    png_bytes = _w2_png_bytes(120)
+    png_path.write_bytes(png_bytes)
+    asset_sha = bytes_digest(png_bytes)
+    asset_ref = "asset:" + asset_sha
+
+    rights_claim = {
+        "schema_version": "LocalStillRights.v1",
+        "asset_sha256": asset_sha,
+        "source_sha": source_sha,
+        "scope": "OFFLINE_LOCAL_RENDER",
+        "status": "GRANTED",
+        "valid_from": 0,
+        "expires_at": int(time.time()) + 600,
+    }
+    rights_raw = pulse_canonical_bytes(rights_claim)
+    rights_path = asset_dir / "rights-still.json"
+    rights_path.write_bytes(rights_raw)
+    rights_sha = bytes_digest(rights_raw)
+    rights_ref = "rights:" + rights_sha
+
+    directive_body = {
+        "schema_version": "CreativeDirective.v1",
+        "journey_id": journey_id,
+        "source_sha": source_sha,
+        "directive_version": 1,
+        "creative": {
+            "freeform": "Silent offline visual showcase, null product, no CTA.",
+            "product_ref": None,
+        },
+        "scope": {
+            "action_class": "EXPORT_DRAFT",
+            "provider_ref": None,
+            "account_ref": None,
+            "surface": None,
+            "asset_sha256": None,
+        },
+        "assets": [{
+            "ref": asset_ref,
+            "sha256": asset_sha,
+            "evidence_type": "HUMAN_SUPPLIED",
+            "rights": {"status": "GRANTED", "ref": rights_ref, "sha256": rights_sha},
+        }],
+        "action_classes": ["EXPORT_DRAFT"],
+        "allowed_tools": [attended_worker.TOOL],
+        "provenance": {
+            "actor": "HUMAN",
+            "actor_ref": "human:" + "4" * 32,
+            "evidence_type": "HUMAN_SUPPLIED",
+            "source_ref": "directive:" + "5" * 32,
+            "source_sha": source_sha,
+        },
+        "authorization": draft_authorization(),
+    }
+    directive = seal_contract("CreativeDirective", directive_body)
+    directive_path = tmp_path / "directive.json"
+    directive_path.write_bytes(directive.raw)
+
+    pulse_grant = LocalAuthorization(
+        journey_id=journey_id,
+        cycle_id=cycle_id,
+        job_id=job_id,
+        source_sha=source_sha,
+        authorization_ref="fixture:w2-pulse-grant",
+        route_id="a04-to-pulse-offline",
+    )
+
+    def make_pulse_owner(**changes):
+        return ProductionPipelineOrchestrator(**{
+            "state_dir": tmp_path / "production-pulse",
+            "source_sha": source_sha,
+            "local_authorization": pulse_grant,
+            **changes,
+        })
+
+    call_kwargs = {
+        "a04_receipt_ref": a04_receipt_path,
+        "directive_ref": directive_path,
+        "assets": (f"{asset_ref}={png_path}",),
+        "rights": (f"{rights_ref}={rights_path}",),
+        "asset_root": asset_dir,
+        "package_ref": Path(a04_receipt.package_ref),
+        "a03_result_ref": Path(a04_receipt.a03_result_ref),
+        "cta_mode": "NONE",
+        "cta_text": None,
+    }
+    return {
+        "tmp_path": tmp_path,
+        "source_sha": source_sha,
+        "journey_id": journey_id,
+        "cycle_id": cycle_id,
+        "job_id": job_id,
+        "a04_receipt": a04_receipt,
+        "a04_receipt_path": a04_receipt_path,
+        "directive": directive,
+        "directive_body": directive_body,
+        "directive_path": directive_path,
+        "asset_dir": asset_dir,
+        "png_path": png_path,
+        "rights_path": rights_path,
+        "rights_claim": rights_claim,
+        "asset_ref": asset_ref,
+        "rights_ref": rights_ref,
+        "grant": pulse_grant,
+        "make_owner": make_pulse_owner,
+        "call_kwargs": call_kwargs,
+    }
+
+
+def test_w2_pulse02_composed_a03_a04_outbox_pulse_wait_brain_and_idempotent_dedup(w2_pulse_case, monkeypatch):
+    _w2_require_windows_media()
+    from ai_commerce.a04_pulse_handoff.handoff import PULSE_LOCAL_CONSUMER_ID
+    from ai_commerce.production_runtime import attended_worker, receipt as runtime_receipt
+    from ai_commerce.production_runtime.contracts import parse_contract, seal_contract
+
+    real_receive, receive_calls = attended_worker.receive_a04_pulse_handoff, []
+    real_a06, render_calls = attended_worker.service.run, []
+
+    def spy_receive(**kwargs):
+        receive_calls.append(kwargs["packet_path"])
+        return real_receive(**kwargs)
+
+    def spy_a06(*args, **kwargs):
+        render_calls.append(args[1])
+        return real_a06(*args, **kwargs)
+
+    monkeypatch.setattr(attended_worker, "receive_a04_pulse_handoff", spy_receive)
+    monkeypatch.setattr(attended_worker.service, "run", spy_a06)
+
+    owner = w2_pulse_case["make_owner"]()
+    actual = owner.complete_a04_pulse(**w2_pulse_case["call_kwargs"])
+    assert actual.status == "SUCCESS"
+    assert actual.accepted_consumer == PULSE_LOCAL_CONSUMER_ID
+    assert actual.event.receipt.outcome == "SUCCESS"
+    assert actual.event.receipt.consumer_executed is True
+    assert actual.event.receipt.execution_ref.startswith("local:pulse:")
+    assert actual.completed.spec.output_contract == "A04PulseOfflineHandoffPacket.v1"
+    assert len(receive_calls) == 1 and len(render_calls) == 1
+
+    rec = actual.receiver_receipt
+    assert rec["schema_version"] == "A04PulseReceiverReceipt.v1"
+    assert rec["state"] == "WAIT_BRAIN"
+    assert rec["human_attended"] is False
+    assert rec["brain_decision"] is None
+    assert rec["journal_sequence"] == 4
+    assert rec["source_sha"] == w2_pulse_case["source_sha"]
+    assert rec["q4_qa_ref"].startswith("q4:")
+    assert rec["provider_network_calls"] == rec["paid_generation_calls"] == rec["publish_calls"] == 0
+
+    receipt_file = Path(actual.event.receipt.artifact_ref)
+    parsed_receipt = parse_contract("ProductJourneyReceipt", receipt_file.read_bytes()).to_dict()
+    assert parsed_receipt["state"] == "WAIT_BRAIN"
+    assert parsed_receipt["brain_decision"] is None
+    assert parsed_receipt["effect"]["status"] == "NONE"
+    assert parsed_receipt["network_calls_performed"] is False
+    assert parsed_receipt["external_effects_performed"] is False
+    assert any(pin["ref"] == rec["q4_qa_ref"] for pin in parsed_receipt["owner_evidence_refs"])
+
+    evidence_file = receipt_file.parent / "autonomous-offline-evidence.json"
+    parsed_evidence = runtime_receipt.parse_autonomous_evidence_packet(evidence_file.read_bytes())
+    assert parsed_evidence["human_attended"] is False
+    assert parsed_evidence["q4_technical_qa"]["status"] == "TECHNICAL_QA_PASSED"
+    assert parsed_evidence["q4_technical_qa"]["ffprobe_full_decode"] is True
+    assert parsed_evidence["q4_technical_qa"]["audio_mode"] == "SILENCE"
+    assert parsed_evidence["q4_technical_qa"]["cta_mode"] == "NONE"
+
+    # Reopened orchestrator replays exact logical dispatch idempotently with zero extra renders.
+    reopened = w2_pulse_case["make_owner"]()
+    assert reopened.complete_a04_pulse(**w2_pulse_case["call_kwargs"]) == actual
+    assert reopened.resume_local() == (actual,)
+    assert len(receive_calls) == 1 and len(render_calls) == 1
+
+    # Persistent dedup rejects reusing the same A04 receipt with a bumped directive version.
+    v2_body = copy.deepcopy(w2_pulse_case["directive_body"])
+    v2_body["directive_version"] = 2
+    v2_dir = seal_contract("CreativeDirective", v2_body)
+    v2_path = w2_pulse_case["tmp_path"] / "directive-v2.json"
+    v2_path.write_bytes(v2_dir.raw)
+    with pytest.raises(OrchestrationError, match="DUPLICATE_LOGICAL_IDENTITY"):
+        reopened.complete_a04_pulse(**{**w2_pulse_case["call_kwargs"], "directive_ref": v2_path})
+    assert len(receive_calls) == 1 and len(render_calls) == 1
+
+    # Outbox schema stays user_version=1 and records exact ordered journal sequence.
+    with sqlite3.connect(owner._state_dir / "production.sqlite") as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 1
+        kinds = [row[0] for row in db.execute("SELECT kind FROM journal ORDER BY seq")]
+    assert kinds.index("ProductionStageCompleted.v1") < kinds.index("ProductionStageDispatched.v1")
+    assert kinds.index("ProductionStageDispatched.v1") < kinds.index("A04PulseLocalInvocation.v1")
+    assert kinds.index("A04PulseLocalInvocation.v1") < kinds.index("ProductionStageReceipt.v1")
+    for kind in ("ProductionStageCompleted.v1", "ProductionDispatchAttempt.v1",
+                 "A04PulseLocalInvocation.v1", "ProductionStageReceipt.v1", "ProductionStageDispatched.v1"):
+        assert len(invocation_rows(owner, kind)) == 1
+
+    # Wire receipts cannot self-attest a durable W2 dispatch.
+    with pytest.raises(OrchestrationError, match="COMPLETED_NOT_FOUND"):
+        reopened.record_receipt(actual.event.receipt)
+
+
+@pytest.mark.parametrize("window", ["before-dispatch", "after-reservation", "after-witness"])
+def test_w2_pulse02_restart_windows_converge_without_double_render(w2_pulse_case, monkeypatch, window):
+    _w2_require_windows_media()
+    from ai_commerce.production_runtime import attended_worker
+
+    real_a06, render_calls = attended_worker.service.run, []
+    def spy_a06(*args, **kwargs):
+        render_calls.append(1)
+        return real_a06(*args, **kwargs)
+    monkeypatch.setattr(attended_worker.service, "run", spy_a06)
+
+    state_dir = w2_pulse_case["tmp_path"] / f"restart-{window}"
+    first = w2_pulse_case["make_owner"](state_dir=state_dir)
+
+    if window == "before-dispatch":
+        pending = first.complete_a04_pulse(**w2_pulse_case["call_kwargs"], dispatch=False)
+        assert pending.status == "PENDING" and pending.event is None
+        assert len(render_calls) == 0
+        assert not invocation_rows(first, "ProductionDispatchAttempt.v1")
+        recovered, = w2_pulse_case["make_owner"](state_dir=state_dir).resume_local()
+        assert recovered.status == "SUCCESS" and recovered.receiver_receipt["state"] == "WAIT_BRAIN"
+        assert len(render_calls) == 1
+        return
+
+    real_invoke = first._invoke_pulse
+    if window == "after-reservation":
+        def crash_after_invoke(completed, raw):
+            witness = real_invoke(completed, raw)
+            raise LocalCrash()
+        monkeypatch.setattr(first, "_invoke_pulse", crash_after_invoke)
+    else:
+        monkeypatch.setattr(first, "_finish_local", lambda *args: (_ for _ in ()).throw(LocalCrash()))
+
+    with pytest.raises(LocalCrash):
+        first.complete_a04_pulse(**w2_pulse_case["call_kwargs"])
+    assert not invocation_rows(first, "ProductionStageReceipt.v1")
+    assert len(render_calls) == 1
+
+    # Advance clock past lease expiry (60s) while keeping local rights (600s) fresh.
+    import time
+    expired_lease_now = time.time() + 120
+    monkeypatch.setattr("ai_commerce.production_orchestration.orchestrator.time.time", lambda: expired_lease_now)
+    second = w2_pulse_case["make_owner"](state_dir=state_dir)
+    recovered, = second.resume_local()
+    assert recovered.status == ("UNKNOWN" if window == "after-reservation" else "SUCCESS")
+    assert second.resume_local() == (recovered,)
+    assert len(render_calls) == 1
+    assert len(invocation_rows(first, "ProductionStageReceipt.v1")) == (window == "after-witness")
+
+
+def test_w2_pulse02_negative_corrupt_stale_rights_q4_witness_and_authority(w2_pulse_case, monkeypatch):
+    _w2_require_windows_media()
+    from ai_commerce.production_runtime import attended_worker
+    from ai_commerce.production_runtime.contracts import (
+        canonical_bytes as pulse_canonical_bytes,
+        seal_contract,
+    )
+
+    # 1) Stale source SHA, missing/revoked auth, and wrong route fail closed with no state created.
+    with pytest.raises(OrchestrationError, match="SOURCE_SHA_MISMATCH"):
+        w2_pulse_case["make_owner"](
+            state_dir=w2_pulse_case["tmp_path"] / "neg-sha", source_sha="0" * 40
+        ).complete_a04_pulse(**w2_pulse_case["call_kwargs"])
+    with pytest.raises(OrchestrationError, match="LOCAL_AUTHORIZATION_REQUIRED"):
+        w2_pulse_case["make_owner"](
+            state_dir=w2_pulse_case["tmp_path"] / "neg-noauth", local_authorization=None
+        ).complete_a04_pulse(**w2_pulse_case["call_kwargs"])
+    wrong_route_grant = replace(w2_pulse_case["grant"], route_id="a03-to-a04")
+    with pytest.raises(OrchestrationError, match="LOCAL_ROUTE_MISMATCH"):
+        w2_pulse_case["make_owner"](
+            state_dir=w2_pulse_case["tmp_path"] / "neg-route", local_authorization=wrong_route_grant
+        ).complete_a04_pulse(**w2_pulse_case["call_kwargs"])
+
+    # 2) Expired rights fail closed before enqueueing or calling PULSE.
+    exp_claim = {**w2_pulse_case["rights_claim"], "expires_at": 1}
+    exp_raw = pulse_canonical_bytes(exp_claim)
+    exp_path = w2_pulse_case["asset_dir"] / "rights-expired.json"
+    exp_path.write_bytes(exp_raw)
+    exp_sha = bytes_digest(exp_raw)
+    exp_ref = "rights:" + exp_sha
+    exp_dir_body = copy.deepcopy(w2_pulse_case["directive_body"])
+    exp_dir_body["assets"][0]["rights"] = {"status": "GRANTED", "ref": exp_ref, "sha256": exp_sha}
+    exp_dir = seal_contract("CreativeDirective", exp_dir_body)
+    exp_dir_path = w2_pulse_case["tmp_path"] / "directive-expired.json"
+    exp_dir_path.write_bytes(exp_dir.raw)
+    neg_exp_dir = w2_pulse_case["tmp_path"] / "neg-expired"
+    with pytest.raises(OrchestrationError, match="PRODUCER_CONTRACT_INVALID"):
+        w2_pulse_case["make_owner"](state_dir=neg_exp_dir).complete_a04_pulse(**{
+            **w2_pulse_case["call_kwargs"],
+            "directive_ref": exp_dir_path,
+            "rights": (f"{exp_ref}={exp_path}",),
+        })
+    assert not neg_exp_dir.exists()
+
+    # 3) Corrupted PNG bytes after outbox commit fail closed as terminal FAILED without calling PULSE.
+    corrupt_dir = w2_pulse_case["tmp_path"] / "neg-corrupt-png"
+    corrupt_owner = w2_pulse_case["make_owner"](state_dir=corrupt_dir)
+    corrupt_owner.complete_a04_pulse(**w2_pulse_case["call_kwargs"], dispatch=False)
+    saved_png = w2_pulse_case["png_path"].read_bytes()
+    try:
+        w2_pulse_case["png_path"].write_bytes(_w2_png_bytes(220))
+        failed, = w2_pulse_case["make_owner"](state_dir=corrupt_dir).resume_local()
+        assert failed.status == "FAILED" and failed.reason == "INPUT_REJECTED" and failed.event is None
+        assert not invocation_rows(corrupt_owner, "ProductionDispatchAttempt.v1")
+    finally:
+        w2_pulse_case["png_path"].write_bytes(saved_png)
+
+    # 4) Pre-invocation missing directive has bounded RETRY_SAFE and converges once restored.
+    retry_dir = w2_pulse_case["tmp_path"] / "neg-missing-retry"
+    retry_owner = w2_pulse_case["make_owner"](state_dir=retry_dir, max_attempts=2)
+    retry_owner.complete_a04_pulse(**w2_pulse_case["call_kwargs"], dispatch=False)
+    saved_dir_bytes = w2_pulse_case["directive_path"].read_bytes()
+    w2_pulse_case["directive_path"].unlink()
+    try:
+        retry_res, = retry_owner.resume_local()
+        assert retry_res.status == "RETRY_SAFE" and retry_res.reason == "INPUT_UNAVAILABLE"
+        assert not invocation_rows(retry_owner, "ProductionDispatchAttempt.v1")
+    finally:
+        w2_pulse_case["directive_path"].write_bytes(saved_dir_bytes)
+    done_res, = w2_pulse_case["make_owner"](state_dir=retry_dir, max_attempts=2).resume_local()
+    assert done_res.status == "SUCCESS"
+
+    # 5) Tampered receiver ProductJourneyReceipt.v1 before ACK fails witness readback closed.
+    tamper_dir = w2_pulse_case["tmp_path"] / "neg-tamper-receipt"
+    tamper_owner = w2_pulse_case["make_owner"](state_dir=tamper_dir)
+    monkeypatch.setattr(tamper_owner, "_finish_local", lambda *args: (_ for _ in ()).throw(LocalCrash()))
+    with pytest.raises(LocalCrash):
+        tamper_owner.complete_a04_pulse(**w2_pulse_case["call_kwargs"])
+    witness = invocation_rows(tamper_owner, "A04PulseLocalInvocation.v1")[0]
+    Path(witness["artifact_ref"]).write_bytes(b'{"tampered":true}')
+    with pytest.raises(OrchestrationError, match="INVOCATION_WITNESS_MISMATCH"):
+        w2_pulse_case["make_owner"](state_dir=tamper_dir).resume_local()
+    assert not invocation_rows(tamper_owner, "ProductionStageReceipt.v1")
+
+    # 6) Post-reservation receiver failure / invalid Q4 transitions to UNKNOWN and never mints SUCCESS.
+    q4_dir = w2_pulse_case["tmp_path"] / "neg-q4-unknown"
+    calls = []
+    def broken_receive(**kwargs):
+        calls.append(kwargs["packet_path"])
+        raise attended_worker.WorkerHold("Q4_TECHNICAL_QA_FAILED")
+    monkeypatch.setattr(attended_worker, "receive_a04_pulse_handoff", broken_receive)
+    unknown = w2_pulse_case["make_owner"](state_dir=q4_dir).complete_a04_pulse(**w2_pulse_case["call_kwargs"])
+    assert unknown.status == "UNKNOWN" and unknown.reason == "RECEIVER_UNRESOLVED" and unknown.event is None
+    assert w2_pulse_case["make_owner"](state_dir=q4_dir).resume_local() == (unknown,)
+    assert len(calls) == 1
+    assert not invocation_rows(w2_pulse_case["make_owner"](state_dir=q4_dir), "ProductionStageReceipt.v1")
