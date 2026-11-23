@@ -3108,7 +3108,8 @@ function Get-AuthenticodeSignature($LiteralPath) {
         )
         result = subprocess.run(
             [str(real_pwsh), *ca._CLEAN_POWERSHELL_FLAGS, stdin_runner],
-            input=harness_script, capture_output=True, text=True, encoding="utf-8", env=env, timeout=15)
+            # The offline Windows harness exceeded 15 s under 12 MT-01 workers.
+            input=harness_script, capture_output=True, text=True, encoding="utf-8", env=env, timeout=45)
     finally:
         shutil.rmtree(raw_root, ignore_errors=True)
     assert result.returncode == 0 and not result.stderr, result.stderr
@@ -3941,7 +3942,8 @@ function Get-AttestedPathCustodySddl($path, $allowedOwners, $expectFile = $false
         )
         result = subprocess.run(
             [str(real_pwsh), *ca._CLEAN_POWERSHELL_FLAGS, stdin_runner],
-            input=harness_script, capture_output=True, text=True, encoding="utf-8", env=env, timeout=15,
+            # The offline Windows harness exceeded 15 s under 12 MT-01 workers.
+            input=harness_script, capture_output=True, text=True, encoding="utf-8", env=env, timeout=45,
         )
     finally:
         shutil.rmtree(raw_root, ignore_errors=True)
@@ -3954,6 +3956,312 @@ function Get-AttestedPathCustodySddl($path, $allowedOwners, $expectFile = $false
         "out": expected,
         "writes": 0, "regWrites": 0, "runCalls": 0,
     }
+
+
+_RESET_OFFLINE_CASES = (
+    ("owned_legacy", "TASK_RESET_VERIFIED", 1, ("wake:34",), "TASK_RESET_ALREADY_READY"),
+    ("already_ready", "TASK_RESET_ALREADY_READY", 0, (), "TASK_RESET_ALREADY_READY"),
+    ("foreign_candidate", "AUTOSTART_CONFLICT", 0, (), None),
+    ("foreign_owner", "AUTOSTART_CONFLICT", 0, (), None),
+    ("foreign_ace", "AUTOSTART_CONFLICT", 0, (), None),
+    ("untrusted_d5", "TASK_RESET_D5_UNVERIFIED", 0, (), None),
+    ("historical_d5", "TASK_RESET_VERIFIED", 1, ("wake:34", "d5:52"), "TASK_RESET_ALREADY_READY"),
+    ("unrelated_d5_profile", "TASK_RESET_D5_UNVERIFIED", 0, (), None),
+    ("after_delete", "UNKNOWN_EFFECT", 1, (), "UNKNOWN_EFFECT"),
+    ("before_registration", "UNKNOWN_EFFECT", 1, ("wake:34",), "UNKNOWN_EFFECT"),
+    ("marker_race", "UNKNOWN_EFFECT", 0, (), "UNKNOWN_EFFECT"),
+    ("failed_readback", "UNKNOWN_EFFECT", 1, ("wake:34",), "UNKNOWN_EFFECT"),
+    ("failed_d5_readback", "UNKNOWN_EFFECT", 1, ("wake:34", "d5:52"), "UNKNOWN_EFFECT"),
+)
+
+
+_RESET_OFFLINE_SCHEDULER = r"""
+$ErrorActionPreference = 'Stop'
+$env:PSModulePath = Join-Path $PSHOME 'Modules'
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$session = [Diagnostics.Process]::GetCurrentProcess().SessionId
+$sddl = 'O:' + $sid + 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;' + $sid + ')'
+$name = 'AI-Commerce-WakeHub-9444-Clean-' + $sid
+$d5Name = 'AI-Commerce-D5-CDP-AtLogon'
+$foreignSid = 'S-1-5-21-101-202-303-987654'
+$trustedPowerShellPaths = @($env:AI_COMMERCE_TASK_POWERSHELL)
+$trustedPowerShellDirs = @([IO.Path]::GetDirectoryName($trustedPowerShellPaths[0]))
+$script:d5Path = $trustedPowerShellPaths[0]
+$action = [pscustomobject]@{
+    Type = 0; Path = $env:TEST_RESET_PYTHONW; Arguments = 'offline-demand'
+    WorkingDirectory = [IO.Path]::GetDirectoryName($env:TEST_RESET_PYTHONW)
+}
+$settings = [pscustomobject]@{
+    AllowDemandStart = $true; AllowHardTerminate = $true; DisallowStartIfOnBatteries = $false
+    Enabled = $true; ExecutionTimeLimit = 'PT45S'; Hidden = $false; MultipleInstances = 2
+    RestartCount = 0; RestartInterval = $null; RunOnlyIfIdle = $false
+    RunOnlyIfNetworkAvailable = $false; StartWhenAvailable = $false
+    StopIfGoingOnBatteries = $false; WakeToRun = $false; DeleteExpiredTaskAfter = $null
+}
+function New-ResetDefinition($id, $path, $arguments, $workDir, $triggerCount, $interval) {
+    $actions = [pscustomobject]@{
+        Context = $id; Count = 1
+        Entry = [pscustomobject]@{ Type = 0; Path = $path; Arguments = $arguments; WorkingDirectory = $workDir }
+    }
+    $actions | Add-Member ScriptMethod Item { param($i) if ($i -eq 1) { $this.Entry } }
+    $triggers = [pscustomobject]@{
+        Count = $triggerCount
+        Entry = [pscustomobject]@{
+            Type = 9; Enabled = $true; UserId = $sid
+            Repetition = [pscustomobject]@{ Interval = $interval }
+        }
+    }
+    $triggers | Add-Member ScriptMethod Item { param($i) if ($i -eq 1) { $this.Entry } }
+    $definition = [pscustomobject]@{
+        Principal = [pscustomobject]@{ Id = $id; UserId = $sid; LogonType = 3; RunLevel = 0; GroupId = $null }
+        Settings = $settings.PSObject.Copy(); Actions = $actions; Triggers = $triggers
+    }
+    $definition | Add-Member ScriptProperty XmlText {
+        $a = $this.Actions.Item(1)
+        $t = $this.Triggers.Item(1)
+        $escape = { param($text) [Security.SecurityElement]::Escape([string]$text) }
+        '<Task><Exec>' + (& $escape $a.Path) + '</Exec><Arguments>' + (& $escape $a.Arguments) +
+            '</Arguments><Triggers count="' + $this.Triggers.Count + '">' +
+            (& $escape $t.Repetition.Interval) + '</Triggers></Task>'
+    }
+    return $definition
+}
+function New-ResetTask($taskName, $definition) {
+    $task = [pscustomobject]@{
+        Name = $taskName; Path = '\' + $taskName; Definition = $definition
+        Enabled = $true; State = 3; Sddl = $sddl
+    }
+    $task | Add-Member ScriptProperty Xml { $this.Definition.XmlText }
+    $task | Add-Member ScriptMethod GetSecurityDescriptor { param($flags) $this.Sddl }
+    $task | Add-Member ScriptMethod GetInstances { param($flags) @{ Count = 0 } }
+    return $task
+}
+
+$expected = New-ResetDefinition 'WakeHubOwner' $action.Path $action.Arguments $action.WorkingDirectory 0 $null
+$legacy = New-ResetDefinition 'WakeHubOwner' $trustedPowerShellPaths[0] 'legacy' $trustedPowerShellDirs[0] 1 'PT1M'
+$script:wake = New-ResetTask $name $legacy
+$script:protectedNames = @('AI-Commerce-EF02-01', 'AI-Commerce-HostOps-01')
+$script:otherNames = $script:protectedNames
+$aiRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'AI-Commerce'
+$d5Profile = Join-Path $aiRoot 'D5-Chrome-9333'
+$chromePath = $env:TEST_RESET_CHROME
+$env:AI_COMMERCE_TASK_CHROME_EXECUTABLES = ConvertTo-Json -InputObject @($chromePath) -Compress
+$env:AI_COMMERCE_TASK_PROFILE_DIR = Join-Path $aiRoot 'WakeHub-9444-Clean'
+$env:AI_COMMERCE_TASK_LEGACY_ARGUMENTS = 'legacy'
+$env:AI_COMMERCE_TASK_REGISTRY = 'OFFLINE-RESET-ONLY'
+if ($case -eq 'already_ready') { $script:wake = New-ResetTask $name $expected }
+if ($case -eq 'foreign_candidate') { $script:otherNames += 'AI-Commerce-WakeHub-9444-Clean-' + $foreignSid }
+if ($case -eq 'foreign_owner') { $script:wake.Sddl = $sddl.Replace(('O:' + $sid), ('O:' + $foreignSid)) }
+if ($case -eq 'foreign_ace') { $script:wake.Sddl += '(A;;GA;;;' + $foreignSid + ')' }
+if ($case -in @('historical_d5', 'unrelated_d5_profile', 'failed_d5_readback')) {
+    $script:d5Path = Join-Path ([IO.Path]::GetDirectoryName($trustedPowerShellDirs[0])) '7.4.99\pwsh.exe'
+}
+if ($case -eq 'unrelated_d5_profile') { $d5Profile = Join-Path (Split-Path $aiRoot) 'UnrelatedProfile' }
+$d5Args = '-NoProfile -NonInteractive -Command "Start-Process -FilePath ''' + $chromePath +
+    ''' -ArgumentList @(''--remote-debugging-port=9333'',''--remote-debugging-address=127.0.0.1'',''--user-data-dir=' +
+    $d5Profile + ''',''--profile-directory=Default'')"'
+$script:d5Arguments = $d5Args
+if ($case -eq 'untrusted_d5') { $script:d5Arguments = '-EncodedCommand unrelated' }
+$script:deletes = [Collections.Generic.List[string]]::new()
+$script:registrations = [Collections.Generic.List[string]]::new()
+$script:events = [Collections.Generic.List[string]]::new()
+
+function Get-FakeD5 {
+    # COM returns a detached definition. Editing it must leave the registered image unchanged.
+    New-ResetTask $d5Name (New-ResetDefinition 'D5Owner' $script:d5Path $script:d5Arguments $null 1 $null)
+}
+$d5Before = Get-FakeD5
+$folder = [pscustomobject]@{ Path = '\' }
+$folder | Add-Member ScriptMethod GetTask {
+    param($taskName)
+    if ($taskName -ceq $name) {
+        $script:events.Add('read:wake')
+        if (!$script:wake) { throw [Runtime.InteropServices.COMException]::new('Task absent', -2147024894) }
+        return $script:wake
+    }
+    if ($taskName -ceq $d5Name) {
+        $script:events.Add('read:d5')
+        return Get-FakeD5
+    }
+    throw 'Unexpected task lookup'
+}
+$folder | Add-Member ScriptMethod GetTasks {
+    param($flags)
+    $tasks = @($script:wake; Get-FakeD5)
+    $tasks += @($script:otherNames | ForEach-Object { [pscustomobject]@{ Name = $_ } })
+    return ,$tasks
+}
+$folder | Add-Member ScriptMethod GetFolders { param($flags) return ,@() }
+$folder | Add-Member ScriptMethod DeleteTask {
+    param($taskName, $flags)
+    $script:deletes.Add($taskName)
+    $script:events.Add('delete:wake')
+    if ($taskName -cne $name -or $flags -ne 0 -or !$script:wake) { throw 'Unexpected delete' }
+    $script:wake = $null
+    if ($case -eq 'after_delete') { throw 'Injected error after deletion' }
+}
+$folder | Add-Member ScriptMethod RegisterTaskDefinition {
+    param($taskName, $definition, $flags, $user, $password, $logon, $acl)
+    if ($user -cne $sid -or $null -ne $password -or $logon -ne 3 -or $acl -cne $sddl) {
+        throw 'Unexpected principal or ACL'
+    }
+    if ($taskName -ceq $name) {
+        $script:registrations.Add("wake:$flags")
+        $script:events.Add('register:wake')
+        if ($script:wake -or $flags -ne 34 -or ![object]::ReferenceEquals($definition, $expected)) {
+            throw 'Expected exact create-only demand definition'
+        }
+        if ($case -eq 'before_registration') { throw 'Injected registration error' }
+        $script:wake = New-ResetTask $name $definition
+        if ($case -eq 'failed_readback') { $script:wake.State = 4 }
+        return $script:wake
+    }
+    if ($taskName -ceq $d5Name) {
+        $script:registrations.Add("d5:$flags")
+        $script:events.Add('register:d5')
+        $a = $definition.Actions.Item(1)
+        if ($flags -ne 52 -or $a.Path -cne $trustedPowerShellPaths[0] -or $a.Arguments -cne $d5Args -or
+            $a.WorkingDirectory -or $definition.Actions.Count -ne 1 -or
+            $definition.Triggers.Count -ne 1 -or $definition.Triggers.Item(1).Type -ne 9 -or
+            $definition.Triggers.Item(1).UserId -cne $sid -or !$definition.Triggers.Item(1).Enabled -or
+            $definition.Triggers.Item(1).Repetition.Interval) { throw 'Unexpected D5 update' }
+        $script:d5Path = $a.Path
+        if ($case -eq 'failed_d5_readback') { $script:d5Arguments = '-EncodedCommand unrelated' }
+        return Get-FakeD5
+    }
+    throw 'Unexpected registration'
+}
+
+function New-FakeResetKey($values) {
+    $key = [pscustomobject]@{ Values = $values }
+    $key | Add-Member ScriptMethod GetValueNames { $this.Values.Keys }
+    $key | Add-Member ScriptMethod GetValue { param($field) $this.Values[$field] }
+    $key | Add-Member ScriptMethod GetValueKind {
+        param($field)
+        if ($this.Values[$field] -is [int]) { return [Microsoft.Win32.RegistryValueKind]::DWord }
+        return [Microsoft.Win32.RegistryValueKind]::String
+    }
+    $key | Add-Member ScriptMethod SetValue { param($field, $value, $kind) $this.Values[$field] = $value }
+    $key | Add-Member ScriptMethod DeleteValue {
+        param($field)
+        if ($field -cne 'AutostartPending') { throw 'Historical journal is immutable' }
+        $script:events.Add('retire:autostart')
+        $this.Values.Remove($field)
+    }
+    $key | Add-Member ScriptMethod Flush {
+        if ($case -eq 'marker_race' -and $this.Values.ContainsKey('Backup')) {
+            $script:prior.Values['LaunchPending'] = 1
+        }
+    }
+    $key | Add-Member ScriptMethod Dispose {}
+    return $key
+}
+$script:prior = New-FakeResetKey @{ DemandMigrationRollback = 'original #1270 journal'; DemandMigrationComplete = 1 }
+if ($case -ne 'already_ready') { $script:prior.Values['AutostartPending'] = 1 }
+$script:resetJournal = $null
+function New-FakeResetJournal($keyName) {
+    if ($keyName -cne 'OFFLINE-RESET-ONLY-TaskReset' -or $script:resetJournal) { throw 'Unexpected journal create' }
+    $script:resetJournal = New-FakeResetKey @{}
+    return $script:resetJournal
+}
+$wakeBefore = $script:wake
+"""
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell reset with fake Task Scheduler")
+@pytest.mark.parametrize("case, code, deletes, registrations, second", _RESET_OFFLINE_CASES)
+def test_clean_9444_reset_offline(case, code, deletes, registrations, second):
+    import sys
+
+    trusted = ca._trusted_powershells()
+    real_pwsh = trusted[0]
+    reset_pwsh = real_pwsh
+    if case in {"historical_d5", "unrelated_d5_profile", "failed_d5_readback"}:
+        reset_pwsh = real_pwsh.parent.parent / "7.7" / "pwsh.exe"
+        if not reset_pwsh.is_file():
+            pytest.skip("Historical D5 reset requires an installed PowerShell 7.7 fixture")
+    chrome = ca._native_program_files() / "Google" / "Chrome" / "Application" / "chrome.exe"
+    assert chrome.is_file(), "The offline D5 attestation requires the signed Chrome fixture"
+    script = "\nfunction Read-Registration" + ca._CLEAN_9444_TASK_RESET.split("\nfunction Read-Registration", 1)[1]
+    # Replace only the scheduler setup and HKCU access. Task/ACL/runtime and D5 attestation stay live.
+    registry_seams = {
+        '[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($env:AI_COMMERCE_TASK_REGISTRY, $write)': '$script:prior',
+        '[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($resetKey, $true)': '$script:resetJournal',
+        '[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($resetKey)': '(New-FakeResetJournal $resetKey)',
+    }
+    for original, fake in registry_seams.items():
+        assert script.count(original) == 1
+        script = script.replace(original, fake)
+    assert "Registry]::CurrentUser" not in script
+    harness = (
+        f"$case = '{case}'\n$retry = $" + str(second is not None).lower() + "\n" + _RESET_OFFLINE_SCHEDULER
+        + "\n$reset = {\n" + script.replace("; exit", "; return") + "\n}\n"
+        + r"""
+$first = & $reset
+$again = if ($retry) { & $reset }
+$d5After = Get-FakeD5
+$backup = if ($script:resetJournal) { $script:resetJournal.GetValue('Backup') | ConvertFrom-Json }
+$backupWake = if ($backup) { $backup.WakeHub | ConvertFrom-Json }
+$backupD5 = if ($backup) { $backup.D5 | ConvertFrom-Json }
+@{
+    first = $first; again = $again; wakeName = $name; deletes = @($script:deletes)
+    registrations = @($script:registrations); events = @($script:events)
+    rollback = $script:prior.Values['DemandMigrationRollback']
+    migrationComplete = $script:prior.Values['DemandMigrationComplete']
+    autostartPending = $script:prior.Values.ContainsKey('AutostartPending')
+    launchPending = $script:prior.Values.ContainsKey('LaunchPending')
+    complete = if ($script:resetJournal) { $script:resetJournal.GetValue('Complete') }
+    backupMatches = $null -ne $backup -and
+        $backupWake.Xml -ceq $wakeBefore.Xml -and $backupWake.SecurityDescriptor -ceq $wakeBefore.Sddl -and
+        $backupD5.Xml -ceq $d5Before.Xml -and $backupD5.SecurityDescriptor -ceq $d5Before.Sddl
+    d5Path = $d5After.Definition.Actions.Item(1).Path
+    d5BeforePath = $d5Before.Definition.Actions.Item(1).Path
+    d5ArgumentsPreserved = $d5After.Definition.Actions.Item(1).Arguments -ceq $d5Before.Definition.Actions.Item(1).Arguments
+    d5TriggerPreserved = ($d5After.Definition.Triggers | ConvertTo-Json -Depth 5) -ceq
+        ($d5Before.Definition.Triggers | ConvertTo-Json -Depth 5)
+    d5AclPreserved = $d5After.GetSecurityDescriptor(7) -ceq $d5Before.GetSecurityDescriptor(7)
+    otherNames = $script:otherNames
+} | ConvertTo-Json -Compress -Depth 5
+"""
+    )
+    env = ca._child_environment()
+    env.update(AI_COMMERCE_TASK_POWERSHELL=str(reset_pwsh), TEST_RESET_CHROME=str(chrome),
+               TEST_RESET_PYTHONW=str(Path(sys._base_executable).with_name("pythonw.exe")))
+    stdin_runner = (
+        "[Console]::InputEncoding=[Text.UTF8Encoding]::new(); "
+        "[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); "
+        "& ([ScriptBlock]::Create([Console]::In.ReadToEnd()))"
+    )
+    result = subprocess.run(
+        [str(real_pwsh), *ca._CLEAN_POWERSHELL_FLAGS, stdin_runner],
+        input=harness, capture_output=True, text=True, encoding="utf-8", env=env, timeout=45,
+    )
+    assert result.returncode == 0 and not result.stderr, result.stderr
+    observed = json.loads(result.stdout)
+    assert (observed["first"], observed["again"]) == (code, second), observed
+    assert observed["deletes"] == [observed["wakeName"]] * deletes
+    assert observed["registrations"] == list(registrations)
+    assert {"AI-Commerce-EF02-01", "AI-Commerce-HostOps-01"} <= set(observed["otherNames"])
+    assert observed["rollback"] == "original #1270 journal"
+    assert observed["migrationComplete"] == 1
+    assert observed["launchPending"] == (case == "marker_race")
+    verified = code == "TASK_RESET_VERIFIED"
+    assert observed["complete"] == (1 if verified else None)
+    assert observed["backupMatches"] == (verified or code == "UNKNOWN_EFFECT")
+    assert observed["autostartPending"] == (not verified and case != "already_ready")
+    assert observed["d5ArgumentsPreserved"] == (case != "failed_d5_readback")
+    assert observed["d5TriggerPreserved"] and observed["d5AclPreserved"]
+    expected_d5_path = str(reset_pwsh) if "d5:52" in registrations else observed["d5BeforePath"]
+    assert observed["d5Path"] == expected_d5_path
+    events = observed["events"]
+    if "wake:34" in registrations:
+        start = events.index("delete:wake")
+        assert events[start:start + 3] == ["delete:wake", "read:wake", "register:wake"]
+    if "d5:52" in registrations:
+        update = events.index("register:d5")
+        assert events[update + 1] == "read:d5"
+    if verified:
+        assert events[events.index("retire:autostart") - 1] == "read:wake"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell launcher")

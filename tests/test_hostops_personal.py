@@ -4131,6 +4131,60 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         self.inventory.assert_not_called()
         self.probe.assert_not_called()
 
+    def test_reset_write_requires_fixed_operation_and_exact_owner_comment(self):
+        op = "reset_clean_9444_tasks"
+        approved = event("write", op, {})
+        request = hostops.parse_event(approved, "write")
+        self.assertEqual(request, {"issue_number": 17, "operation": op, "parameters": {}})
+        self.assertEqual(hostops.perform(request)["code"], "PROTECTED_HOSTOPS_ONLY")
+        for payload, mode, expected in (
+            (event("read", op, {}), "read", "READ_OPERATION_DENIED"),
+            (event("write", "reset_clean_9444_tasks_other", {}), "write", "WRITE_SCOPE_DENIED"),
+            (event("write", op, {"task": "arbitrary"}), "write", "INVALID_PARAMETERS"),
+            (event("write", op, {}, comment="APPROVE WRITE #18"), "write", "EXACT_WRITE_APPROVAL_REQUIRED"),
+            ({**approved, "action": "edited"}, "write", "WRITE_EVENT_DENIED"),
+        ):
+            with self.subTest(expected=expected), self.assertRaisesRegex(hostops.Denied, f"^{expected}$"):
+                hostops.parse_event(payload, mode)
+        for section, expected in (
+            ("issue", "ISSUE_OWNER_OR_STATE_DENIED"),
+            ("sender", "NON_OWNER_EVENT"),
+            ("comment", "EXACT_WRITE_APPROVAL_REQUIRED"),
+        ):
+            payload = copy.deepcopy(approved)
+            actor = payload[section] if section == "sender" else payload[section]["user"]
+            actor["login"] = "another-account"
+            with self.subTest(section=section), self.assertRaisesRegex(hostops.Denied, f"^{expected}$"):
+                hostops.parse_event(payload, "write")
+        self.task.assert_not_called()
+
+    def test_reset_dispatches_once_and_projects_only_verified_reset_success(self):
+        op = "reset_clean_9444_tasks"
+        approved = event("write", op, {})
+        with patch.object(hostops, "_install_protected_clean_autostart") as install:
+            for reply, code, status in (
+                ("TASK_RESET_VERIFIED", "TASK_RESET_VERIFIED", "OBSERVED"),
+                ("TASK_RESET_ALREADY_READY", "TASK_RESET_ALREADY_READY", "OBSERVED"),
+                ("TASK_RESET_D5_UNVERIFIED", "TASK_RESET_D5_UNVERIFIED", "HOLD"),
+                ("PRIVATE result", "UNKNOWN_EFFECT", "HOLD"),
+                ("DEMAND_MIGRATED", "UNKNOWN_EFFECT", "HOLD"),
+                ("UNKNOWN_EFFECT", "UNKNOWN_EFFECT", "HOLD"),
+            ):
+                with self.subTest(reply=reply):
+                    self.task.reset_mock()
+                    self.task.return_value = reply
+                    receipt = self.invoke(approved)
+                    self.assertEqual((receipt["operation"], receipt["code"], receipt["status"]), (op, code, status))
+                    self.assertEqual(receipt["approval_channel"], "OWNER_GITHUB_COMMENT")
+                    self.assertEqual(receipt["source_sha"], self.sha)
+                    self.assertFalse(receipt["wake_sent"])
+                    self.task.assert_called_once_with(self.owner, self.target, self.candidates,
+                                                      install=False, reset=True)
+        install.assert_not_called()
+        self.inventory.assert_not_called()
+        self.record.assert_not_called()
+        self.probe.assert_not_called()
+
     def _clean_source_fixture(self):
         root = self.local / "persistent"
         (root / ".git").mkdir(parents=True, exist_ok=True)
