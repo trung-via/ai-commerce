@@ -52,6 +52,8 @@ MAX_READ = 8192
 MAX_WRITE = 2048
 _CLEAN_AUTOSTART = "install_clean_9444_autostart"
 _CLEAN_DEMAND_MIGRATION = "migrate_clean_9444_demand_task"
+_CLEAN_TASK_RESET = "reset_clean_9444_tasks"
+_CLEAN_TASK_WRITES = (_CLEAN_AUTOSTART, _CLEAN_DEMAND_MIGRATION, _CLEAN_TASK_RESET)
 _CLEAN_RUNTIME_PROBE = "clean_9444_runtime_probe"
 _CLEAN_1270_FORENSIC_READ = "clean_9444_1270_forensic_read"
 _A10_READINESS = "a10_codex_native_readiness"
@@ -226,7 +228,7 @@ def parse_event(event, mode):
         else:
             deny("READ_OPERATION_DENIED")
     else:
-        if operation in (_CLEAN_AUTOSTART, _CLEAN_DEMAND_MIGRATION):
+        if operation in _CLEAN_TASK_WRITES:
             if params:
                 deny("INVALID_PARAMETERS")
         elif operation == "git_sync_main":
@@ -390,6 +392,10 @@ _CLEAN_MIGRATION_CODES = _CLEAN_PUBLIC_CODES | {
     "AUTOSTART_NOT_ENROLLED", "DEMAND_MIGRATED", "DEMAND_ALREADY_READY",
     "TASK_MIGRATION_AMBIGUOUS", "TASK_MIGRATION_NOT_READY", "TASK_MIGRATION_REPLAY",
 }
+_CLEAN_RESET_OBSERVED = {"TASK_RESET_VERIFIED", "TASK_RESET_ALREADY_READY"}
+_CLEAN_RESET_CODES = _CLEAN_PUBLIC_CODES | _CLEAN_RESET_OBSERVED | {
+    "TASK_RESET_D5_UNVERIFIED", "TASK_RESET_NOT_READY", "TASK_RESET_DRIFT",
+}
 
 _CHECKOUT_EGG_INFO_FILES = frozenset({
     "PKG-INFO", "SOURCES.txt", "dependency_links.txt", "entry_points.txt",
@@ -430,9 +436,15 @@ def _clean_source_bytes_match(path: Path, worktree_bytes: bytes, pinned_bytes: b
 
 def _clean_autostart_receipt(code, *, operation=_CLEAN_AUTOSTART):
     migration = operation == _CLEAN_DEMAND_MIGRATION
-    codes = _CLEAN_MIGRATION_CODES if migration else _CLEAN_PUBLIC_CODES
-    observed = ({"DEMAND_MIGRATED", "DEMAND_ALREADY_READY"} if migration else
-                {"CDP_VERIFIED", "INSTALLED_BUT_NOT_RUNNING"})
+    if operation == _CLEAN_TASK_RESET:
+        codes = _CLEAN_RESET_CODES
+        observed = _CLEAN_RESET_OBSERVED
+    elif migration:
+        codes = _CLEAN_MIGRATION_CODES
+        observed = {"DEMAND_MIGRATED", "DEMAND_ALREADY_READY"}
+    else:
+        codes = _CLEAN_PUBLIC_CODES
+        observed = {"CDP_VERIFIED", "INSTALLED_BUT_NOT_RUNNING"}
     if type(code) is not str or code not in codes:
         code = "AUTOSTART_RUNTIME_UNAVAILABLE"
     result = {
@@ -441,7 +453,7 @@ def _clean_autostart_receipt(code, *, operation=_CLEAN_AUTOSTART):
         "exact_chat_verified": False,
         "wake_sent": False, "arbitrary_shell_enabled": False,
     }
-    if not migration:
+    if operation == _CLEAN_AUTOSTART:
         result["devtools_protocol_ok"] = code == "CDP_VERIFIED"
     if not result.keys() <= PERSONAL_PUBLIC_FIELDS:
         deny("PUBLIC_TRANSPORT_GAP")
@@ -996,16 +1008,19 @@ def _install_protected_clean_autostart(event):
         return _clean_autostart_receipt("UNKNOWN_EFFECT" if reserved else "AUTOSTART_RUNTIME_UNAVAILABLE")
 
 
-def _migrate_protected_clean_demand_task(event):
+def _change_protected_clean_task(event, *, operation):
+    reset = operation == _CLEAN_TASK_RESET
+    codes = _CLEAN_RESET_CODES if reset else _CLEAN_MIGRATION_CODES
+
     def receipt(code):
-        return _clean_autostart_receipt(code, operation=_CLEAN_DEMAND_MIGRATION)
+        return _clean_autostart_receipt(code, operation=operation)
 
     receipt("PROTECTED_HOSTOPS_ONLY")
     dispatched = False
     try:
         _require_protected_clean_runner("issue_comment")
         sha = _protected_clean_workflow_sha(write=True)
-        if parse_event(event, "write")["operation"] != _CLEAN_DEMAND_MIGRATION:
+        if parse_event(event, "write")["operation"] != operation:
             deny("PROTECTED_HOSTOPS_ONLY")
         from ai_commerce.remote import chrome_acquisition as acquisition
         owner = acquisition._native_operator()
@@ -1015,8 +1030,11 @@ def _migrate_protected_clean_demand_task(event):
             if acquisition._native_operator() != owner:
                 deny("WINDOWS_OWNER_CONTEXT_UNVERIFIED")
             dispatched = True
-            code = acquisition._clean_task(owner, target, candidates, install=False, migrate=True)
-            if acquisition._native_operator() != owner or code not in _CLEAN_MIGRATION_CODES:
+            if reset:
+                code = acquisition._clean_task(owner, target, candidates, install=False, reset=True)
+            else:
+                code = acquisition._clean_task(owner, target, candidates, install=False, migrate=True)
+            if acquisition._native_operator() != owner or code not in codes:
                 return receipt("UNKNOWN_EFFECT")
             return receipt(code)
     except (ValueError, Denied) as exc:
@@ -5261,7 +5279,7 @@ def perform(request):
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
         return _a10_readiness_receipt(request.get("issue_number"))
-    if op in (_CLEAN_AUTOSTART, _CLEAN_DEMAND_MIGRATION):
+    if op in _CLEAN_TASK_WRITES:
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
         return _clean_autostart_receipt("PROTECTED_HOSTOPS_ONLY", operation=op)
@@ -5406,8 +5424,8 @@ def main():
         else:
             if request["operation"] == _CLEAN_AUTOSTART:
                 outcome = _install_protected_clean_autostart(event)
-            elif request["operation"] == _CLEAN_DEMAND_MIGRATION:
-                outcome = _migrate_protected_clean_demand_task(event)
+            elif request["operation"] in (_CLEAN_DEMAND_MIGRATION, _CLEAN_TASK_RESET):
+                outcome = _change_protected_clean_task(event, operation=request["operation"])
             else:
                 outcome = perform(request)
             result = {
@@ -5418,7 +5436,7 @@ def main():
                 "remote_shell_enabled": False,
                 "source_sha": os.environ.get("GITHUB_SHA", ""),
             }
-            if (request["operation"] in (_CLEAN_AUTOSTART, _CLEAN_DEMAND_MIGRATION)
+            if (request["operation"] in _CLEAN_TASK_WRITES
                     and not re.fullmatch(r"[a-f0-9]{40}", result["source_sha"])):
                 del result["source_sha"]
     except Denied as exc:
