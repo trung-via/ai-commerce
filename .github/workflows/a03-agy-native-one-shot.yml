@@ -1,0 +1,166 @@
+name: A03 AGY native one-shot (owner-authorized)
+
+# Only an exact, owner-authored comment on the existing A03 C2 Issue can
+# request the single bounded effect. No workflow_dispatch or arbitrary inputs.
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  issues: read
+
+jobs:
+  agy-one-shot:
+    if: >-
+      github.event_name == 'issue_comment' &&
+      github.event.action == 'created' &&
+      github.repository == 'trung-via/ai-commerce' &&
+      github.actor == 'trung-via' &&
+      github.event.issue.number == 1294 &&
+      github.event.comment.user.login == 'trung-via' &&
+      github.event.comment.body == 'A03_AGY_NATIVE_ONE_SHOT_20261122_R0' &&
+      github.run_attempt == 1
+    runs-on: [self-hosted, Windows, X64, ai-commerce-ef02]
+    timeout-minutes: 6
+    concurrency:
+      group: a03-agy-native-one-shot-20261122-r0
+      cancel-in-progress: false
+    steps:
+      - name: Accept first exact comment only (replay guard)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = 'A03_AGY_NATIVE_ONE_SHOT_20261122_R0';
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: 1294,
+              per_page: 100,
+            });
+            const matches = comments.filter(c =>
+              c.user?.login === 'trung-via' && c.body === marker);
+            if (!matches.length || matches[0].id !== context.payload.comment.id) {
+              core.setFailed('A03_AGY_ONE_SHOT_REPLAY_OR_MISMATCH');
+            }
+
+      - name: Checkout event-pinned main without repository credentials
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Require exact interactive owner and native agy.exe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+          $username = ($identity.Name -split '\\')[-1]
+          $sessionId = (Get-Process -Id $PID).SessionId
+          if ($username -cne 'TRUNG' -or $sessionId -eq 0) {
+            Write-Output 'A03_AGY_GATE=BLOCK_NATIVE_OWNER_SESSION'
+            exit 1
+          }
+          $command = Get-Command agy.exe -ErrorAction SilentlyContinue
+          if ($null -eq $command -or $command.CommandType -ne 'Application') {
+            Write-Output 'A03_AGY_GATE=BLOCK_NATIVE_AGY_EXE_MISSING'
+            exit 1
+          }
+          $env:A03_AGY_EXECUTABLE = $command.Source
+          $env:PYTHONPATH = Join-Path $env:GITHUB_WORKSPACE 'src'
+          Write-Output 'A03_AGY_GATE=OWNER_OS_SESSION_MATCH_UNATTESTED'
+          @'
+          import os
+          import re
+          import sys
+
+          # No synthetic adapter, resumed session, tool plugin, model fallback,
+          # account switch, raw provider output, or repository write is allowed.
+          try:
+              from ai_commerce.core.provenance import sha256_bytes
+              from ai_commerce.creative.briefs import intake_brief
+              from ai_commerce.creative.v2 import (
+                  A03CreativeJob, CreativeCycleContext, CreativeJobProvenance,
+                  ModelConfiguration, ReasoningRequest,
+              )
+              from ai_commerce.creative.live import (
+                  AIReasoningTask, AntigravityCliCreativeClient,
+                  AntigravityCliTerminalReceipt, InvocationAuthorization,
+                  _binary_digest,
+              )
+
+              brief_text = (
+                  'Tạo đúng một ý tưởng hình ảnh tĩnh cho một tách cà phê. '
+                  'Không nêu sự thật bên ngoài, không dùng công cụ, không CTA, '
+                  'không tìm kiếm, không xuất bản.'
+              )
+              brief = intake_brief(brief_text)
+              cycle = CreativeCycleContext(
+                  cycle_digest=sha256_bytes(b'A03_AGY_NATIVE_ONE_SHOT_20261122_R0'),
+                  step='explore',
+              )
+              request = ReasoningRequest.create(
+                  brief, operation='EXPLORE', mode='diverge',
+                  count=2, cycle=cycle,
+                  schema_version='a03.reasoning-request.v3',
+              )
+              config = ModelConfiguration('antigravity-cli', 'gemini-4-neon', 'high')
+              job = A03CreativeJob.create(
+                  request,
+                  journey_id='a03-agy-native-20261122',
+                  cycle_id='one-shot-r0',
+                  job_id='issue-1294-one-shot',
+                  attempt=1,
+                  correlation_id='a03-agy-one-shot-20261122-r0',
+                  provenance=CreativeJobProvenance(
+                      actor_ref='human:trung-via',
+                      source_ref='github:trung-via/ai-commerce/issues/1294',
+                      source_sha256=sha256_bytes(brief_text.encode('utf-8')),
+                      evidence_type='HUMAN_SUPPLIED',
+                  ),
+                  configuration=config,
+                  purpose='PRODUCTION',
+              )
+              authorization = InvocationAuthorization(
+                  True, True, 'human:trung:2026-11-22:a03-agy-native-one-shot-r0',
+              )
+              task = AIReasoningTask(job, authorization)
+              executable = os.environ['A03_AGY_EXECUTABLE']
+              client = AntigravityCliCreativeClient(
+                  executable, _binary_digest(__import__('pathlib').Path(executable)),
+              )
+              # The one-shot object has an in-process capture claim and invokes
+              # at most one model process after its non-model --version/--help.
+              turn = client.prepare_turn(task)
+              print('A03_AGY_TASK_SHA256=' + task.digest)
+              print('A03_AGY_MODEL_REQUESTED=gemini-4-neon')
+              print('A03_AGY_EFFORT_REQUESTED=high')
+              print('A03_AGY_EFFECT_BUDGET=ONE_NATIVE_TURN_NO_RETRY')
+              receipt = client.invoke_native_turn(turn, authorization=authorization)
+              print('A03_AGY_RECEIPT_STATUS=' + receipt.status)
+              code = receipt.error_code
+              if not re.fullmatch(r'[A-Z][A-Z0-9_]{0,79}', code):
+                  code = 'UNRECOGNIZED_CODE'
+              print('A03_AGY_RECEIPT_CODE=' + code)
+              if isinstance(receipt, AntigravityCliTerminalReceipt):
+                  print('A03_AGY_NATIVE_TURN=ATTEMPTED_OR_UNKNOWN')
+                  print('A03_AGY_TERMINAL_STATUS=' + receipt.terminal_status)
+                  print('A03_AGY_STDOUT_SHA256=' + (receipt.stdout_sha256 or 'UNKNOWN'))
+                  print('A03_AGY_MODEL_MATCH=' + (
+                      'YES' if receipt.observed_model == config.model else 'UNVERIFIED'
+                  ))
+              else:
+                  print('A03_AGY_NATIVE_TURN=NOT_STARTED_PREFLIGHT')
+              # No independent account/session/effort verifier is installed.
+              # Even an AGY SUCCESS terminal is a structural HOLD, not MODEL.
+              print('A03_AGY_ACCOUNT_ATTESTATION=UNKNOWN')
+              print('A03_AGY_SESSION_ATTESTATION=UNKNOWN')
+              print('A03_AGY_EFFORT_ATTESTATION=UNKNOWN')
+              print('A03_AGY_MODEL_PROMOTION=HOLD')
+          except Exception as exc:
+              print('A03_AGY_FAILURE=PREPARE_OR_NATIVE_UNKNOWN')
+              print('A03_AGY_FAILURE_CLASS=' + type(exc).__name__)
+              print('A03_AGY_MODEL_PROMOTION=HOLD')
+              sys.exit(1)
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
