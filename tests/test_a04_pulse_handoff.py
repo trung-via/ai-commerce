@@ -674,3 +674,114 @@ def test_source_boundary_has_no_network_subprocess_provider_or_wakehub_imports()
                 assert node.module.split(".")[0] not in forbidden
                 assert node.module not in forbidden
     assert canonical_handoff_bytes({"b": 1, "a": 2}) == b'{"a":2,"b":1}'
+
+
+def test_pulse_receiver_intake_authorization_and_strict_bounds():
+    from ai_commerce.a04_pulse_handoff.handoff import (
+        PULSE_LOCAL_CONSUMER_ID,
+        PULSE_LOCAL_ROUTE_ID,
+        A04PulseReceiverAuthorization,
+        validate_a04_pulse_receiver_intake,
+    )
+
+    pinned_sha = "95f4f5d9d448410305fbfa809c25ea331008723c"
+    receipt, receipt_raw, pkg_raw, res_raw = _make_receipt(
+        source_sha=pinned_sha, audio_mode="SILENCE"
+    )
+    directive, asset_map, rights_map = _make_directive(
+        source_sha=pinned_sha, product_ref=None, action_class="EXPORT_DRAFT"
+    )
+    pkt = build_a04_pulse_handoff_packet(
+        a04_receipt=receipt,
+        directive=directive,
+        cta_mode="NONE",
+        cta_text=None,
+        directive_bytes=directive.raw,
+        receipt_bytes=receipt_raw,
+        package_bytes=pkg_raw,
+        a03_result_bytes=res_raw,
+        asset_bytes_by_ref=asset_map,
+        rights_bytes_by_ref=rights_map,
+        expected_source_sha=pinned_sha,
+    )
+    auth = A04PulseReceiverAuthorization(
+        authorization_ref="grant:w2-pulse-offline-1",
+        caller_id="ai_commerce.production_orchestration.orchestrator:ProductionPipelineOrchestrator",
+        journey_id=pkt.journey_id,
+        cycle_id=pkt.cycle_id,
+        job_id=pkt.job_id,
+        attempt=pkt.attempt,
+        source_sha=pinned_sha,
+        packet_id=pkt.packet_id,
+        packet_sha256=pkt.packet_sha256,
+        logical_identity=pkt.logical_identity,
+    )
+    assert auth.human_attended is False
+    assert auth.route_id == PULSE_LOCAL_ROUTE_ID
+    assert auth.consumer_id == PULSE_LOCAL_CONSUMER_ID
+    assert A04PulseReceiverAuthorization.from_dict(auth.to_dict()) == auth
+
+    res = validate_a04_pulse_receiver_intake(
+        pkt.to_canonical_bytes(),
+        a04_receipt=receipt_raw,
+        directive=directive.raw,
+        authorization=auth,
+        expected_source_sha=pinned_sha,
+        directive_bytes=directive.raw,
+        receipt_bytes=receipt_raw,
+        package_bytes=pkg_raw,
+        a03_result_bytes=res_raw,
+        asset_bytes_by_ref=asset_map,
+        rights_bytes_by_ref=rights_map,
+    )
+    assert res.valid is True and res.packet == pkt
+
+    # Autonomous intake cannot silently set human_attended=True or claim external authority.
+    for field_name, bad_val, expected_code in (
+        ("human_attended", True, "AUTONOMOUS_MODE_CANNOT_CLAIM_HUMAN_ATTENDED"),
+        ("allow_network", True, "OFFLINE_AUTHORITY_VIOLATION"),
+        ("allow_publish", True, "OFFLINE_AUTHORITY_VIOLATION"),
+        ("consumer_id", "wrong:consumer", "INVALID_PULSE_CONSUMER"),
+        ("route_id", "wrong-route", "INVALID_HANDOFF_ROUTE"),
+    ):
+        forged = {**auth.to_dict(), field_name: bad_val}
+        with pytest.raises(A04PulseHandoffError, match=expected_code):
+            A04PulseReceiverAuthorization.from_dict(forged)
+
+    # Stale source SHA or mismatched packet authorization fails closed.
+    with pytest.raises(A04PulseHandoffError, match="STALE_OR_MISMATCHED_SOURCE_SHA"):
+        validate_a04_pulse_receiver_intake(
+            pkt, a04_receipt=receipt, directive=directive,
+            authorization=auth, expected_source_sha=attended_worker.SOURCE_SHA,
+        )
+    wrong_pkt_auth = A04PulseReceiverAuthorization.from_dict(
+        {**auth.to_dict(), "packet_sha256": "0" * 64}
+    )
+    with pytest.raises(A04PulseHandoffError, match="RECEIVER_AUTH_PACKET_MISMATCH"):
+        validate_a04_pulse_receiver_intake(
+            pkt, a04_receipt=receipt, directive=directive,
+            authorization=wrong_pkt_auth, expected_source_sha=pinned_sha,
+        )
+
+    # Non-EXPORT_DRAFT scope (PLAN_OFFLINE) or unlisted tool is rejected at PULSE intake.
+    plan_dir, _, _ = _make_directive(
+        source_sha=pinned_sha, product_ref=None, action_class="PLAN_OFFLINE"
+    )
+    plan_pkt = build_a04_pulse_handoff_packet(a04_receipt=receipt, directive=plan_dir)
+    plan_auth = A04PulseReceiverAuthorization(
+        authorization_ref="grant:w2-plan",
+        caller_id="ai_commerce.production_orchestration.orchestrator:ProductionPipelineOrchestrator",
+        journey_id=plan_pkt.journey_id,
+        cycle_id=plan_pkt.cycle_id,
+        job_id=plan_pkt.job_id,
+        attempt=plan_pkt.attempt,
+        source_sha=pinned_sha,
+        packet_id=plan_pkt.packet_id,
+        packet_sha256=plan_pkt.packet_sha256,
+        logical_identity=plan_pkt.logical_identity,
+    )
+    with pytest.raises(A04PulseHandoffError, match="OFFLINE_EXPORT_SCOPE_REQUIRED"):
+        validate_a04_pulse_receiver_intake(
+            plan_pkt, a04_receipt=receipt, directive=plan_dir,
+            authorization=plan_auth, expected_source_sha=pinned_sha,
+        )

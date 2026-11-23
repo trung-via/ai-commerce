@@ -83,18 +83,24 @@ CONSUMER_ROUTES = MappingProxyType({
         "ai_commerce.media.generation:accept_creative_production_package",
         "src/ai_commerce/media/generation.py",
     ),
+    "a04-to-pulse-offline": (
+        "ai_commerce.production_runtime.attended_worker:receive_a04_pulse_handoff",
+        "src/ai_commerce/production_runtime/attended_worker.py",
+    ),
 })
 
 ROUTE_OUTPUT_CONTRACTS = MappingProxyType({
     "a10-m05-content-brief": "ContentBrief.v0.1",
     "a03-creative-brief": "ContentBrief.v0.1",
     "a04-media-preparation": "A03CreativeProductionPackage.v1",
+    "a04-to-pulse-offline": "A04PulseOfflineHandoffPacket.v1",
 })
 
-# P1/R4 execute only these deterministic local edges. P0 routes remain snapshots.
+# P1/R4/W2 execute only these deterministic local edges. P0 routes remain snapshots.
 LOCAL_ROUTES = MappingProxyType({
     "a10-m05-to-a03": ("A10.M05", "a03-creative-brief"),
     "a03-to-a04": ("A03.creative", "a04-media-preparation"),
+    "a04-to-pulse-offline": ("A04.pulse_handoff", "a04-to-pulse-offline"),
 })
 
 
@@ -104,7 +110,7 @@ class _Record:
     def to_dict(self) -> dict:
         value = asdict(self)
         # Preserve original P0/P1 wire bytes/digests, including nested records.
-        for name in ("spec", "receipt"):
+        for name in ("spec", "receipt", "pulse_handoff"):
             child = getattr(self, name, None)
             if isinstance(child, _Record):
                 value[name] = child.to_dict()
@@ -113,6 +119,8 @@ class _Record:
                 del value["local_handoff"]
             if self.package_handoff is None:
                 del value["package_handoff"]
+            if self.pulse_handoff is None:
+                del value["pulse_handoff"]
         if type(self) is ProductionStageReceipt and not self.spec.has_local_handoff:
             if self.outcome == "SUCCESS":
                 del value["outcome"]
@@ -132,8 +140,8 @@ class _Record:
     @classmethod
     def from_dict(cls, value: object) -> Self:
         names = {f.name for f in fields(cls)}
-        # P1/R4 extensions have defaults so original P0/P1 detached records still load.
-        optional = names & {"local_handoff", "package_handoff", "outcome", "artifact_ref"}
+        # P1/R4/W2 extensions have defaults so original P0/P1 detached records still load.
+        optional = names & {"local_handoff", "package_handoff", "pulse_handoff", "outcome", "artifact_ref"}
         require(type(value) is dict and names - optional <= set(value) <= names, "CONTRACT_FIELDS")
         args = dict(value)
         nested = {
@@ -142,6 +150,7 @@ class _Record:
             "spec": StageSpec,
             "local_handoff": LocalHandoff,
             "package_handoff": A03PackageHandoff,
+            "pulse_handoff": A04PulseHandoff,
         }
         for key, kind in nested.items():
             if key in args and args[key] is not None:
@@ -248,6 +257,92 @@ class A03PackageHandoff(_Record):
 
 
 @dataclass(frozen=True, kw_only=True)
+class A04PulseHandoff(_Record):
+    """Exact source-pinned A04 -> PULSE bounded offline local handoff reference."""
+    journey_id: str
+    cycle_id: str
+    job_id: str
+    attempt: int
+    source_sha: str
+    packet_id: str
+    packet_sha256: str
+    logical_identity: str
+    packet_ref: str
+    packet_bytes_sha256: str
+    a04_receipt_id: str
+    a04_receipt_digest: str
+    a04_receipt_ref: str
+    directive_version: int
+    directive_sha256: str
+    directive_bytes_sha256: str
+    directive_ref: str
+    asset_root: str
+    assets: tuple[str, ...]
+    rights: tuple[str, ...] = ()
+    package_id: str
+    package_revision: int
+    package_ref: str | None = None
+    a03_result_ref: str | None = None
+    route_id: str = "a04-to-pulse-offline"
+
+    def to_dict(self) -> dict:
+        value = asdict(self)
+        value["assets"] = list(self.assets)
+        value["rights"] = list(self.rights)
+        return value
+
+    @classmethod
+    def from_dict(cls, value: object) -> Self:
+        names = {f.name for f in fields(cls)}
+        optional = {"rights", "package_ref", "a03_result_ref", "route_id"}
+        require(type(value) is dict and names - optional <= set(value) <= names, "CONTRACT_FIELDS")
+        args = dict(value)
+        require(type(args["assets"]) is list, "CONTRACT_FIELDS")
+        args["assets"] = tuple(args["assets"])
+        if "rights" in args:
+            require(type(args["rights"]) is list, "CONTRACT_FIELDS")
+            args["rights"] = tuple(args["rights"])
+        return cls(**args)
+
+    def __post_init__(self) -> None:
+        LocalAuthorization(journey_id=self.journey_id, cycle_id=self.cycle_id, job_id=self.job_id,
+                           source_sha=self.source_sha, authorization_ref="binding", route_id=self.route_id)
+        require(self.route_id == "a04-to-pulse-offline", "LOCAL_ROUTE_MISMATCH")
+        require(type(self.source_sha) is str and re.fullmatch(r"[0-9a-f]{40}", self.source_sha) is not None,
+                "SOURCE_SHA_REQUIRED")
+        require(type(self.attempt) is int and self.attempt >= 1, "INVALID_ATTEMPT")
+        require(type(self.directive_version) is int and self.directive_version >= 1, "INVALID_DIRECTIVE_VERSION")
+        require(type(self.package_revision) is int and self.package_revision >= 1, "INVALID_REVISION")
+        require(type(self.packet_id) is str and re.fullmatch(r"a04pulse-[0-9a-f]{64}", self.packet_id) is not None,
+                "INVALID_PACKET_ID")
+        require(type(self.logical_identity) is str
+                and re.fullmatch(r"logical:[0-9a-f]{64}", self.logical_identity) is not None,
+                "INVALID_LOGICAL_IDENTITY")
+        require(type(self.a04_receipt_id) is str
+                and re.fullmatch(r"a04handoff-[0-9a-f]{64}", self.a04_receipt_id) is not None,
+                "INVALID_A04_RECEIPT_ID")
+        require(type(self.package_id) is str
+                and re.fullmatch(r"package:[0-9a-f]{64}", self.package_id) is not None,
+                "INVALID_PACKAGE_ID")
+        for value in (
+            self.packet_sha256, self.packet_bytes_sha256,
+            self.a04_receipt_digest, self.directive_sha256, self.directive_bytes_sha256,
+        ):
+            _hash(value)
+        for value in (self.packet_ref, self.a04_receipt_ref, self.directive_ref, self.asset_root):
+            _text(value)
+        for optional_ref in (self.package_ref, self.a03_result_ref):
+            if optional_ref is not None:
+                _text(optional_ref)
+        require(type(self.assets) is tuple and 1 <= len(self.assets) <= 4, "INVALID_ASSETS")
+        for item in self.assets:
+            _text(item)
+        require(type(self.rights) is tuple and len(self.rights) <= 4, "INVALID_RIGHTS")
+        for item in self.rights:
+            _text(item)
+
+
+@dataclass(frozen=True, kw_only=True)
 class RouteAuthorization(_Record):
     route_id: str
     consumer_id: str
@@ -276,14 +371,21 @@ class StageSpec(_Record):
     idempotency_key: str
     provenance: Provenance
     authorization: RouteAuthorization
-    output_contract: Literal["ContentBrief.v0.1", "A03CreativeProductionPackage.v1"] = "ContentBrief.v0.1"
+    output_contract: Literal[
+        "ContentBrief.v0.1", "A03CreativeProductionPackage.v1", "A04PulseOfflineHandoffPacket.v1"
+    ] = "ContentBrief.v0.1"
     schema_version: Literal["StageSpec.v1"] = "StageSpec.v1"
     local_handoff: LocalHandoff | None = None
     package_handoff: A03PackageHandoff | None = None
+    pulse_handoff: A04PulseHandoff | None = None
 
     @property
     def has_local_handoff(self) -> bool:
-        return self.local_handoff is not None or self.package_handoff is not None
+        return (
+            self.local_handoff is not None
+            or self.package_handoff is not None
+            or self.pulse_handoff is not None
+        )
 
     def __post_init__(self) -> None:
         self._version()
@@ -300,7 +402,10 @@ class StageSpec(_Record):
                 (self.route_id, self.consumer_id, self.consumer_path), "ROUTE_AUTHORIZATION_MISMATCH")
         require(type(self.output_contract) is str and self.output_contract == ROUTE_OUTPUT_CONTRACTS[self.route_id],
                 "OUTPUT_CONTRACT")
-        require(not (self.local_handoff is not None and self.package_handoff is not None), "HANDOFF_CONFLICT")
+        handoff_count = sum(
+            h is not None for h in (self.local_handoff, self.package_handoff, self.pulse_handoff)
+        )
+        require(handoff_count <= 1, "HANDOFF_CONFLICT")
         if self.local_handoff is not None:
             require(type(self.local_handoff) is LocalHandoff, "LOCAL_HANDOFF_REQUIRED")
             require((self.stage_id, self.route_id) == LOCAL_ROUTES[self.local_handoff.route_id],
@@ -309,6 +414,11 @@ class StageSpec(_Record):
         if self.package_handoff is not None:
             require(type(self.package_handoff) is A03PackageHandoff, "LOCAL_HANDOFF_REQUIRED")
             require((self.stage_id, self.route_id) == LOCAL_ROUTES[self.package_handoff.route_id],
+                    "LOCAL_ROUTE_MISMATCH")
+            require(auth.scope == "SOURCE_ONLY_LOCAL", "AUTHORIZATION_SCOPE")
+        if self.pulse_handoff is not None:
+            require(type(self.pulse_handoff) is A04PulseHandoff, "LOCAL_HANDOFF_REQUIRED")
+            require((self.stage_id, self.route_id) == LOCAL_ROUTES[self.pulse_handoff.route_id],
                     "LOCAL_ROUTE_MISMATCH")
             require(auth.scope == "SOURCE_ONLY_LOCAL", "AUTHORIZATION_SCOPE")
 

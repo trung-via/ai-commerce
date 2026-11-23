@@ -15,6 +15,13 @@ import sqlite3
 import time
 from typing import Literal
 
+from ai_commerce.a04_pulse_handoff.handoff import (
+    A04PulseHandoffPacket,
+    A04PulseReceiverAuthorization,
+    build_a04_pulse_handoff_packet,
+    parse_a04_pulse_handoff_packet,
+    validate_a04_pulse_receiver_intake,
+)
 from ai_commerce.creative.briefs import brief_digest, intake_brief
 from ai_commerce.creative import briefs as creative_briefs, verified_reasoning_receipt
 from ai_commerce.creative._validation import read_json as read_strict_json
@@ -28,9 +35,11 @@ from ai_commerce.opportunity.bridge.briefs import validate_bridge
 from ai_commerce.opportunity.core.models import validate_opportunity_decision
 from ai_commerce.opportunity.signals.files import local_path, read_local
 from ai_commerce.opportunity.signals.files import ledger_path
+from ai_commerce.production_runtime import attended_worker, receipt as runtime_receipt
+from ai_commerce.production_runtime.contracts import parse_contract as parse_pulse_contract
 
 from .contracts import (
-    A03PackageHandoff, CONSUMER_ROUTES, LocalAuthorization, LocalHandoff, OrchestrationError,
+    A03PackageHandoff, A04PulseHandoff, CONSUMER_ROUTES, LocalAuthorization, LocalHandoff, OrchestrationError,
     ProductionStageCompleted, ProductionStageDispatched, ProductionStageReceipt,
     Provenance, RouteAuthorization, StageSpec, bytes_digest, canonical_bytes, digest, require,
 )
@@ -119,6 +128,27 @@ class ProductionPipelineOrchestrator:
                         and prod_res.package.source_brief_digest == pkg.source_brief_digest
                         and prod_res.package.selected_concept == pkg.selected_concept
                         and prod_res.package.lineage == pkg.lineage, "A04_INPUT_BINDING")
+            except OrchestrationError:
+                raise
+            except (ValueError, TypeError, KeyError):
+                raise OrchestrationError("CONSUMER_CONTRACT_INVALID") from None
+        elif spec.route_id == "a04-to-pulse-offline":
+            require(type(input_value) is dict and bytes_digest(artifact_bytes(input_value)) == spec.input_sha256,
+                    "INPUT_HASH_MISMATCH")
+            try:
+                pkt = A04PulseHandoffPacket.from_dict(output)
+                require(bytes_digest(pkt.to_canonical_bytes()) == spec.output_sha256, "OUTPUT_HASH_MISMATCH")
+                a04_rec = media_generation.A04CreativeHandoffReceipt.from_dict(input_value)
+                require(
+                    a04_rec.receipt_id == pkt.a04_receipt_id
+                    and a04_rec.digest == pkt.a04_receipt_digest == spec.source_sha256
+                    and a04_rec.journey_id == pkt.journey_id
+                    and a04_rec.cycle_id == pkt.cycle_id
+                    and a04_rec.job_id == pkt.job_id
+                    and a04_rec.attempt == pkt.attempt
+                    and a04_rec.source_sha == pkt.source_sha,
+                    "A04_PULSE_INPUT_BINDING",
+                )
             except OrchestrationError:
                 raise
             except (ValueError, TypeError, KeyError):
@@ -529,6 +559,389 @@ class ProductionPipelineOrchestrator:
         self.last_result = self.dispatch_local(key) if dispatch else DispatchResult(status="PENDING", completed=completed)
         return self.last_result
 
+    @staticmethod
+    def _pulse_receiver_authorization(
+        grant: LocalAuthorization,
+        *,
+        attempt: int,
+        packet_id: str,
+        packet_sha256: str,
+        logical_identity: str,
+    ) -> A04PulseReceiverAuthorization:
+        return A04PulseReceiverAuthorization(
+            authorization_ref=grant.authorization_ref,
+            caller_id="ai_commerce.production_orchestration.orchestrator:ProductionPipelineOrchestrator",
+            journey_id=grant.journey_id,
+            cycle_id=grant.cycle_id,
+            job_id=grant.job_id,
+            attempt=attempt,
+            source_sha=grant.source_sha,
+            packet_id=packet_id,
+            packet_sha256=packet_sha256,
+            logical_identity=logical_identity,
+            human_attended=False,
+        )
+
+    @staticmethod
+    def _pulse_mapping(values: tuple[str, ...] | list[str]) -> tuple[tuple[str, ...], dict[str, Path]]:
+        require(type(values) in (tuple, list) and len(values) <= 4, "PRODUCER_CONTRACT_INVALID")
+        normalized: list[str] = []
+        mapping: dict[str, Path] = {}
+        for item in values:
+            require(type(item) is str and "=" in item, "PRODUCER_CONTRACT_INVALID")
+            ref, raw_path = item.split("=", 1)
+            require(ref not in mapping and len(ref) > 0, "PRODUCER_CONTRACT_INVALID")
+            resolved = local_path(raw_path)
+            mapping[ref] = resolved
+            normalized.append(f"{ref}={resolved}")
+        return tuple(normalized), mapping
+
+    def _a04_pulse_producer(
+        self,
+        *,
+        a04_receipt_ref: str | Path,
+        directive_ref: str | Path,
+        assets: tuple[str, ...] | list[str],
+        asset_root: str | Path,
+        rights: tuple[str, ...] | list[str] = (),
+        packet: A04PulseHandoffPacket | dict | bytes | None = None,
+        packet_ref: str | Path | None = None,
+        package_ref: str | Path | None = None,
+        a03_result_ref: str | Path | None = None,
+        cta_mode: str = "NONE",
+        cta_text: str | None = None,
+        min_directive_version: int | None = None,
+        min_package_revision: int | None = None,
+    ) -> tuple[
+        A04PulseHandoffPacket,
+        bytes,
+        Path,
+        media_generation.A04CreativeHandoffReceipt,
+        Path,
+        bytes,
+        Path,
+        Path,
+        tuple[str, ...],
+        tuple[str, ...],
+        Path | None,
+        Path | None,
+    ]:
+        """Resolve genuine persisted A04 receipt, CreativeDirective, assets, rights, and packet."""
+        grant = self._grant()
+        require(grant.route_id == "a04-to-pulse-offline", "LOCAL_ROUTE_MISMATCH")
+        receipt_path = local_path(a04_receipt_ref)
+        receipt_raw = read_local(receipt_path, limit=131072)
+        a04_receipt = media_generation.load_a04_handoff_receipt(receipt_path)
+        require(
+            bytes_digest(receipt_raw) == a04_receipt.digest
+            and a04_receipt.status == "SOURCE_HANDOFF_VERIFIED"
+            and a04_receipt.source_sha == grant.source_sha
+            and (a04_receipt.journey_id, a04_receipt.cycle_id, a04_receipt.job_id)
+            == (grant.journey_id, grant.cycle_id, grant.job_id),
+            "PRODUCER_SOURCE_MISMATCH",
+        )
+
+        dir_path = local_path(directive_ref)
+        directive_raw = read_local(dir_path, limit=131072)
+        directive_contract = parse_pulse_contract("CreativeDirective", directive_raw)
+        require(directive_contract.raw == directive_raw, "OUTPUT_BYTES_MISMATCH")
+
+        resolved_asset_root = local_path(asset_root)
+        asset_items, asset_paths = self._pulse_mapping(assets)
+        rights_items, rights_paths = self._pulse_mapping(rights)
+        require(1 <= len(asset_items) <= 4, "PRODUCER_CONTRACT_INVALID")
+        asset_bytes_by_ref = {
+            ref: read_local(path, limit=4 * 1024 * 1024) for ref, path in asset_paths.items()
+        }
+        rights_bytes_by_ref = {
+            ref: read_local(path, limit=131072) for ref, path in rights_paths.items()
+        }
+
+        pkg_path = local_path(package_ref) if package_ref is not None else None
+        package_raw = read_local(pkg_path, limit=4 * 1024 * 1024) if pkg_path is not None else None
+        res_path = local_path(a03_result_ref) if a03_result_ref is not None else None
+        a03_result_raw = read_local(res_path, limit=4 * 1024 * 1024) if res_path is not None else None
+
+        persisted_packet_path: Path | None = None
+        if packet_ref is not None:
+            persisted_packet_path = local_path(packet_ref)
+            packet_raw = read_local(persisted_packet_path, limit=131072)
+            pkt = parse_a04_pulse_handoff_packet(packet_raw)
+            if packet is not None:
+                if type(packet) is bytes:
+                    require(packet == packet_raw, "OUTPUT_BYTES_MISMATCH")
+                elif type(packet) is A04PulseHandoffPacket:
+                    require(packet == pkt, "OUTPUT_BYTES_MISMATCH")
+                elif type(packet) is dict:
+                    require(A04PulseHandoffPacket.from_dict(packet) == pkt, "OUTPUT_BYTES_MISMATCH")
+                else:
+                    raise OrchestrationError("PRODUCER_CONTRACT_INVALID")
+        elif packet is not None:
+            if type(packet) is bytes:
+                pkt = parse_a04_pulse_handoff_packet(packet)
+            elif type(packet) is A04PulseHandoffPacket:
+                pkt = A04PulseHandoffPacket.from_dict(packet.to_dict())
+            elif type(packet) is dict:
+                pkt = A04PulseHandoffPacket.from_dict(packet)
+            else:
+                raise OrchestrationError("PRODUCER_CONTRACT_INVALID")
+            packet_raw = pkt.to_canonical_bytes()
+        else:
+            pkt = build_a04_pulse_handoff_packet(
+                a04_receipt=a04_receipt,
+                directive=directive_contract,
+                cta_mode=cta_mode,
+                cta_text=cta_text,
+                directive_bytes=directive_raw,
+                receipt_bytes=receipt_raw,
+                package_bytes=package_raw,
+                a03_result_bytes=a03_result_raw,
+                asset_bytes_by_ref=asset_bytes_by_ref,
+                rights_bytes_by_ref=rights_bytes_by_ref,
+                expected_source_sha=grant.source_sha,
+                expected_journey_id=grant.journey_id,
+                expected_cycle_id=grant.cycle_id,
+                min_directive_version=min_directive_version,
+                min_package_revision=min_package_revision,
+            )
+            packet_raw = pkt.to_canonical_bytes()
+
+        receiver_auth = self._pulse_receiver_authorization(
+            grant,
+            attempt=pkt.attempt,
+            packet_id=pkt.packet_id,
+            packet_sha256=pkt.packet_sha256,
+            logical_identity=pkt.logical_identity,
+        )
+        validate_a04_pulse_receiver_intake(
+            packet_raw,
+            a04_receipt=receipt_raw,
+            directive=directive_raw,
+            authorization=receiver_auth,
+            expected_source_sha=grant.source_sha,
+            directive_bytes=directive_raw,
+            receipt_bytes=receipt_raw,
+            package_bytes=package_raw,
+            a03_result_bytes=a03_result_raw,
+            asset_bytes_by_ref=asset_bytes_by_ref,
+            rights_bytes_by_ref=rights_bytes_by_ref,
+            expected_journey_id=grant.journey_id,
+            expected_cycle_id=grant.cycle_id,
+            min_directive_version=min_directive_version,
+            min_package_revision=min_package_revision,
+        )
+
+        # Pre-check local rights freshness, PNG headers/dimensions, and private custody
+        # before creating any packet file or state directory.
+        attended_worker._private(str(resolved_asset_root))
+        for pin in pkt.assets:
+            img_path = attended_worker._local(str(asset_paths[pin.asset_ref]), under=resolved_asset_root)
+            require(img_path.suffix.lower() == ".png", "PRODUCER_CONTRACT_INVALID")
+            img_raw = asset_bytes_by_ref[pin.asset_ref]
+            require(img_raw.startswith(b"\x89PNG\r\n\x1a\n") and len(img_raw) >= 24, "PRODUCER_CONTRACT_INVALID")
+            w, h = int.from_bytes(img_raw[16:20]), int.from_bytes(img_raw[20:24])
+            require(0 < w <= 1024 and 0 < h <= 1024, "PRODUCER_CONTRACT_INVALID")
+            if pin.evidence_type == "HUMAN_SUPPLIED":
+                require(pin.rights_ref in rights_paths, "PRODUCER_CONTRACT_INVALID")
+                claim_path = attended_worker._local(str(rights_paths[pin.rights_ref]), under=resolved_asset_root)
+                claim = attended_worker._json(claim_path)
+                require(
+                    set(claim) == {"schema_version", "asset_sha256", "source_sha", "scope", "status", "valid_from", "expires_at"}
+                    and claim["schema_version"] == "LocalStillRights.v1"
+                    and claim["asset_sha256"] == pin.asset_sha256
+                    and claim["source_sha"] == grant.source_sha
+                    and claim["scope"] == "OFFLINE_LOCAL_RENDER"
+                    and claim["status"] == "GRANTED"
+                    and type(claim["valid_from"]) is int
+                    and type(claim["expires_at"]) is int
+                    and 0 <= claim["valid_from"] <= attended_worker._now() < claim["expires_at"],
+                    "PRODUCER_CONTRACT_INVALID",
+                )
+
+        if persisted_packet_path is None:
+            packet_dir = local_path(self._state_dir / "a04-pulse-packets")
+            packet_dir.mkdir(parents=True, exist_ok=True)
+            persisted_packet_path = local_path(packet_dir / f"{pkt.packet_id}.json")
+            runtime_receipt.put_new(persisted_packet_path, packet_raw)
+
+        # Full receiver-contract preflight on the exact persisted files.
+        attended_worker._autonomous_inputs(
+            authorization=receiver_auth,
+            packet_path=str(persisted_packet_path),
+            a04_receipt_path=str(receipt_path),
+            directive_path=str(dir_path),
+            assets=asset_items,
+            rights=rights_items,
+            asset_root=str(resolved_asset_root),
+            source_sha=grant.source_sha,
+            package_path=str(pkg_path) if pkg_path is not None else None,
+            a03_result_path=str(res_path) if res_path is not None else None,
+        )
+        return (
+            pkt, packet_raw, persisted_packet_path, a04_receipt, receipt_path,
+            directive_raw, dir_path, resolved_asset_root, asset_items, rights_items,
+            pkg_path, res_path,
+        )
+
+    def complete_a04_pulse(
+        self,
+        *,
+        a04_receipt_ref: str | Path,
+        directive_ref: str | Path,
+        assets: tuple[str, ...] | list[str],
+        asset_root: str | Path,
+        rights: tuple[str, ...] | list[str] = (),
+        packet: A04PulseHandoffPacket | dict | bytes | None = None,
+        packet_ref: str | Path | None = None,
+        package_ref: str | Path | None = None,
+        a03_result_ref: str | Path | None = None,
+        cta_mode: str = "NONE",
+        cta_text: str | None = None,
+        min_directive_version: int | None = None,
+        min_package_revision: int | None = None,
+        dispatch: bool = True,
+    ) -> DispatchResult:
+        """Persist and dispatch a verified A04 -> PULSE offline handoff to WAIT_BRAIN."""
+        grant = self._grant()
+        require(grant.route_id == "a04-to-pulse-offline", "LOCAL_ROUTE_MISMATCH")
+        require(type(dispatch) is bool, "DISPATCH_FLAG")
+        try:
+            (
+                pkt, packet_raw, persisted_packet_path, a04_receipt, receipt_path,
+                directive_raw, dir_path, resolved_asset_root, asset_items, rights_items,
+                pkg_path, res_path,
+            ) = self._a04_pulse_producer(
+                a04_receipt_ref=a04_receipt_ref,
+                directive_ref=directive_ref,
+                assets=assets,
+                asset_root=asset_root,
+                rights=rights,
+                packet=packet,
+                packet_ref=packet_ref,
+                package_ref=package_ref,
+                a03_result_ref=a03_result_ref,
+                cta_mode=cta_mode,
+                cta_text=cta_text,
+                min_directive_version=min_directive_version,
+                min_package_revision=min_package_revision,
+            )
+        except OrchestrationError:
+            raise
+        except (ValueError, TypeError, KeyError, OSError, RecursionError):
+            raise OrchestrationError("PRODUCER_CONTRACT_INVALID") from None
+
+        handoff = A04PulseHandoff(
+            journey_id=grant.journey_id,
+            cycle_id=grant.cycle_id,
+            job_id=grant.job_id,
+            attempt=pkt.attempt,
+            source_sha=grant.source_sha,
+            packet_id=pkt.packet_id,
+            packet_sha256=pkt.packet_sha256,
+            logical_identity=pkt.logical_identity,
+            packet_ref=str(persisted_packet_path),
+            packet_bytes_sha256=bytes_digest(packet_raw),
+            a04_receipt_id=a04_receipt.receipt_id,
+            a04_receipt_digest=a04_receipt.digest,
+            a04_receipt_ref=str(receipt_path),
+            directive_version=pkt.directive_version,
+            directive_sha256=pkt.directive_sha256,
+            directive_bytes_sha256=bytes_digest(directive_raw),
+            directive_ref=str(dir_path),
+            asset_root=str(resolved_asset_root),
+            assets=asset_items,
+            rights=rights_items,
+            package_id=pkt.package_id,
+            package_revision=pkt.package_revision,
+            package_ref=str(pkg_path) if pkg_path is not None else None,
+            a03_result_ref=str(res_path) if res_path is not None else None,
+        )
+        consumer, path = CONSUMER_ROUTES["a04-to-pulse-offline"]
+        key = digest({"handoff": handoff.to_dict(), "consumer": consumer, "output": handoff.packet_bytes_sha256})
+        input_digest = digest({
+            "a04_receipt_id": handoff.a04_receipt_id,
+            "a04_receipt_digest": handoff.a04_receipt_digest,
+            "directive_bytes_sha256": handoff.directive_bytes_sha256,
+            "logical_identity": handoff.logical_identity,
+        })
+        spec = StageSpec(
+            stage_id="A04.pulse_handoff",
+            route_id="a04-to-pulse-offline",
+            consumer_id=consumer,
+            consumer_path=path,
+            source_sha256=handoff.a04_receipt_digest,
+            input_sha256=input_digest,
+            output_sha256=handoff.packet_bytes_sha256,
+            idempotency_key=key,
+            output_contract="A04PulseOfflineHandoffPacket.v1",
+            pulse_handoff=handoff,
+            provenance=Provenance(
+                actor_ref="ai_commerce.a04_pulse_handoff:build_a04_pulse_handoff_packet",
+                source_ref=handoff.a04_receipt_ref,
+                source_sha256=handoff.a04_receipt_digest,
+                evidence_type=pkt.provenance.directive_evidence_type,
+            ),
+            authorization=RouteAuthorization(
+                route_id="a04-to-pulse-offline",
+                consumer_id=consumer,
+                consumer_path=path,
+                authorization_ref=grant.authorization_ref,
+                scope="SOURCE_ONLY_LOCAL",
+            ),
+        )
+        completed = ProductionStageCompleted(
+            spec=spec,
+            completion_ref=handoff.a04_receipt_ref,
+            source_sha256=spec.source_sha256,
+            input_sha256=spec.input_sha256,
+            output_sha256=spec.output_sha256,
+        )
+        slot = f"{self._base_slot(grant)}:{handoff.logical_identity}"
+        with self._database() as db:
+            previous = db.execute("SELECT * FROM outbox WHERE slot=? OR key=?", (slot, key)).fetchone()
+            if previous:
+                require(previous["key"] == key and json.loads(previous["completed"]) == completed.to_dict(),
+                        "IDEMPOTENCY_CONFLICT")
+            else:
+                for existing_row in db.execute("SELECT completed FROM outbox"):
+                    existing_spec = json.loads(existing_row["completed"]).get("spec", {})
+                    existing_pulse = existing_spec.get("pulse_handoff")
+                    if type(existing_pulse) is not dict:
+                        continue
+                    require(
+                        existing_pulse.get("logical_identity") != handoff.logical_identity
+                        and existing_pulse.get("packet_id") != handoff.packet_id
+                        and existing_pulse.get("a04_receipt_id") != handoff.a04_receipt_id
+                        and (
+                            existing_pulse.get("journey_id"),
+                            existing_pulse.get("cycle_id"),
+                            existing_pulse.get("package_id"),
+                            existing_pulse.get("package_revision"),
+                        ) != (
+                            handoff.journey_id,
+                            handoff.cycle_id,
+                            handoff.package_id,
+                            handoff.package_revision,
+                        )
+                        and (
+                            existing_pulse.get("journey_id"),
+                            existing_pulse.get("cycle_id"),
+                            existing_pulse.get("job_id"),
+                            existing_pulse.get("attempt"),
+                        ) != (
+                            handoff.journey_id,
+                            handoff.cycle_id,
+                            handoff.job_id,
+                            handoff.attempt,
+                        ),
+                        "DUPLICATE_LOGICAL_IDENTITY",
+                    )
+                db.execute("INSERT INTO outbox(key,slot,completed,state) VALUES (?,?,?,'PENDING')",
+                           (key, slot, canonical_bytes(completed.to_dict()).decode("utf-8")))
+                self._journal(db, key, completed.schema_version, completed.to_dict())
+        self.last_result = self.dispatch_local(key) if dispatch else DispatchResult(status="PENDING", completed=completed)
+        return self.last_result
+
     def _authorize_completed(self, completed: ProductionStageCompleted) -> None:
         grant = self._grant()
         spec = completed.spec
@@ -550,20 +963,44 @@ class ProductionPipelineOrchestrator:
                     and spec.idempotency_key == digest({"handoff": handoff.to_dict(), "consumer": spec.consumer_id,
                                                         "output": spec.output_sha256}), "LOCAL_COMPLETION_BINDING")
             return
-        handoff = spec.package_handoff
+        if spec.package_handoff is not None:
+            handoff = spec.package_handoff
+            require((handoff.journey_id, handoff.cycle_id, handoff.job_id, handoff.source_sha,
+                    handoff.route_id) == (grant.journey_id, grant.cycle_id, grant.job_id, grant.source_sha, grant.route_id)
+                    and spec.authorization.authorization_ref == grant.authorization_ref
+                    and spec.authorization.scope == "SOURCE_ONLY_LOCAL", "ROUTE_NOT_AUTHORIZED")
+            require(spec.stage_id == "A03.creative" and spec.route_id == "a04-media-preparation"
+                    and spec.output_contract == "A03CreativeProductionPackage.v1"
+                    and (spec.consumer_id, spec.consumer_path) == CONSUMER_ROUTES["a04-media-preparation"],
+                    "LOCAL_ROUTE_MISMATCH")
+            require(spec.source_sha256 == handoff.a03_result_digest
+                    and completed.completion_ref == handoff.a03_result_ref
+                    and spec.provenance.source_ref == handoff.a03_result_ref
+                    and spec.provenance.actor_ref == "ai_commerce.creative.v2:run_creative_production"
+                    and spec.output_sha256 == handoff.package_bytes_sha256
+                    and spec.idempotency_key == digest({"handoff": handoff.to_dict(), "consumer": spec.consumer_id,
+                                                        "output": spec.output_sha256}), "LOCAL_COMPLETION_BINDING")
+            return
+        handoff = spec.pulse_handoff
         require(handoff is not None and (handoff.journey_id, handoff.cycle_id, handoff.job_id, handoff.source_sha,
                 handoff.route_id) == (grant.journey_id, grant.cycle_id, grant.job_id, grant.source_sha, grant.route_id)
                 and spec.authorization.authorization_ref == grant.authorization_ref
                 and spec.authorization.scope == "SOURCE_ONLY_LOCAL", "ROUTE_NOT_AUTHORIZED")
-        require(spec.stage_id == "A03.creative" and spec.route_id == "a04-media-preparation"
-                and spec.output_contract == "A03CreativeProductionPackage.v1"
-                and (spec.consumer_id, spec.consumer_path) == CONSUMER_ROUTES["a04-media-preparation"],
+        require(spec.stage_id == "A04.pulse_handoff" and spec.route_id == "a04-to-pulse-offline"
+                and spec.output_contract == "A04PulseOfflineHandoffPacket.v1"
+                and (spec.consumer_id, spec.consumer_path) == CONSUMER_ROUTES["a04-to-pulse-offline"],
                 "LOCAL_ROUTE_MISMATCH")
-        require(spec.source_sha256 == handoff.a03_result_digest
-                and completed.completion_ref == handoff.a03_result_ref
-                and spec.provenance.source_ref == handoff.a03_result_ref
-                and spec.provenance.actor_ref == "ai_commerce.creative.v2:run_creative_production"
-                and spec.output_sha256 == handoff.package_bytes_sha256
+        require(spec.source_sha256 == handoff.a04_receipt_digest
+                and completed.completion_ref == handoff.a04_receipt_ref
+                and spec.provenance.source_ref == handoff.a04_receipt_ref
+                and spec.provenance.actor_ref == "ai_commerce.a04_pulse_handoff:build_a04_pulse_handoff_packet"
+                and spec.output_sha256 == handoff.packet_bytes_sha256
+                and spec.input_sha256 == digest({
+                    "a04_receipt_id": handoff.a04_receipt_id,
+                    "a04_receipt_digest": handoff.a04_receipt_digest,
+                    "directive_bytes_sha256": handoff.directive_bytes_sha256,
+                    "logical_identity": handoff.logical_identity,
+                })
                 and spec.idempotency_key == digest({"handoff": handoff.to_dict(), "consumer": spec.consumer_id,
                                                     "output": spec.output_sha256}), "LOCAL_COMPLETION_BINDING")
 
@@ -580,29 +1017,83 @@ class ProductionPipelineOrchestrator:
                     "OUTPUT_HASH_MISMATCH")
             require(result["event_id"] == handoff.producer_event_id, "PRODUCER_EVENT_HASH")
             return raw
-        handoff = spec.package_handoff
-        result_dict, result_raw = self._read_canonical_json(Path(handoff.a03_result_ref))
-        require(bytes_digest(result_raw) == handoff.a03_result_digest == spec.source_sha256,
-                "SOURCE_HASH_MISMATCH")
-        pkg_dict, pkg_raw = self._read_canonical_json(Path(handoff.package_ref))
-        require(bytes_digest(pkg_raw) == handoff.package_bytes_sha256 == spec.output_sha256,
+        if spec.package_handoff is not None:
+            handoff = spec.package_handoff
+            result_dict, result_raw = self._read_canonical_json(Path(handoff.a03_result_ref))
+            require(bytes_digest(result_raw) == handoff.a03_result_digest == spec.source_sha256,
+                    "SOURCE_HASH_MISMATCH")
+            pkg_dict, pkg_raw = self._read_canonical_json(Path(handoff.package_ref))
+            require(bytes_digest(pkg_raw) == handoff.package_bytes_sha256 == spec.output_sha256,
+                    "OUTPUT_HASH_MISMATCH")
+            origin, verified_pkg, _, _, _, _, _ = self._a03_producer(
+                result_dict, store=handoff.creative_store_root,
+                result_ref=handoff.a03_result_ref, package=pkg_dict, package_ref=handoff.package_ref,
+            )
+            require(origin.job.attempt == handoff.attempt
+                    and f"{verified_pkg.edit_actor.kind}:{verified_pkg.edit_actor.ref}" == handoff.actor_ref
+                    and (verified_pkg.parent.digest if verified_pkg.parent is not None else None)
+                    == handoff.parent_package_digest
+                    and spec.provenance.evidence_type == origin.job.provenance.evidence_type
+                    and spec.input_sha256 == digest({
+                        "a03_result_digest": handoff.a03_result_digest,
+                        "cycle_result_digest": verified_pkg.lineage.cycle_result_digest,
+                        "package_id": handoff.package_id,
+                        "revision": handoff.revision,
+                    }), "LOCAL_COMPLETION_BINDING")
+            return pkg_raw
+        handoff = spec.pulse_handoff
+        grant = self._grant()
+        packet_raw = read_local(Path(handoff.packet_ref), limit=131072)
+        receipt_raw = read_local(Path(handoff.a04_receipt_ref), limit=131072)
+        directive_raw = read_local(Path(handoff.directive_ref), limit=131072)
+        if handoff.package_ref is not None:
+            read_local(Path(handoff.package_ref), limit=4 * 1024 * 1024)
+        if handoff.a03_result_ref is not None:
+            read_local(Path(handoff.a03_result_ref), limit=4 * 1024 * 1024)
+        for item in (*handoff.assets, *handoff.rights):
+            _, raw_path = item.split("=", 1)
+            read_local(Path(raw_path), limit=4 * 1024 * 1024)
+        require(bytes_digest(packet_raw) == handoff.packet_bytes_sha256 == spec.output_sha256,
                 "OUTPUT_HASH_MISMATCH")
-        origin, verified_pkg, _, _, _, _, _ = self._a03_producer(
-            result_dict, store=handoff.creative_store_root,
-            result_ref=handoff.a03_result_ref, package=pkg_dict, package_ref=handoff.package_ref,
+        require(bytes_digest(receipt_raw) == handoff.a04_receipt_digest == spec.source_sha256,
+                "SOURCE_HASH_MISMATCH")
+        require(bytes_digest(directive_raw) == handoff.directive_bytes_sha256,
+                "INPUT_HASH_MISMATCH")
+        pkt = parse_a04_pulse_handoff_packet(packet_raw)
+        require(
+            pkt.packet_id == handoff.packet_id
+            and pkt.packet_sha256 == handoff.packet_sha256
+            and pkt.logical_identity == handoff.logical_identity
+            and pkt.a04_receipt_id == handoff.a04_receipt_id
+            and pkt.a04_receipt_digest == handoff.a04_receipt_digest
+            and pkt.directive_version == handoff.directive_version
+            and pkt.directive_sha256 == handoff.directive_sha256
+            and pkt.directive_bytes_sha256 == handoff.directive_bytes_sha256
+            and pkt.package_id == handoff.package_id
+            and pkt.package_revision == handoff.package_revision
+            and spec.provenance.evidence_type == pkt.provenance.directive_evidence_type,
+            "LOCAL_COMPLETION_BINDING",
         )
-        require(origin.job.attempt == handoff.attempt
-                and f"{verified_pkg.edit_actor.kind}:{verified_pkg.edit_actor.ref}" == handoff.actor_ref
-                and (verified_pkg.parent.digest if verified_pkg.parent is not None else None)
-                == handoff.parent_package_digest
-                and spec.provenance.evidence_type == origin.job.provenance.evidence_type
-                and spec.input_sha256 == digest({
-                    "a03_result_digest": handoff.a03_result_digest,
-                    "cycle_result_digest": verified_pkg.lineage.cycle_result_digest,
-                    "package_id": handoff.package_id,
-                    "revision": handoff.revision,
-                }), "LOCAL_COMPLETION_BINDING")
-        return pkg_raw
+        receiver_auth = self._pulse_receiver_authorization(
+            grant,
+            attempt=handoff.attempt,
+            packet_id=handoff.packet_id,
+            packet_sha256=handoff.packet_sha256,
+            logical_identity=handoff.logical_identity,
+        )
+        attended_worker._autonomous_inputs(
+            authorization=receiver_auth,
+            packet_path=handoff.packet_ref,
+            a04_receipt_path=handoff.a04_receipt_ref,
+            directive_path=handoff.directive_ref,
+            assets=handoff.assets,
+            rights=handoff.rights,
+            asset_root=handoff.asset_root,
+            source_sha=handoff.source_sha,
+            package_path=handoff.package_ref,
+            a03_result_path=handoff.a03_result_ref,
+        )
+        return packet_raw
 
     def _invoke_a03(self, completed: ProductionStageCompleted, raw: bytes) -> dict:
         """Executable P1 adapter: exact bytes -> existing A03 intake -> store."""
@@ -701,6 +1192,124 @@ class ProductionPipelineOrchestrator:
             "outcome": "SUCCESS",
         }
 
+    def _pulse_receiver_dirs(self, key: str) -> tuple[Path, Path]:
+        private_dir = local_path(self._state_dir / "pulse-runtime" / key[:32])
+        export_dir = local_path(self._state_dir / "pulse-exports" / key[:32])
+        return private_dir, export_dir
+
+    def _validate_pulse_receipt_summary(
+        self, completed: ProductionStageCompleted, summary: object, auth: A04PulseReceiverAuthorization
+    ) -> dict:
+        spec = completed.spec
+        handoff = spec.pulse_handoff
+        require(type(summary) is dict, "RECEIVER_OUTPUT_MISMATCH")
+        require(
+            summary.get("schema_version") == "A04PulseReceiverReceipt.v1"
+            and summary.get("intake_mode") == "AUTONOMOUS_OFFLINE_LOCAL"
+            and summary.get("human_attended") is False
+            and summary.get("state") == "WAIT_BRAIN"
+            and summary.get("code") == "WAIT_BRAIN"
+            and summary.get("journey_id") == handoff.journey_id
+            and summary.get("source_sha") == handoff.source_sha == self._source_sha
+            and summary.get("packet_id") == handoff.packet_id
+            and summary.get("packet_sha256") == handoff.packet_sha256
+            and summary.get("logical_identity") == handoff.logical_identity
+            and summary.get("a04_receipt_id") == handoff.a04_receipt_id
+            and summary.get("a04_receipt_digest") == handoff.a04_receipt_digest
+            and summary.get("authorization_ref") == auth.authorization_ref
+            and summary.get("authorization_sha256") == auth.digest
+            and summary.get("journal_sequence") == 4
+            and type(summary.get("journal_id")) is str
+            and type(summary.get("journal_checkpoint")) is dict
+            and type(summary.get("artifact_sha256")) is str
+            and type(summary.get("q4_qa_ref")) is str
+            and type(summary.get("q4_qa_sha256")) is str
+            and type(summary.get("receipt_sha256")) is str
+            and type(summary.get("receipt_file_sha256")) is str
+            and type(summary.get("evidence_packet_sha256")) is str
+            and type(summary.get("evidence_file_sha256")) is str
+            and summary.get("brain_decision") is None
+            and summary.get("provider_network_calls") == 0
+            and summary.get("paid_generation_calls") == 0
+            and summary.get("publish_calls") == 0,
+            "RECEIVER_OUTPUT_MISMATCH",
+        )
+        return summary
+
+    def _invoke_pulse(self, completed: ProductionStageCompleted, raw: bytes) -> dict:
+        """Executable W2 adapter: exact A04PulseOfflineHandoffPacket -> B0.3/B1.5 offline PULSE receiver."""
+        spec = completed.spec
+        handoff = spec.pulse_handoff
+        grant = self._grant()
+        require(type(raw) is bytes and bytes_digest(raw) == handoff.packet_bytes_sha256,
+                "RECEIVER_INPUT_MISMATCH")
+        private_dir, export_dir = self._pulse_receiver_dirs(spec.idempotency_key)
+        private_dir.mkdir(parents=True, exist_ok=True)
+        export_dir.mkdir(parents=True, exist_ok=True)
+        receiver_auth = self._pulse_receiver_authorization(
+            grant,
+            attempt=handoff.attempt,
+            packet_id=handoff.packet_id,
+            packet_sha256=handoff.packet_sha256,
+            logical_identity=handoff.logical_identity,
+        )
+        common_kwargs = {
+            "authorization": receiver_auth,
+            "packet_path": handoff.packet_ref,
+            "a04_receipt_path": handoff.a04_receipt_ref,
+            "directive_path": handoff.directive_ref,
+            "assets": handoff.assets,
+            "rights": handoff.rights,
+            "asset_root": handoff.asset_root,
+            "source_sha": handoff.source_sha,
+            "package_path": handoff.package_ref,
+            "a03_result_path": handoff.a03_result_ref,
+        }
+        received = attended_worker.receive_a04_pulse_handoff(
+            private_dir=str(private_dir),
+            export_dir=str(export_dir),
+            **common_kwargs,
+        )
+        checked = self._validate_pulse_receipt_summary(completed, received, receiver_auth)
+        readback = attended_worker.inspect_a04_pulse_handoff(
+            private_dir=str(private_dir),
+            export_dir=str(export_dir),
+            **common_kwargs,
+        )
+        require(readback == checked, "RECEIVER_OUTPUT_MISMATCH")
+        receipt_artifact = local_path(export_dir / "ProductJourneyReceipt.v1.json")
+        evidence_artifact = local_path(export_dir / "autonomous-offline-evidence.json")
+        return {
+            "schema_version": "A04PulseLocalInvocation.v1",
+            "completed_sha256": completed.sha256,
+            "consumer_id": spec.consumer_id,
+            "execution_ref": "local:pulse:" + spec.idempotency_key,
+            "input_ref": handoff.packet_ref,
+            "input_bytes_sha256": bytes_digest(raw),
+            "output_sha256": handoff.packet_bytes_sha256,
+            "artifact_ref": str(receipt_artifact),
+            "evidence_ref": str(evidence_artifact),
+            "private_dir": str(private_dir),
+            "export_dir": str(export_dir),
+            "packet_id": handoff.packet_id,
+            "logical_identity": handoff.logical_identity,
+            "a04_receipt_id": handoff.a04_receipt_id,
+            "journal_id": checked["journal_id"],
+            "journal_checkpoint": checked["journal_checkpoint"],
+            "media_artifact_sha256": checked["artifact_sha256"],
+            "q4_qa_ref": checked["q4_qa_ref"],
+            "q4_qa_sha256": checked["q4_qa_sha256"],
+            "receiver_receipt_sha256": checked["receipt_sha256"],
+            "receiver_receipt_file_sha256": checked["receipt_file_sha256"],
+            "receiver_evidence_sha256": checked["evidence_packet_sha256"],
+            "receiver_evidence_file_sha256": checked["evidence_file_sha256"],
+            "state": "WAIT_BRAIN",
+            "intake_mode": "AUTONOMOUS_OFFLINE_LOCAL",
+            "human_attended": False,
+            "source_sha": self._source_sha,
+            "outcome": "SUCCESS",
+        }
+
     def _finish_local(self, db, row, completed: ProductionStageCompleted) -> DispatchResult:
         """Reconcile only a committed native witness, never a supplied receipt."""
         self._authorize_completed(completed)
@@ -717,7 +1326,7 @@ class ProductionPipelineOrchestrator:
                 "source_sha": self._source_sha, "outcome": "SUCCESS"}
             require(witness == expected and bytes_digest(read_local(artifact)) == spec.output_sha256,
                     "INVOCATION_WITNESS_MISMATCH")
-        else:
+        elif spec.package_handoff is not None:
             handoff = spec.package_handoff
             require(type(witness) is dict and type(witness.get("artifact_ref")) is str
                     and type(witness.get("receiver_receipt_id")) is str, "INVOCATION_WITNESS_MISMATCH")
@@ -775,6 +1384,101 @@ class ProductionPipelineOrchestrator:
             require(witness == expected and bytes_digest(raw_receipt) == loaded_receipt.digest,
                     "INVOCATION_WITNESS_MISMATCH")
             receiver_receipt = loaded_receipt
+        else:
+            handoff = spec.pulse_handoff
+            grant = self._grant()
+            require(handoff is not None and type(witness) is dict, "INVOCATION_WITNESS_MISMATCH")
+            private_dir, export_dir = self._pulse_receiver_dirs(spec.idempotency_key)
+            expected_receipt_path = local_path(export_dir / "ProductJourneyReceipt.v1.json")
+            expected_evidence_path = local_path(export_dir / "autonomous-offline-evidence.json")
+            receiver_auth = self._pulse_receiver_authorization(
+                grant,
+                attempt=handoff.attempt,
+                packet_id=handoff.packet_id,
+                packet_sha256=handoff.packet_sha256,
+                logical_identity=handoff.logical_identity,
+            )
+            try:
+                require(
+                    witness.get("private_dir") == str(private_dir)
+                    and witness.get("export_dir") == str(export_dir)
+                    and witness.get("artifact_ref") == str(expected_receipt_path)
+                    and witness.get("evidence_ref") == str(expected_evidence_path),
+                    "INVOCATION_WITNESS_MISMATCH",
+                )
+                readback = attended_worker.inspect_a04_pulse_handoff(
+                    private_dir=str(private_dir),
+                    export_dir=str(export_dir),
+                    authorization=receiver_auth,
+                    packet_path=handoff.packet_ref,
+                    a04_receipt_path=handoff.a04_receipt_ref,
+                    directive_path=handoff.directive_ref,
+                    assets=handoff.assets,
+                    rights=handoff.rights,
+                    asset_root=handoff.asset_root,
+                    source_sha=handoff.source_sha,
+                    package_path=handoff.package_ref,
+                    a03_result_path=handoff.a03_result_ref,
+                )
+                checked = self._validate_pulse_receipt_summary(completed, readback, receiver_auth)
+                receipt_raw = read_local(expected_receipt_path, limit=131072)
+                evidence_raw = read_local(expected_evidence_path, limit=131072)
+                parsed_receipt = parse_pulse_contract("ProductJourneyReceipt", receipt_raw).to_dict()
+                parsed_evidence = runtime_receipt.parse_autonomous_evidence_packet(evidence_raw)
+                require(
+                    parsed_receipt["state"] == "WAIT_BRAIN"
+                    and parsed_receipt["brain_decision"] is None
+                    and parsed_receipt["effect"]["status"] == "NONE"
+                    and parsed_receipt["network_calls_performed"] is False
+                    and parsed_receipt["external_effects_performed"] is False
+                    and parsed_receipt["journey_id"] == handoff.journey_id
+                    and parsed_receipt["source_sha"] == handoff.source_sha
+                    and parsed_receipt["receipt_sha256"] == checked["receipt_sha256"]
+                    and bytes_digest(receipt_raw) == checked["receipt_file_sha256"]
+                    and parsed_evidence["evidence_sha256"] == checked["evidence_packet_sha256"]
+                    and bytes_digest(evidence_raw) == checked["evidence_file_sha256"]
+                    and parsed_evidence["human_attended"] is False
+                    and parsed_evidence["q4_technical_qa"]["qa_ref"] == checked["q4_qa_ref"]
+                    and parsed_evidence["q4_technical_qa"]["qa_sha256"] == checked["q4_qa_sha256"],
+                    "INVOCATION_WITNESS_MISMATCH",
+                )
+            except OrchestrationError:
+                raise
+            except (ValueError, TypeError, KeyError, OSError):
+                raise OrchestrationError("INVOCATION_WITNESS_MISMATCH") from None
+            artifact = str(expected_receipt_path)
+            expected = {
+                "schema_version": "A04PulseLocalInvocation.v1",
+                "completed_sha256": completed.sha256,
+                "consumer_id": spec.consumer_id,
+                "execution_ref": "local:pulse:" + spec.idempotency_key,
+                "input_ref": handoff.packet_ref,
+                "input_bytes_sha256": handoff.packet_bytes_sha256,
+                "output_sha256": spec.output_sha256,
+                "artifact_ref": artifact,
+                "evidence_ref": str(expected_evidence_path),
+                "private_dir": str(private_dir),
+                "export_dir": str(export_dir),
+                "packet_id": handoff.packet_id,
+                "logical_identity": handoff.logical_identity,
+                "a04_receipt_id": handoff.a04_receipt_id,
+                "journal_id": checked["journal_id"],
+                "journal_checkpoint": checked["journal_checkpoint"],
+                "media_artifact_sha256": checked["artifact_sha256"],
+                "q4_qa_ref": checked["q4_qa_ref"],
+                "q4_qa_sha256": checked["q4_qa_sha256"],
+                "receiver_receipt_sha256": checked["receipt_sha256"],
+                "receiver_receipt_file_sha256": checked["receipt_file_sha256"],
+                "receiver_evidence_sha256": checked["evidence_packet_sha256"],
+                "receiver_evidence_file_sha256": checked["evidence_file_sha256"],
+                "state": "WAIT_BRAIN",
+                "intake_mode": "AUTONOMOUS_OFFLINE_LOCAL",
+                "human_attended": False,
+                "source_sha": self._source_sha,
+                "outcome": "SUCCESS",
+            }
+            require(witness == expected, "INVOCATION_WITNESS_MISMATCH")
+            receiver_receipt = checked
         receipt = ProductionStageReceipt(spec=spec, completed_sha256=completed.sha256,
             output_sha256=spec.output_sha256, consumer_id=spec.consumer_id,
             receipt_ref="local:receipt:" + spec.idempotency_key, execution_ref=witness["execution_ref"],
@@ -826,7 +1530,9 @@ class ProductionPipelineOrchestrator:
                 self._journal(db, key, state, {"reason": reason, "attempt": attempts})
                 return DispatchResult(status=state, completed=completed, reason=reason)
             is_a04 = completed.spec.package_handoff is not None
-            execution_ref = ("local:a04:" if is_a04 else "local:a03:") + key
+            is_pulse = completed.spec.pulse_handoff is not None
+            prefix = "local:pulse:" if is_pulse else ("local:a04:" if is_a04 else "local:a03:")
+            execution_ref = prefix + key
             db.execute("UPDATE outbox SET state='RUNNING',attempts=?,lease_until=? WHERE key=?",
                        (attempts, time.time() + self._lease_seconds, key))
             dispatched = ProductionStageDispatched(spec=completed.spec, completed_sha256=completed.sha256,
@@ -838,7 +1544,12 @@ class ProductionPipelineOrchestrator:
         # Reservation is committed before entering the actual local function.
         try:
             self._authorize_completed(completed)
-            witness = self._invoke_a04(completed, raw) if is_a04 else self._invoke_a03(completed, raw)
+            if is_pulse:
+                witness = self._invoke_pulse(completed, raw)
+            elif is_a04:
+                witness = self._invoke_a04(completed, raw)
+            else:
+                witness = self._invoke_a03(completed, raw)
         except Exception:
             # Once the dispatch reservation is committed, even a ValueError or
             # malformed receiver response can occur after the consumer wrote its
@@ -848,7 +1559,10 @@ class ProductionPipelineOrchestrator:
                 db.execute("UPDATE outbox SET state='UNKNOWN',reason='RECEIVER_UNRESOLVED' WHERE key=?", (key,))
                 self._journal(db, key, "UNKNOWN", {"reason": "RECEIVER_UNRESOLVED"})
             return DispatchResult(status="UNKNOWN", completed=completed, reason="RECEIVER_UNRESOLVED")
-        witness_kind = "A04LocalInvocation.v1" if is_a04 else "A03LocalInvocation.v1"
+        witness_kind = (
+            "A04PulseLocalInvocation.v1" if is_pulse
+            else ("A04LocalInvocation.v1" if is_a04 else "A03LocalInvocation.v1")
+        )
         with self._database() as db:
             db.execute("UPDATE outbox SET witness=? WHERE key=?",
                        (canonical_bytes(witness).decode("utf-8"), key))
@@ -865,7 +1579,7 @@ class ProductionPipelineOrchestrator:
             return ()
         base_slot = self._base_slot(grant)
         with self._database() as db:
-            if grant.route_id == "a03-to-a04":
+            if grant.route_id in ("a03-to-a04", "a04-to-pulse-offline"):
                 keys = [row[0] for row in db.execute(
                     "SELECT key FROM outbox WHERE slot LIKE ? ORDER BY rowid", (base_slot + ":%",),
                 )]

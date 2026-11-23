@@ -1210,3 +1210,345 @@ def test_b15_source_inventory_reopens_actual_bytes_and_denies_hardlinks(source_t
     os.link(module, tmp_path / "source-alias.py")
     with pytest.raises(MediaValidationError, match="unlinked regular file"):
         receipt_owner._b15_tree(root, sources=True)
+
+
+def _make_autonomous_a04_pulse_fixture(tmp_path, *, source_sha="95f4f5d9d448410305fbfa809c25ea331008723c", expires_at=None):
+    from ai_commerce.a04_pulse_handoff.handoff import (
+        A04PulseReceiverAuthorization,
+        build_a04_pulse_handoff_packet,
+    )
+    from ai_commerce.core.provenance import canonical_bytes as a04_canonical_bytes, sha256_bytes
+    from ai_commerce.media.generation import A04CreativeHandoffReceipt
+
+    asset_dir = tmp_path / "assets"
+    private_dir = tmp_path / "pulse-private"
+    export_dir = tmp_path / "pulse-export"
+    for folder in (asset_dir, private_dir, export_dir):
+        folder.mkdir(parents=True)
+
+    png_path = asset_dir / "still-01.png"
+    png_bytes = png(120)
+    png_path.write_bytes(png_bytes)
+    asset_sha = sha256(png_bytes).hexdigest()
+    asset_ref = "asset:" + asset_sha
+
+    rights_claim = {
+        "schema_version": "LocalStillRights.v1",
+        "asset_sha256": asset_sha,
+        "source_sha": source_sha,
+        "scope": "OFFLINE_LOCAL_RENDER",
+        "status": "GRANTED",
+        "valid_from": 0,
+        "expires_at": int(time.time()) + 600 if expires_at is None else expires_at,
+    }
+    rights_raw = canonical_bytes(rights_claim)
+    rights_path = asset_dir / "rights-01.json"
+    rights_path.write_bytes(rights_raw)
+    rights_sha = sha256(rights_raw).hexdigest()
+    rights_ref = "rights:" + rights_sha
+
+    journey_id = "journey:" + "11" * 16
+    pkg_raw = b'{"package":"w2-pulse-02-r1"}'
+    res_raw = b'{"a03_result":"complete"}'
+    pkg_path = tmp_path / "a03-package.json"
+    res_path = tmp_path / "a03-result.json"
+    pkg_path.write_bytes(pkg_raw)
+    res_path.write_bytes(res_raw)
+
+    a04_receipt = A04CreativeHandoffReceipt.create(
+        journey_id=journey_id,
+        cycle_id="cycle:w2-01",
+        job_id="job:w2-01",
+        attempt=1,
+        actor_ref="HUMAN:human:director",
+        job_actor_ref="human:operator-01",
+        source_sha=source_sha,
+        a03_result_ref=str(res_path),
+        a03_result_digest=sha256_bytes(res_raw),
+        package_id="package:" + "a" * 64,
+        revision=1,
+        parent_package_digest=None,
+        package_ref=str(pkg_path),
+        package_digest=sha256_bytes(pkg_raw),
+        brief_id="brief-w2-01",
+        source_brief_digest="b" * 64,
+        selection_id="selection:" + "c" * 64,
+        concept_id="concept:" + "d" * 64,
+        concept_revision=1,
+        concept_digest="e" * 64,
+        cycle_job_digest="1" * 64,
+        cycle_result_digest="2" * 64,
+        reasoning_receipt_digest="3" * 64,
+        audio_mode="SILENCE",
+        scene_count=1,
+        media_target_count=1,
+        rights_status="EVIDENCE_BOUND",
+    )
+    a04_receipt_raw = a04_canonical_bytes(a04_receipt.to_dict())
+    a04_receipt_path = tmp_path / f"{a04_receipt.receipt_id}.json"
+    a04_receipt_path.write_bytes(a04_receipt_raw)
+
+    directive_body = {
+        "schema_version": "CreativeDirective.v1",
+        "journey_id": journey_id,
+        "source_sha": source_sha,
+        "directive_version": 1,
+        "creative": {"freeform": PRIVATE_TEXT, "product_ref": None},
+        "scope": {
+            "action_class": "EXPORT_DRAFT",
+            "provider_ref": None,
+            "account_ref": None,
+            "surface": None,
+            "asset_sha256": None,
+        },
+        "assets": [{
+            "ref": asset_ref,
+            "sha256": asset_sha,
+            "evidence_type": "HUMAN_SUPPLIED",
+            "rights": {"status": "GRANTED", "ref": rights_ref, "sha256": rights_sha},
+        }],
+        "action_classes": ["EXPORT_DRAFT"],
+        "allowed_tools": [worker.TOOL],
+        "provenance": {
+            "actor": "HUMAN",
+            "actor_ref": "human:" + "4" * 32,
+            "evidence_type": "HUMAN_SUPPLIED",
+            "source_ref": "directive:" + "5" * 32,
+            "source_sha": source_sha,
+        },
+        "authorization": draft_authorization(),
+    }
+    directive = seal_contract("CreativeDirective", directive_body)
+    directive_path = tmp_path / "directive.json"
+    directive_path.write_bytes(directive.raw)
+
+    packet = build_a04_pulse_handoff_packet(
+        a04_receipt=a04_receipt,
+        directive=directive,
+        cta_mode="NONE",
+        cta_text=None,
+        directive_bytes=directive.raw,
+        receipt_bytes=a04_receipt_raw,
+        package_bytes=pkg_raw,
+        a03_result_bytes=res_raw,
+        asset_bytes_by_ref={asset_ref: png_bytes},
+        rights_bytes_by_ref={rights_ref: rights_raw},
+        expected_source_sha=source_sha,
+    )
+    packet_path = tmp_path / f"{packet.packet_id}.json"
+    packet_path.write_bytes(packet.to_canonical_bytes())
+
+    auth = A04PulseReceiverAuthorization(
+        authorization_ref="grant:w2-autonomous-offline",
+        caller_id="ai_commerce.production_orchestration.orchestrator:ProductionPipelineOrchestrator",
+        journey_id=packet.journey_id,
+        cycle_id=packet.cycle_id,
+        job_id=packet.job_id,
+        attempt=packet.attempt,
+        source_sha=source_sha,
+        packet_id=packet.packet_id,
+        packet_sha256=packet.packet_sha256,
+        logical_identity=packet.logical_identity,
+        human_attended=False,
+    )
+    inputs = {
+        "authorization": auth,
+        "packet_path": str(packet_path),
+        "a04_receipt_path": str(a04_receipt_path),
+        "directive_path": str(directive_path),
+        "assets": (f"{asset_ref}={png_path}",),
+        "rights": (f"{rights_ref}={rights_path}",),
+        "asset_root": str(asset_dir),
+        "source_sha": source_sha,
+        "package_path": str(pkg_path),
+        "a03_result_path": str(res_path),
+    }
+    return {
+        "private_dir": private_dir,
+        "export_dir": export_dir,
+        "inputs": inputs,
+        "packet": packet,
+        "a04_receipt": a04_receipt,
+        "directive": directive,
+        "png_path": png_path,
+        "rights_path": rights_path,
+    }
+
+
+def test_autonomous_a04_pulse_offline_intake_real_mp4_q4_qa_wait_brain_and_b15_replay(tmp_path, monkeypatch):
+    require_media()
+    # Legacy B0.3 constant and human_attended=True guard remain untouched.
+    assert worker.SOURCE_SHA == "32f42b84567e1217a93854389b1c96435bbf454d"
+    fixture = _make_autonomous_a04_pulse_fixture(tmp_path)
+    assert fixture["inputs"]["source_sha"] != worker.SOURCE_SHA
+
+    with pytest.raises(worker.WorkerHold, match="HUMAN_ATTENDED_REQUIRED"):
+        worker.run_once(
+            private_dir=str(tmp_path / "legacy-denied"),
+            directive_path=fixture["inputs"]["directive_path"],
+            assets=fixture["inputs"]["assets"],
+            rights=fixture["inputs"]["rights"],
+            asset_root=fixture["inputs"]["asset_root"],
+            source_sha=worker.SOURCE_SHA,
+            human_attended=False,
+        )
+
+    renders = []
+    real_run = worker.service.run
+    def count_run(*args, **kwargs):
+        renders.append(args[1])
+        return real_run(*args, **kwargs)
+    monkeypatch.setattr(worker.service, "run", count_run)
+
+    received = worker.receive_a04_pulse_handoff(
+        private_dir=str(fixture["private_dir"]),
+        export_dir=str(fixture["export_dir"]),
+        **fixture["inputs"],
+    )
+    assert len(renders) == 1
+    assert received["schema_version"] == "A04PulseReceiverReceipt.v1"
+    assert received["intake_mode"] == "AUTONOMOUS_OFFLINE_LOCAL"
+    assert received["human_attended"] is False
+    assert received["state"] == "WAIT_BRAIN"
+    assert received["journal_sequence"] == 4
+    assert received["brain_decision"] is None
+    assert received["q4_qa_ref"].startswith("q4:")
+    assert received["provider_network_calls"] == received["paid_generation_calls"] == received["publish_calls"] == 0
+
+    receipt_path = fixture["export_dir"] / "ProductJourneyReceipt.v1.json"
+    evidence_path = fixture["export_dir"] / "autonomous-offline-evidence.json"
+    parsed_receipt = parse_contract("ProductJourneyReceipt", receipt_path.read_bytes()).to_dict()
+    parsed_evidence = receipt_owner.parse_autonomous_evidence_packet(evidence_path.read_bytes())
+    assert parsed_receipt["state"] == "WAIT_BRAIN"
+    assert parsed_receipt["brain_decision"] is None
+    assert parsed_receipt["effect"]["status"] == "NONE"
+    assert parsed_receipt["source_sha"] == fixture["inputs"]["source_sha"]
+    assert any(pin["ref"] == received["q4_qa_ref"] for pin in parsed_receipt["owner_evidence_refs"])
+    assert parsed_evidence["human_attended"] is False
+    assert parsed_evidence["q4_technical_qa"]["status"] == "TECHNICAL_QA_PASSED"
+    assert parsed_evidence["q4_technical_qa"]["ffprobe_full_decode"] is True
+    assert parsed_evidence["q4_technical_qa"]["audio_mode"] == "SILENCE"
+    assert parsed_evidence["q4_technical_qa"]["cta_mode"] == "NONE"
+    assert PRIVATE_TEXT.encode() not in receipt_path.read_bytes()
+    assert PRIVATE_TEXT.encode() not in evidence_path.read_bytes()
+
+    # Exact read-only readback matches without calling A06 again.
+    inspected = worker.inspect_a04_pulse_handoff(
+        private_dir=str(fixture["private_dir"]),
+        export_dir=str(fixture["export_dir"]),
+        **fixture["inputs"],
+    )
+    assert inspected == received
+    assert len(renders) == 1
+
+    # B1.5 autonomous WAIT_BRAIN replay verifies live sources and keeps external rights UNPROVEN.
+    b15_raw = receipt_owner.inspect_autonomous_wait_brain_handoff(
+        private_dir=str(fixture["private_dir"]),
+        receipt_path=str(receipt_path),
+        evidence_path=str(evidence_path),
+        **fixture["inputs"],
+    )
+    assert receipt_owner.recheck_autonomous_wait_brain_handoff(
+        b15_raw,
+        private_dir=str(fixture["private_dir"]),
+        receipt_path=str(receipt_path),
+        evidence_path=str(evidence_path),
+        **fixture["inputs"],
+    ) == b15_raw
+    b15_data = json.loads(b15_raw)
+    assert b15_data["human_attended"] is False
+    assert b15_data["original"]["product_ref"] is None
+    assert b15_data["unproven"] == receipt_owner.B15_UNPROVEN
+
+
+def test_autonomous_a04_pulse_crash_after_a06_converges_without_double_render(tmp_path, monkeypatch):
+    require_media()
+    fixture = _make_autonomous_a04_pulse_fixture(tmp_path)
+    renders = []
+    real_run = worker.service.run
+    def count_run(*args, **kwargs):
+        renders.append(1)
+        return real_run(*args, **kwargs)
+    monkeypatch.setattr(worker.service, "run", count_run)
+
+    class _CutCrash(BaseException):
+        pass
+
+    def crash_after_a06(name):
+        if name == "after_a06":
+            raise _CutCrash()
+
+    monkeypatch.setattr(worker, "_step", crash_after_a06)
+    with pytest.raises(_CutCrash):
+        worker.receive_a04_pulse_handoff(
+            private_dir=str(fixture["private_dir"]),
+            export_dir=str(fixture["export_dir"]),
+            **fixture["inputs"],
+        )
+    assert len(renders) == 1
+    assert not (fixture["export_dir"] / "ProductJourneyReceipt.v1.json").exists()
+
+    monkeypatch.setattr(worker, "_step", lambda name: None)
+    # Without exact stopped generation, resume refuses to reclaim active/stale lease.
+    with pytest.raises(worker.WorkerHold, match="STALE_LEASE_ATTENDED_RECONCILIATION_REQUIRED"):
+        worker.resume_a04_pulse_handoff(
+            private_dir=str(fixture["private_dir"]),
+            export_dir=str(fixture["export_dir"]),
+            **fixture["inputs"],
+        )
+    assert len(renders) == 1
+
+    # Reconciling with exact generation converges to WAIT_BRAIN + receipt with ZERO extra renders.
+    resumed = worker.resume_a04_pulse_handoff(
+        private_dir=str(fixture["private_dir"]),
+        export_dir=str(fixture["export_dir"]),
+        reconcile_stopped_generation=1,
+        **fixture["inputs"],
+    )
+    assert resumed["state"] == "WAIT_BRAIN"
+    assert len(renders) == 1
+    assert (fixture["export_dir"] / "ProductJourneyReceipt.v1.json").is_file()
+
+
+def test_autonomous_a04_pulse_negative_auth_source_rights_q4_and_tamper_hold(tmp_path, monkeypatch):
+    require_media()
+    fixture = _make_autonomous_a04_pulse_fixture(tmp_path / "neg-auth")
+    monkeypatch.setattr(worker.service, "run", lambda *a, **k: pytest.fail("A06 must not run"))
+
+    # Missing authorization object
+    with pytest.raises(worker.WorkerHold, match="RECEIVER_AUTHORIZATION_REQUIRED"):
+        worker.receive_a04_pulse_handoff(
+            private_dir=str(fixture["private_dir"]),
+            export_dir=str(fixture["export_dir"]),
+            **{**fixture["inputs"], "authorization": None},
+        )
+    # Legacy SOURCE_SHA mismatch against pinned packet source_sha
+    with pytest.raises(worker.WorkerHold, match="SOURCE_SHA_MISMATCH"):
+        worker.receive_a04_pulse_handoff(
+            private_dir=str(fixture["private_dir"]),
+            export_dir=str(fixture["export_dir"]),
+            **{**fixture["inputs"], "source_sha": worker.SOURCE_SHA},
+        )
+    # Expired local rights rejected before creating journal or running A06
+    expired = _make_autonomous_a04_pulse_fixture(tmp_path / "neg-expired", expires_at=1)
+    with pytest.raises(worker.WorkerHold, match="LOCAL_RIGHTS_EXPIRED"):
+        worker.receive_a04_pulse_handoff(
+            private_dir=str(expired["private_dir"]),
+            export_dir=str(expired["export_dir"]),
+            **expired["inputs"],
+        )
+    assert not list(expired["private_dir"].iterdir())
+
+    # Invalid Q4 technical QA fails closed before QA_PASSED / WAIT_BRAIN receipt
+    q4_case = _make_autonomous_a04_pulse_fixture(tmp_path / "neg-q4")
+    monkeypatch.undo()
+    monkeypatch.setattr(
+        worker, "_q4_technical_qa", lambda *a, **k: (_ for _ in ()).throw(worker.WorkerHold("Q4_TECHNICAL_QA_FAILED"))
+    )
+    with pytest.raises(worker.WorkerHold, match="Q4_TECHNICAL_QA_FAILED"):
+        worker.receive_a04_pulse_handoff(
+            private_dir=str(q4_case["private_dir"]),
+            export_dir=str(q4_case["export_dir"]),
+            **q4_case["inputs"],
+        )
+    assert not (q4_case["export_dir"] / "ProductJourneyReceipt.v1.json").exists()
