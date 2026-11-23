@@ -3254,6 +3254,8 @@ def test_clean_9444_reconcile_read_is_strictly_readonly_and_sanitized(clean_9444
     ("malicious_trigger_daily", "CONFLICT_LEGACY_TRIGGER_TYPE", "FRESH", "ENABLED_ATTESTED"),
     ("wrong_owner_sddl", "CONFLICT_BASE_OWNER", "FRESH", "ENABLED_ATTESTED"),
     ("wrong_acl_sddl", "CONFLICT_BASE_ACL", "FRESH", "ENABLED_ATTESTED"),
+    ("unreadable_task_sddl", "SD_UNVERIFIED", "FRESH", "ENABLED_ATTESTED"),
+    ("malformed_task_sddl", "SD_UNVERIFIED", "FRESH", "ENABLED_ATTESTED"),
     ("wrong_principal_runlevel", "CONFLICT_BASE_PRINCIPAL", "FRESH", "ENABLED_ATTESTED"),
     ("wrong_action_count", "CONFLICT_BASE_ACTION", "FRESH", "ENABLED_ATTESTED"),
     ("wrong_settings_limit", "CONFLICT_BASE_SETTINGS", "FRESH", "ENABLED_ATTESTED"),
@@ -3269,7 +3271,7 @@ def test_clean_9444_reconcile_read_is_strictly_readonly_and_sanitized(clean_9444
     ("legacy_pwsh77_args_mismatch", "CONFLICT_LEGACY_ARGS", "FRESH", "ENABLED_ATTESTED"),
     ("legacy_pwsh77_workdir_mismatch", "CONFLICT_LEGACY_WORKDIR", "FRESH", "ENABLED_ATTESTED"),
     ("d5_pwsh_unverified_unsigned", "DEMAND_READY", "COMPLETE", "UNVERIFIED_EXE"),
-    ("d5_untrusted_exe_powershell51", "DEMAND_READY", "COMPLETE", "UNVERIFIED_EXE"),
+    ("d5_untrusted_exe_powershell51", "DEMAND_READY", "COMPLETE", "UNVERIFIED_EXE_PATH"),
     ("d5_pwsh_script_9444_contamination", "DEMAND_READY", "COMPLETE", "UNVERIFIED_SCRIPT"),
     ("d5_pwsh_script_malicious_ast", "DEMAND_READY", "COMPLETE", "UNVERIFIED_SCRIPT"),
     ("d5_pwsh_script_bad_custody", "DEMAND_READY", "COMPLETE", "UNVERIFIED_CUSTODY"),
@@ -3685,6 +3687,14 @@ switch ($case) {
         $script:current.Sddl = 'O:' + $sid + 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;' + $sid + ')(A;;GW;;;AU)'
         $script:values = @{}
     }
+    'unreadable_task_sddl' {
+        $script:current | Add-Member -Force ScriptMethod GetSecurityDescriptor { throw 'private descriptor error' }
+        $script:values = @{}
+    }
+    'malformed_task_sddl' {
+        $script:current.Sddl = 'invalid security descriptor'
+        $script:values = @{}
+    }
     'wrong_principal_runlevel' {
         $script:current = New-FakeWakeTask $true 'demand-args-0'
         $script:current.Definition.Principal.RunLevel = 1
@@ -3908,8 +3918,12 @@ function Get-AttestedPathCustodySddl($path, $allowedOwners, $expectFile = $false
             "rollback_wrong_sddl_acl": "NO_TRUSTED_1270_CUSTODY",
             "rollback_xml_dtd_xxe": "NO_TRUSTED_1270_CUSTODY",
             "multiple_wakehub_candidates": "VALID_BUT_UNBOUND",
+            "wrong_acl_sddl": "JOURNAL_ABSENT",
+            "unreadable_task_sddl": "JOURNAL_ABSENT",
+            "malformed_task_sddl": "JOURNAL_ABSENT",
             "foreign_moved_wakehub_task": "JOURNAL_ABSENT",
             "d5_pwsh_unverified_unsigned": "VALID_BUT_UNBOUND",
+            "d5_untrusted_exe_powershell51": "VALID_BUT_UNBOUND",
         }
         forensic_prefix = ""
         if case in forensic_backups:

@@ -3399,7 +3399,7 @@ function Get-D5AttestationResult($d5, [bool]$allowDisabled = $false) {
         if ($rawPath -in $trustedPowerShellPaths) {
             return Get-AttestedD5PowerShellActionResult $rawPath ([string]$a.Arguments) $d5Work $aiRoot $cleanProfile $d5FileOwners
         }
-        return @{ ok = $false; reason = 'UNVERIFIED_EXE' }
+        return @{ ok = $false; reason = 'UNVERIFIED_EXE_PATH' }
     } catch { return @{ ok = $false; reason = 'UNVERIFIED' } }
 }
 
@@ -3503,11 +3503,14 @@ function Get-ReconcileRegistrationBaseStatus($reg) {
     try {
         $acl = [Security.AccessControl.RawSecurityDescriptor]::new($reg.GetSecurityDescriptor(7))
         $want = [Security.AccessControl.RawSecurityDescriptor]::new($sddl)
+        if (!$acl.Owner) { return 'SD_UNVERIFIED' }
+        if ($acl.Owner.Value -cne $sid) { return 'CONFLICT_BASE_OWNER' }
+        if ($null -eq $acl.DiscretionaryAcl -or $acl.GetSddlForm('Access') -cne $want.GetSddlForm('Access')) {
+            return 'CONFLICT_BASE_ACL'
+        }
     } catch {
-        return 'CONFLICT_BASE_ACL'
+        return 'SD_UNVERIFIED'
     }
-    if (!$acl.Owner -or $acl.Owner.Value -cne $sid) { return 'CONFLICT_BASE_OWNER' }
-    if ($acl.GetSddlForm('Access') -cne $want.GetSddlForm('Access')) { return 'CONFLICT_BASE_ACL' }
     $definition = $reg.Definition
     if (!$definition -or !$definition.Principal -or !$definition.Actions -or !$definition.Settings) {
         return 'CONFLICT'
@@ -4259,7 +4262,7 @@ _CLEAN_RECONCILE_TASK_VALUES = frozenset({
     "DEMAND_READY", "DEMAND_DISABLED", "DEMAND_NOT_READY", "DEMAND_RUNTIME_BAD",
     "LEGACY_PT1M_READY", "LEGACY_PT1M_DISABLED", "LEGACY_PT1M_NOT_READY",
     "ABSENT", "MULTIPLE_CANDIDATES", "FOREIGN_CANDIDATE", "CONFLICT",
-    "CONFLICT_BASE_OWNER", "CONFLICT_BASE_ACL", "CONFLICT_BASE_PRINCIPAL",
+    "CONFLICT_BASE_OWNER", "CONFLICT_BASE_ACL", "SD_UNVERIFIED", "CONFLICT_BASE_PRINCIPAL",
     "CONFLICT_BASE_ACTION", "CONFLICT_BASE_SETTINGS", "CONFLICT_TRIGGER_COUNT",
     "CONFLICT_DEMAND_PATH", "CONFLICT_DEMAND_PWSH_PATH", "CONFLICT_DEMAND_WORKDIR",
     "CONFLICT_DEMAND_ARGS", "CONFLICT_DEMAND_PWSH",
@@ -4278,7 +4281,7 @@ _CLEAN_RECONCILE_D5_VALUES = frozenset({
     "ENABLED_ATTESTED", "DISABLED_ATTESTED", "ABSENT", "UNVERIFIED",
     "UNVERIFIED_MULTIPLE", "UNVERIFIED_MOVED", "UNVERIFIED_STATE",
     "UNVERIFIED_BASE", "UNVERIFIED_ACL", "UNVERIFIED_PRINCIPAL",
-    "UNVERIFIED_TRIGGER", "UNVERIFIED_ACTION", "UNVERIFIED_EXE",
+    "UNVERIFIED_TRIGGER", "UNVERIFIED_ACTION", "UNVERIFIED_EXE", "UNVERIFIED_EXE_PATH",
     "UNVERIFIED_CUSTODY", "UNVERIFIED_SCRIPT",
 })
 

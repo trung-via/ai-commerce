@@ -579,7 +579,7 @@ _CLEAN_RUNTIME_TASK_CODES = (
     "DEMAND_READY", "DEMAND_DISABLED", "DEMAND_NOT_READY", "DEMAND_RUNTIME_BAD",
     "LEGACY_PT1M_READY", "LEGACY_PT1M_DISABLED", "LEGACY_PT1M_NOT_READY",
     "TASK_ABSENT", "TASK_MULTIPLE", "TASK_FOREIGN", "TASK_CONFLICT",
-    "TASK_CONFLICT_OWNER", "TASK_CONFLICT_ACL", "TASK_CONFLICT_PRINCIPAL",
+    "TASK_CONFLICT_OWNER", "TASK_CONFLICT_ACL", "TASK_SD_UNVERIFIED", "TASK_CONFLICT_PRINCIPAL",
     "TASK_CONFLICT_ACTION", "TASK_CONFLICT_SETTINGS", "TASK_CONFLICT_TRIGGERS",
     "TASK_CONFLICT_DEMAND_PATH", "TASK_CONFLICT_DEMAND_PWSH_PATH",
     "TASK_CONFLICT_DEMAND_WORKDIR", "TASK_CONFLICT_DEMAND_ARGS", "TASK_CONFLICT_DEMAND_PWSH",
@@ -596,7 +596,7 @@ _CLEAN_RUNTIME_D5_CODES = (
     "D5_ENABLED", "D5_DISABLED", "D5_ABSENT", "D5_UNVERIFIED",
     "D5_UNVERIFIED_MULTIPLE", "D5_UNVERIFIED_MOVED", "D5_UNVERIFIED_STATE",
     "D5_UNVERIFIED_BASE", "D5_UNVERIFIED_ACL", "D5_UNVERIFIED_PRINCIPAL",
-    "D5_UNVERIFIED_TRIGGER", "D5_UNVERIFIED_ACTION", "D5_UNVERIFIED_EXE",
+    "D5_UNVERIFIED_TRIGGER", "D5_UNVERIFIED_ACTION", "D5_UNVERIFIED_EXE", "D5_UNVERIFIED_EXE_PATH",
     "D5_UNVERIFIED_CUSTODY", "D5_UNVERIFIED_SCRIPT",
 )
 _CLEAN_RUNTIME_EXCEPTION_CODES = frozenset({
@@ -652,6 +652,7 @@ _CLEAN_RECONCILE_TASK_MAP = {
     "CONFLICT": "TASK_CONFLICT",
     "CONFLICT_BASE_OWNER": "TASK_CONFLICT_OWNER",
     "CONFLICT_BASE_ACL": "TASK_CONFLICT_ACL",
+    "SD_UNVERIFIED": "TASK_SD_UNVERIFIED",
     "CONFLICT_BASE_PRINCIPAL": "TASK_CONFLICT_PRINCIPAL",
     "CONFLICT_BASE_ACTION": "TASK_CONFLICT_ACTION",
     "CONFLICT_BASE_SETTINGS": "TASK_CONFLICT_SETTINGS",
@@ -692,12 +693,14 @@ _CLEAN_RECONCILE_D5_MAP = {
     "UNVERIFIED_TRIGGER": "D5_UNVERIFIED_TRIGGER",
     "UNVERIFIED_ACTION": "D5_UNVERIFIED_ACTION",
     "UNVERIFIED_EXE": "D5_UNVERIFIED_EXE",
+    "UNVERIFIED_EXE_PATH": "D5_UNVERIFIED_EXE_PATH",
     "UNVERIFIED_CUSTODY": "D5_UNVERIFIED_CUSTODY",
     "UNVERIFIED_SCRIPT": "D5_UNVERIFIED_SCRIPT",
 }
 _CLEAN_1270_BACKUP_CODES = frozenset({"NO_TRUSTED_1270_CUSTODY", "JOURNAL_ABSENT", "VALID_BUT_UNBOUND"})
-_CLEAN_1270_PENDING_CODES = frozenset({
-    "PENDING_CLEAR", "PENDING_STATE_CHANGED", *_CLEAN_RUNTIME_PENDING_PREFIXES,
+_CLEAN_1270_OBSERVATION_CODES = frozenset({
+    "PENDING_CLEAR", "PENDING_STATE_CHANGED", "PROCESS_IDENTITY_UNVERIFIED",
+    *_CLEAN_RUNTIME_PENDING_PREFIXES,
 })
 
 
@@ -724,7 +727,7 @@ def _clean_1270_public_status(code):
     effect, backup, task, d5, journal, pending = parts
     if (effect != "UNKNOWN_EFFECT" or backup not in _CLEAN_1270_BACKUP_CODES
             or task not in _CLEAN_RUNTIME_TASK_CODES or d5 not in _CLEAN_RUNTIME_D5_CODES
-            or journal not in _CLEAN_RUNTIME_JOURNAL_CODES or pending not in _CLEAN_1270_PENDING_CODES):
+            or journal not in _CLEAN_RUNTIME_JOURNAL_CODES or pending not in _CLEAN_1270_OBSERVATION_CODES):
         return None
     if pending == "PENDING_CLEAR" and f"{task}_{journal}_{d5}" in _CLEAN_RUNTIME_PROBE_OBSERVED_CODES:
         return "OBSERVED"
@@ -781,6 +784,15 @@ def _observe_clean_runtime(sha: str, *, forensic: bool = False) -> str:
             read_marker(acquisition._clean_launch_pending),
         )
 
+    def read_process():
+        try:
+            state, identity = acquisition._clean_inventory(target, candidates, owner[1], owner[2])
+        except (acquisition.AcquisitionBlocked, acquisition._EnrollmentHold, acquisition._Clean9444Hold, OSError):
+            return None
+        if state in ("ABSENT", "OWNED"):
+            return state, identity
+        return None
+
     owner = read_owner()
     if owner is None:
         return "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
@@ -804,6 +816,7 @@ def _observe_clean_runtime(sha: str, *, forensic: bool = False) -> str:
     except (acquisition.AcquisitionBlocked, acquisition._EnrollmentHold, OSError):
         return "TARGET_READ_UNVERIFIED" if marker_state is None else f"{marker_state}_TARGET_UNAVAILABLE"
 
+    process_before = read_process() if forensic and marker_state is None else None
     read_error = False
     reconciled = None
     try:
@@ -813,6 +826,7 @@ def _observe_clean_runtime(sha: str, *, forensic: bool = False) -> str:
             reconciled = acquisition._clean_reconcile_read(owner, target, candidates)
     except (acquisition.AcquisitionBlocked, acquisition._EnrollmentHold, acquisition._Clean9444Hold, OSError):
         read_error = True
+    process_stable = process_before is not None and read_process() == process_before
     if read_owner() != owner or (not read_error and reconciled == {"error": "WINDOWS_OWNER_CONTEXT_UNVERIFIED"}):
         return "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
     after = sample_markers()
@@ -850,6 +864,8 @@ def _observe_clean_runtime(sha: str, *, forensic: bool = False) -> str:
         backup = reconciled["backup"]
         if backup not in _CLEAN_1270_BACKUP_CODES:
             return _clean_1270_unavailable(pending)
+        if pending == "PENDING_CLEAR" and not process_stable:
+            pending = "PROCESS_IDENTITY_UNVERIFIED"
         return _clean_1270_public_code(task_code, journal_code, d5_code, backup, pending)
     reconciled_code = f"{task_code}_{journal_code}_{d5_code}"
     return reconciled_code if marker_state is None else f"{marker_state}_{reconciled_code}"
