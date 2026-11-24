@@ -155,7 +155,7 @@ def test_registered_doorbell_rejects_foreign_port_and_legacy_issue_selector(monk
         binding=replace(BIND, cdp_endpoint="http://127.0.0.1:9555"), event_id=issue,
         marker_digest="a" * 64,
         revalidate=lambda: pytest.fail("foreign port reached authority"),
-        before_stage=lambda: pytest.fail("foreign port reached staging"),
+        before_stage=lambda *_: pytest.fail("foreign port reached staging"),
     )
     assert result.code == "NATIVE_DESKTOP_UNPROVEN" and not result.staged
     assert inv.calls == []
@@ -174,9 +174,10 @@ def test_registered_doorbell_scripts_require_fresh_exact_user_reference():
 const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
 const args = input.args;
 const check = eval(input.check), click = eval(input.click), prove = eval(input.prove);
+const existing = eval(input.existing);
 globalThis.location = {href:args.url};
 Object.defineProperty(globalThis, 'performance', {value:{timeOrigin:args.documentClock}});
-globalThis.getComputedStyle = () => ({visibility:'visible'});
+globalThis.getComputedStyle = el => ({visibility:el.hidden ? 'hidden' : 'visible', opacity:el.opacity});
 const node = (text = '', attrs = {}) => ({
   textContent:text, innerText:text, childNodes:[], getClientRects:() => [1],
   getAttribute:name => attrs[name] ?? null, closest:() => null, matches:() => false,
@@ -190,6 +191,7 @@ const fresh = node(args.text, {'data-message-id':'turn-new'});
 fresh.closest = selector => selector.startsWith('[data-message-id]') ? fresh : null;
 let roles = [], ids = [old], clicks = 0;
 let login = [], workspace = [], prompts = [], attachments = [], buttons = [], busy = [], covered = null;
+let verification = [], totalNodes = [];
 const prompt = node();
 prompt.getBoundingClientRect = () => ({width:20, height:20});
 const button = node();
@@ -200,6 +202,7 @@ button.contains = other => other === button;
 button.click = () => { clicks++; roles.push(fresh); ids.push(fresh); };
 editor.parentElement = {tagName:'FORM', querySelectorAll:selector => selector === args.send ? buttons : attachments};
 globalThis.document = {
+  readyState: 'complete',
   elementFromPoint: x => (x < 10 ? editor : button) === covered ? prompt : x < 10 ? editor : button,
   querySelectorAll: selector => {
     if (selector === 'main') return [node()];
@@ -208,7 +211,10 @@ globalThis.document = {
     if (selector === args.stop) return busy;
     if (selector === args.work) return workspace;
     if (selector.includes('[role="alertdialog"]')) return prompts;
+    if (selector.includes('one-time-code')) return verification;
+    if (selector === '*') return totalNodes;
     if (selector === 'main [data-message-author-role="user"]') return roles;
+    if (selector === 'main [data-message-author-role], main [data-user-message-bubble]') return roles;
     if (selector === '[data-message-id], [data-turn-id]') return ids;
     return [];
   },
@@ -275,11 +281,104 @@ if (prove(args) !== false) process.exit(18);
 roles = [fresh];
 performance.timeOrigin++;
 if (prove(args) !== false || click(args) !== false || clicks !== 1) process.exit(19);
+performance.timeOrigin--;
+
+const main = node();
+const candidate = (ref, alias) => {
+  const turn = node(args.text, {'data-message-id':ref, 'data-turn-id':alias});
+  turn.role = 'user';
+  turn.matches = selector => selector === `[data-message-author-role="${turn.role}"]`;
+  turn.closest = selector => {
+    if (selector === 'main') return main;
+    if (selector.startsWith('[data-message-id]')) return turn;
+    if (selector.startsWith('form,')) return turn.draft ? editor : null;
+    return null;
+  };
+  turn.querySelectorAll = selector => selector === '*' && turn.hiddenChild ? [turn.hiddenChild] : [];
+  turn.querySelector = () => null;
+  return turn;
+};
+const texts = [args.text, input.issueText];
+editor.textContent = editor.innerText = '';
+button.disabled = true;
+for (const text of texts) {
+  args.text = text;
+  const turn = candidate('turn-new');
+  roles = [turn]; ids = [old, turn];
+  const expect = (value, context) => {
+    if (existing(args) !== value || clicks !== 1) throw Error(context);
+  };
+  expect('turn-new', 'exact USER');
+  roles = [];
+  expect(false, 'absent');
+  roles = [turn, candidate('another')];
+  expect(false, 'duplicate');
+  roles[1].hidden = true;
+  expect(false, 'hidden duplicate');
+  roles = [turn];
+  turn.role = 'assistant';
+  expect(false, 'assistant');
+  turn.role = 'user';
+  turn.draft = true;
+  expect(false, 'draft masquerading as USER');
+  turn.draft = false;
+  turn.hidden = true;
+  expect(false, 'hidden');
+  turn.hidden = false;
+  turn.hiddenChild = node('selector text');
+  turn.hiddenChild.opacity = '0';
+  expect(false, 'hidden text');
+  turn.hiddenChild = null;
+  turn.textContent = turn.innerText = text + ' extra';
+  expect(false, 'noncanonical');
+  turn.textContent = turn.innerText = text;
+  args.priorRefs.push('turn-new');
+  expect(false, 'prior reference');
+  args.priorRefs.pop();
+  roles = [candidate('turn-new', 'turn-old')];
+  ids = [roles[0]];
+  expect(false, 'excluded reference under a different DOM attribute');
+  roles = [turn]; ids = [old, turn];
+  ids.push(node('', {'data-turn-id':'turn-new'}));
+  expect(false, 'reference reused by another DOM node');
+  ids.pop();
+  editor.textContent = text;
+  expect(false, 'composer draft');
+  editor.textContent = '';
+  login = [prompt];
+  expect(false, 'login');
+  login = [];
+  prompts = [prompt];
+  expect(false, 'confirmation modal');
+  prompts = [];
+  verification = [prompt];
+  expect(false, 'verification');
+  verification = [];
+  covered = editor;
+  expect(false, 'blocked composer');
+  covered = null;
+  location.href += '/';
+  expect(false, 'route drift');
+  location.href = args.url;
+  performance.timeOrigin++;
+  expect(false, 'document drift');
+  args.documentClock = performance.timeOrigin;
+  expect('turn-new', 'current document after reload');
+  totalNodes = Array(20001);
+  expect(false, 'incomplete bounded search');
+  totalNodes = [];
+  document.readyState = 'loading';
+  expect(false, 'incomplete document');
+  document.readyState = 'complete';
+}
 """
     result = subprocess.run(
         [node, "-e", program],
         input=json.dumps({
             "check": doorbell._CHECK, "click": doorbell._CLICK, "prove": doorbell._PROVE,
+            "existing": doorbell._EXISTING_USER_TURN,
+            "issueText": doorbell._doorbell_text("github-issue-created-v1:" + "b" * 64,
+                                                 "trung-via/ai-commerce", send_only=True),
             "args": {**doorbell._ARGS, "url": URL, "documentClock": 100,
                      "text": doorbell._doorbell_text(EVENT, "trung-via/ai-commerce", send_only=True)},
         }),
@@ -1979,26 +2078,27 @@ const script=JSON.parse(fs.readFileSync(0,'utf8'));
 const oldMarker='WAKEHUB_TEST_REGISTER_V1:'+('a'.repeat(64));
 const newMarker='WAKEHUB_TEST_REGISTER_V1:'+('b'.repeat(64));
 const dig=s=>require('node:crypto').createHash('sha256').update(s).digest('hex');
-const style=el=>({visibility:el.hidden?'hidden':'visible',display:'block'});
+const style=el=>({visibility:el.hidden?'hidden':'visible',display:'block',opacity:el.opacity});
 const el=(text,role,id)=>{
   const parent={nodeType:1,textContent:text,children:[],getClientRects:()=>[1],
     getAttribute:k=>k==='data-message-id'?id:null,
-    closest:sel=>sel==='[data-message-id],[data-turn-id]'?parent:null};
-  const leaf={nodeType:1,textContent:text,children:[],getClientRects:()=>[1],
+    closest:sel=>['[data-message-id],[data-turn-id]','main'].includes(sel)?parent:null};
+  const leaf={nodeType:1,textContent:text,children:[],parentElement:parent,getClientRects:()=>[1],
     closest:sel=>{
       if(sel.includes('form,nav,header'))return null;
       if(sel.includes('[data-message-author-role="assistant"]'))
         return role==='assistant'?parent:null;
       if(sel.includes('[data-message-author-role="user"]'))
-        return role==='user'?parent:null;
+        return role==='user'||(role==='bubble'&&sel.includes('data-user-message-bubble'))?parent:null;
+      if(sel==='main')return parent;
       if(sel==='[data-message-id],[data-turn-id]')return parent;
       return null;
     }};
   parent.children=[leaf];return [parent,leaf];
 };
-const probe=(nodes,hash)=>new Function('document','getComputedStyle',
+const probe=(nodes,hash,strict)=>new Function('document','getComputedStyle',
   'crypto','TextEncoder','args','return ('+script+')(args)')(
-  {querySelectorAll:()=>nodes},style,crypto,TextEncoder,{digest:hash});
+  {querySelectorAll:()=>nodes},style,crypto,TextEncoder,{digest:hash,strict});
 (async()=>{
   const old=el(oldMarker,'user','msg_old');
   const fresh=el(newMarker,'user','msg_new');
@@ -2015,6 +2115,15 @@ const probe=(nodes,hash)=>new Function('document','getComputedStyle',
   await check([],digest,'TEST_SIGNAL_NOT_FOUND');
   await check(Array.from({length:20001},()=>({nodeType:0})),
     digest,'TEST_SIGNAL_SCOPE_UNPROVEN');
+  const strict=async(nodes,expected)=>{
+    if(await probe(nodes,digest,true)!==expected)process.exit(14);
+  };
+  await strict([...old,...fresh],'TEST_SIGNAL_MATCH_UNATTESTED');
+  await strict(el(newMarker,'bubble','msg_unproven'),'TEST_SIGNAL_AMBIGUOUS');
+  duplicate[0].opacity='0';
+  await strict([...fresh,...duplicate],'TEST_SIGNAL_AMBIGUOUS');
+  fresh[0].opacity='0';
+  await strict(fresh,'TEST_SIGNAL_AMBIGUOUS');
 })().catch(()=>process.exit(13));
 """
     proc = subprocess.run([node, "-e", program],
