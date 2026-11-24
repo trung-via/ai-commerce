@@ -24,6 +24,7 @@ import pytest
 
 from ai_commerce.production_orchestration.contracts import ProductionStageReceipt, digest
 from ai_commerce.production_orchestration.orchestrator import ProductionPipelineOrchestrator
+from ai_commerce.remote.cdp_doorbell import _PlaywrightInventory
 from ai_commerce.remote.chrome_acquisition import ChromeEnvironment
 from ai_commerce.remote.completion_event import build_completion_event
 from ai_commerce.remote.conversation_binding import ResolvedBinding
@@ -3723,3 +3724,437 @@ def test_flat03_verified_ef02_run_identity_cannot_be_rebound_to_another_event(in
     assert len(i["calls"]) == 12  # Both candidates independently verified against their REST fixtures.
     with sqlite3.connect(i["config"]["journal"]) as db:
         assert db.execute("SELECT event_id FROM events").fetchall() == [(i["event"]["event_id"],)]
+
+
+class Flat04Page(ReadOnlyPage):
+    def __init__(self, url, surface="CANDIDATE_READY"):
+        super().__init__(url, surface)
+        self.turns = []
+
+    def evaluate(self, script, args=None):
+        if args is None:
+            return super().evaluate(script)
+        assert script == r.cdp_doorbell._WH03_COMMITTED_SIGNAL_DOM
+        roles = [role for marker, role in self.turns
+                 if hashlib.sha256(marker.encode("ascii")).hexdigest() == args["digest"]]
+        if not roles:
+            return "TEST_SIGNAL_NOT_FOUND"
+        return "TEST_SIGNAL_MATCH_UNATTESTED" if roles == ["user"] else "TEST_SIGNAL_AMBIGUOUS"
+
+
+@pytest.fixture
+def flat04(supervisor, monkeypatch):
+    s, i = supervisor, supervisor.i
+    i["config"]["chat_preload"] = True
+    sources = issue_fixture(i, monkeypatch)
+    issue = sources.add(1317)
+    url = i["registration"].binding.chat_url
+    exact = Flat04Page(url)
+    unrelated = Flat04Page(url[:-1] + ("f" if url[-1] != "f" else "e"),
+                           surface="DRAFT_PRESENT")
+    state = SimpleNamespace(attachments=0, before_attach=None, error=None, destination=url,
+                            on_goto=None, new_pages=0, navigations=[], same_account=True)
+
+    def origin():
+        with sqlite3.connect(s.path) as db:
+            return json.loads(db.execute("SELECT record FROM local_origin").fetchone()[0])
+
+    def new_page():
+        assert origin()["navigation"]["phase"] == "RESERVED"
+        state.new_pages += 1
+        if state.error == "new-page":
+            raise TimeoutError()
+        page = Flat04Page("about:blank")
+        context.pages.append(page)
+
+        def goto(destination, *, wait_until, timeout):
+            assert (destination, wait_until, timeout) == (url, "domcontentloaded", 15000)
+            state.navigations.append(destination)
+            if state.on_goto is not None:
+                state.on_goto()
+            page.url = state.destination
+            if state.same_account:
+                page.turns = exact.turns[:]
+            if state.error == "goto":
+                raise TimeoutError()
+
+        page.goto = goto
+        return page
+
+    context = SimpleNamespace(pages=[unrelated, exact], new_page=new_page)
+    browser = SimpleNamespace(contexts=[context])
+
+    @contextmanager
+    def attach(inventory, endpoint):
+        assert endpoint == "http://127.0.0.1:9444"
+        state.attachments += 1
+        if state.before_attach is not None:
+            state.before_attach()
+        yield browser
+
+    monkeypatch.setattr(r.cdp_doorbell, "_PlaywrightInventory", _PlaywrightInventory)
+    monkeypatch.setattr(_PlaywrightInventory, "_browser", attach)
+    monkeypatch.setattr(r.cdp_doorbell, "_is_windows", lambda: True)
+    monkeypatch.setattr(r.chrome_acquisition, "_enrollment_operator", lambda *, attended=True: s.owner())
+    s.set_owned(True)
+
+    def prepare():
+        result = r.register_local_chat(i["config_path"], i["root"])
+        assert isinstance(result, r.cdp_doorbell.WH03PreparedRegistration)
+        return result
+
+    def observe(prepared):
+        return r.register_local_chat(i["config_path"], i["root"], registration_id=prepared.registration_id)
+
+    def enroll():
+        prepared = prepare()
+        exact.turns.append((prepared.marker, "user"))
+        assert observe(prepared).code == "LOCAL_CHAT_REGISTERED_UI_EVIDENCE"
+        return prepared
+
+    return SimpleNamespace(s=s, i=i, issue=issue, sources=sources, browser=browser, context=context,
+                           exact=exact, unrelated=unrelated, state=state, origin=origin,
+                           prepare=prepare, observe=observe, enroll=enroll)
+
+
+def test_flat04_registered_sources_share_exact_chat_and_keep_separate_pending_rows(flat04):
+    f = flat04
+    prepared = f.enroll()
+    assert f.s.run(2).code == "EXACT_CHAT_REUSED"
+    ef02, issue = [tick[0] for tick in f.s.ticks]
+    assert (ef02.route.source_kind, issue.route.source_kind) == ("ef02-completion", "github-issue-created")
+    assert ef02.route.source_key != issue.route.source_key == f.issue.target.identity.key
+    assert ef02.route.registration_id == issue.route.registration_id == prepared.registration_id
+    assert ef02.route.marker_commitment == issue.route.marker_commitment == f.origin()["marker_digest"]
+    assert ef02.route.route_generation == issue.route.route_generation == f.i["registration"].binding.generation
+    assert ef02.route.route_commitment == issue.route.route_commitment == digest(asdict(f.i["registration"].binding))
+    assert ef02.route.account_attestation == "CHATGPT_ACCOUNT_SESSION_AUTHORITY_UNAVAILABLE"
+    assert f.state.new_pages == f.unrelated.reads == 0
+    assert f.s.run(2).replayed
+    with sqlite3.connect(f.s.path) as db:
+        rows = [json.loads(raw) for (raw,) in db.execute("SELECT record FROM events")]
+        assert db.execute("SELECT count(*) FROM source_identities").fetchone() == (2,)
+    assert len(rows) == 2
+    for row in rows:
+        assert row["history"] == ["PENDING"] and set(row["evidence"]) == {"local_route"}
+        assert row["evidence"]["local_route"]["readiness"] == "EXACT_CHAT_REUSED"
+    assert prepared.marker not in json.dumps(rows)
+
+
+def test_flat04_registration_cli_consumes_only_current_exact_user_marker(flat04, capsys):
+    f = flat04
+    args = ["--config", str(f.i["config_path"]), "--repository-root", str(f.i["root"])]
+    old = f.prepare()
+    f.exact.turns = [(old.marker, "user"), (f.i["registration"].marker, "user")]
+    assert main(["register", "prepare", *args]) == 0
+    current = json.loads(capsys.readouterr().out)
+    observe = ["register", "observe", current["registration_id"], *args]
+    assert f.observe(old).code == "LOCAL_CHAT_REGISTRATION_ID_MISMATCH"
+    f.unrelated.turns = [(current["marker"], "user")]
+    assert main(observe) == 2
+    assert json.loads(capsys.readouterr().out)["code"] == "LOCAL_USER_MARKER_MISSING"
+    for roles in (["assistant"], ["composer"], ["user", "user"], ["user", "assistant"]):
+        f.exact.turns = [(old.marker, "user"), *((current["marker"], role) for role in roles)]
+        assert main(observe) == 2
+        assert json.loads(capsys.readouterr().out)["code"] == "LOCAL_USER_MARKER_AMBIGUOUS"
+    f.exact.turns = [(old.marker, "user"), (current["marker"], "user")]
+    assert main(observe) == 0
+    observed = json.loads(capsys.readouterr().out)
+    assert observed["code"] == "LOCAL_CHAT_REGISTERED_UI_EVIDENCE" and "marker" not in observed
+    assert main(observe) == 2
+    assert json.loads(capsys.readouterr().out)["code"] == "LOCAL_CHAT_ALREADY_REGISTERED"
+    assert f.origin()["phase"] == "ENROLLED" and f.unrelated.reads == f.state.new_pages == 0
+
+
+@pytest.mark.parametrize("selected", ["ef02", "issue"])
+def test_flat04_preload_uses_existing_adapter_and_reobserves_new_browser_generation(flat04, selected):
+    f = flat04
+    f.enroll()
+    if selected == "issue":
+        f.sources.targets.reverse()
+        f.i["save"](f.i["config_path"], f.i["config"])
+    f.context.pages.remove(f.exact)
+    first = f.s.run()
+    assert first.code == first.route.readiness == "EXACT_CHAT_PRELOADED"
+    assert first.route.source_kind == f.sources.targets[0]["kind"]
+    original = f.origin()["navigation"]
+    assert original["phase"] == "RESOLVED" and f.state.navigations == [f.exact.url]
+    for creations in (2, 3):
+        assert f.s.run(2).code == "EXACT_CHAT_REUSED"
+        polls = [result for result, _ in f.s.ticks[-2:]]
+        assert {result.route.source_kind for result in polls} == {"ef02-completion", "github-issue-created"}
+        assert all(result.route.readiness == "EXACT_CHAT_REUSED" for result in polls)
+        assert f.state.new_pages == creations - 1
+
+        f.context.pages[:] = [f.unrelated]
+        f.sources.targets.reverse()
+        f.i["save"](f.i["config_path"], f.i["config"])
+        reopened = f.s.run()
+        assert reopened.code == reopened.route.readiness == "EXACT_CHAT_PRELOADED"
+        assert reopened.route.source_kind == f.sources.targets[0]["kind"]
+        assert f.origin()["navigation"] == original
+        assert f.state.new_pages == creations and f.state.navigations == [f.exact.url] * creations
+
+    assert f.s.run(2).code == "EXACT_CHAT_REUSED" and f.state.new_pages == 3
+    f.context.pages[:] = [f.unrelated]
+    f.s.new_logon(8)
+    f.i["process"]["CreationDate"] = "2026-11-20T00:00:00.0000000Z"
+    assert f.s.run().route.readiness == "EXACT_CHAT_PRELOADED"
+    current = f.origin()["navigation"]
+    assert current["phase"] == "RESOLVED" and current["process"] != original["process"]
+    assert f.state.new_pages == 4 and f.state.navigations == [f.exact.url] * 4
+    assert f.unrelated.reads == 0
+
+
+@pytest.mark.parametrize("fault", ["new-page", "goto", "redirect", "wrong-account"])
+def test_flat04_uncertain_navigation_is_shared_fence_and_only_reads(flat04, fault):
+    f = flat04
+    f.enroll()
+    f.context.pages.remove(f.exact)
+    if fault in ("new-page", "goto"):
+        f.state.error = fault
+    elif fault == "redirect":
+        f.state.destination = "https://chatgpt.com/auth/login"
+    else:
+        f.state.same_account = False
+    first = f.s.run()
+    assert first.code == {
+        "new-page": "EXACT_CHAT_PRELOAD_RECONCILE_REQUIRED",
+        "goto": "EXACT_CHAT_PRELOAD_RECONCILE_REQUIRED",
+        "redirect": "PRELOAD_NAVIGATION_UNVERIFIED",
+        "wrong-account": "LOCAL_USER_MARKER_MISSING",
+    }[fault]
+    assert first.status == ("HOLD" if fault in ("redirect", "wrong-account") else "UNKNOWN_EFFECT")
+    assert f.origin()["navigation"]["phase"] == "RESERVED"
+    if fault == "goto":
+        assert f.s.run().code == "EXACT_CHAT_RECONCILED"
+        assert f.origin()["navigation"]["phase"] == "RESOLVED"
+    else:
+        f.s.new_logon(8)
+        f.context.pages[:] = [f.unrelated]
+        f.sources.targets.reverse()
+        f.i["save"](f.i["config_path"], f.i["config"])
+        result = f.s.run()
+        assert result.status == "UNKNOWN_EFFECT" and result.route.source_kind == "github-issue-created"
+        assert f.origin()["navigation"]["phase"] == "RESERVED"
+    assert f.state.new_pages == 1
+
+
+def test_flat04_reconciles_old_reservation_from_current_exact_chat_before_reopening(flat04):
+    f = flat04
+    f.enroll()
+    f.context.pages.remove(f.exact)
+    f.state.error = "new-page"
+    assert f.s.run().status == "UNKNOWN_EFFECT"
+    old = f.origin()["navigation"]
+    assert old == {"process": chrome_record(f.s)["process"], "phase": "RESERVED"}
+
+    f.i["process"]["CreationDate"] = "2026-11-20T00:00:00.0000000Z"
+    f.state.error = None
+    restored = Flat04Page(f.exact.url)
+    restored.turns = f.exact.turns[:]
+    f.context.pages.append(restored)
+    f.sources.targets.reverse()
+    f.i["save"](f.i["config_path"], f.i["config"])
+    attachments = f.state.attachments
+    result = f.s.run()
+    assert result.code == result.route.readiness == "EXACT_CHAT_RECONCILED"
+    assert result.route.source_kind == "github-issue-created"
+    assert result.route.account_attestation == "CHATGPT_ACCOUNT_SESSION_AUTHORITY_UNAVAILABLE"
+    current = f.origin()["navigation"]
+    assert current == {"process": chrome_record(f.s)["process"], "phase": "RESOLVED"}
+    assert current["process"] != old["process"]
+    assert f.state.attachments == attachments + 1
+    assert f.state.new_pages == 1 and not f.state.navigations
+
+    f.context.pages.remove(restored)
+    f.sources.targets.reverse()
+    f.i["save"](f.i["config_path"], f.i["config"])
+    result = f.s.run()
+    assert result.code == result.route.readiness == "EXACT_CHAT_PRELOADED"
+    assert result.route.source_kind == "ef02-completion"
+    assert f.origin()["navigation"] == current
+    assert f.state.new_pages == 2 and f.state.navigations == [f.exact.url]
+
+
+@pytest.mark.parametrize("fault,status,code", [
+    ("absent", "UNKNOWN_EFFECT", "EXACT_CHAT_PRELOAD_RECONCILE_REQUIRED"),
+    ("wrong-marker", "HOLD", "LOCAL_USER_MARKER_MISSING"),
+    ("duplicate", "HOLD", "EXACT_CHAT_TAB_AMBIGUOUS"),
+    ("unstable-owner", "HOLD", "CHROME_OBSERVATION_CHANGED"),
+])
+def test_flat04_old_reservation_stays_fenced_without_verified_current_chat(flat04, fault, status, code):
+    f = flat04
+    f.enroll()
+    f.context.pages.remove(f.exact)
+    f.state.error = "new-page"
+    assert f.s.run().status == "UNKNOWN_EFFECT"
+    old = f.origin()["navigation"]
+    assert old["phase"] == "RESERVED"
+
+    f.i["process"]["CreationDate"] = "2026-11-20T00:00:00.0000000Z"
+    f.state.error = None
+    if fault != "absent":
+        restored = Flat04Page(f.exact.url)
+        restored.turns = ([(f.i["registration"].marker, "user")] if fault == "wrong-marker"
+                          else f.exact.turns[:])
+        f.context.pages.append(restored)
+        if fault == "duplicate":
+            f.context.pages.append(f.exact)
+        elif fault == "unstable-owner":
+            f.state.before_attach = lambda: f.s.new_logon(8)
+
+    result = f.s.run()
+    assert (result.status, result.code) == (status, code)
+    assert chrome_record(f.s)["process"] != old["process"]
+    assert f.origin()["navigation"] == old
+    assert f.state.new_pages == 1 and not f.state.navigations
+
+
+@pytest.mark.parametrize("fault,expected", [
+    ("opt-in", "EXACT_CHAT_PRELOAD_OPT_IN_REQUIRED"), ("pause", "PAUSED_BY_HUMAN"),
+    ("draft", "PRELOAD_DRAFT_PRESENT"), ("busy-or-login", "PRELOAD_SURFACE_UNPROVEN"),
+    ("duplicate", "EXACT_CHAT_TAB_AMBIGUOUS"), ("contexts", "EXACT_CHAT_CONTEXT_AMBIGUOUS"),
+    ("marker-missing", "LOCAL_USER_MARKER_MISSING"), ("url", "EXACT_CHAT_URL_DRIFT"),
+    ("source", "MISSING_GRANT"),
+])
+def test_flat04_holds_before_preload_for_ineligible_source_or_surface(flat04, fault, expected):
+    f = flat04
+    f.enroll()
+    if fault == "opt-in":
+        f.i["config"]["chat_preload"] = False
+        f.context.pages.remove(f.exact)
+    elif fault == "pause":
+        f.i["config"]["chrome_lifecycle"] = "paused"
+        f.context.pages.remove(f.exact)
+    elif fault == "draft":
+        f.exact.surface = "DRAFT_PRESENT"
+    elif fault == "busy-or-login":
+        f.exact.surface = "SURFACE_UNPROVEN"
+    elif fault == "duplicate":
+        f.context.pages.append(Flat04Page(f.exact.url))
+    elif fault == "contexts":
+        f.browser.contexts.append(SimpleNamespace(pages=[]))
+    elif fault == "marker-missing":
+        f.exact.turns.clear()
+    elif fault == "url":
+        f.exact.url += "/"
+    else:
+        f.i["grants"]["grants"][0]["signature"] = "0" * 64
+        f.i["save"](r.Path(f.i["config"]["grants"]), f.i["grants"])
+    f.i["save"](f.i["config_path"], f.i["config"])
+    assert f.s.run().code == expected
+    assert f.state.new_pages == 0 and f.origin()["navigation"] is None
+
+
+@pytest.mark.parametrize("fault,expected", [
+    ("transient", "PRELOAD_CDP_UNAVAILABLE"), ("config", "LOCAL_AUTHORITY_DRIFT"),
+    ("source", "LOCAL_AUTHORITY_DRIFT"), ("browser", "CHROME_OBSERVATION_CHANGED"),
+])
+def test_flat04_pre_effect_revalidate_and_retry_only_unattempted_preload(flat04, fault, expected):
+    f = flat04
+    f.enroll()
+    f.context.pages.remove(f.exact)
+    attach = f.state.attachments + 2
+
+    def during_attach():
+        if f.state.attachments != attach:
+            return
+        if fault == "transient":
+            raise TimeoutError()
+        if fault == "config":
+            f.i["save"](f.i["config_path"], {**f.i["config"], "chrome_lifecycle": "paused"})
+        elif fault == "source":
+            f.i["save"](r.Path(f.sources.targets[0]["path"]), {})
+        else:
+            f.s.new_logon(8)
+
+    f.state.before_attach = during_attach
+    assert f.s.run().code == expected
+    assert f.origin()["navigation"] is None and f.state.new_pages == 0
+    if fault == "transient":
+        assert f.s.run().code == "EXACT_CHAT_PRELOADED" and f.state.new_pages == 1
+
+
+def test_flat04_source_admission_and_read_only_routes_survive_chrome_unavailability(flat04):
+    f = flat04
+    f.enroll()
+    f.context.pages.remove(f.exact)
+    f.s.set_owned(False)
+    assert f.s.run(2).route.readiness == "LOCAL_ROUTE_REGISTERED"
+    assert all(result.route.readiness == "LOCAL_ROUTE_REGISTERED" for result, _ in f.s.ticks)
+    chrome_config = f.i["config"].pop("chrome_config")
+    f.i["save"](f.i["config_path"], f.i["config"])
+    assert f.s.run().route.readiness == "LOCAL_ROUTE_REGISTERED"
+    f.i["config"]["chrome_config"] = chrome_config
+    f.i["save"](f.i["config_path"], f.i["config"])
+    f.s.set_owned(True)
+    for index in (0, 1):
+        result = r.run_read_only(f.i["config_path"], f.i["root"], target_index=index)
+        assert result.code == "EXACT_CHAT_SUPERVISOR_REQUIRED" and result.replayed
+    assert f.state.new_pages == 0
+    assert f.s.run(2).code == "EXACT_CHAT_REUSED" and f.state.new_pages == 1
+
+
+def test_flat04_issue_creator_drift_withholds_route_and_preload(flat04):
+    f = flat04
+    f.enroll()
+    f.context.pages.remove(f.exact)
+    f.sources.targets.reverse()
+    f.i["save"](f.i["config_path"], f.i["config"])
+    f.issue.issue["user"]["id"] += 1
+    result = f.s.run()
+    assert result.code == "ISSUE_CREATION_UNPROVEN" and not hasattr(result, "route")
+    assert f.state.new_pages == 0
+    with sqlite3.connect(f.s.path) as db:
+        assert db.execute("SELECT count(*) FROM events").fetchone() == (0,)
+
+
+def test_flat04_legacy_unknown_row_is_preserved_when_issue_preloads(flat04):
+    f = flat04
+    f.enroll()
+    event = r.Event(f.i["event"]["event_id"], f.i["registration"].source_sha, 1,
+                    digest(f.i["event"]), "GITHUB_AUTHENTICATED")
+    key = event.key(f.i["registration"])
+    legacy = {"event": asdict(event), "status": "UNKNOWN_EFFECT", "code": "INTERRUPTED_NO_REPLAY",
+              "history": ["PENDING", "RESERVED", "UNKNOWN_EFFECT"], "evidence": {}}
+    runner = r.compose_read_only(f.i["config_path"], f.i["root"])
+    with runner.journal.locked(f.i["registration"]) as (txn, data):
+        data["events"][key] = legacy
+        txn.write(data)
+    f.context.pages.remove(f.exact)
+    assert f.s.run(2).route.readiness == "EXACT_CHAT_PRELOADED"
+    assert f.s.ticks[0][0].code == "INTERRUPTED_NO_REPLAY"
+    assert f.state.new_pages == 1
+    with sqlite3.connect(f.s.path) as db:
+        assert db.execute("SELECT record FROM events WHERE event_key=?", (key,)).fetchone() == (
+            json.dumps(legacy, sort_keys=True),)
+
+
+def test_flat04_changed_route_cannot_rebind_existing_local_registration(flat04):
+    f = flat04
+    f.enroll()
+    registered = f.i["registration"]
+    changed = replace(registered, binding=replace(registered.binding, generation=registered.binding.generation + 1))
+    f.i["config"].update(registration=asdict(changed), marker=changed.marker)
+    f.i["save"](f.i["config_path"], f.i["config"])
+    f.context.pages.remove(f.exact)
+    assert f.s.run().code == "REGISTRATION_DRIFT"
+    assert f.state.new_pages == 0 and f.origin()["phase"] == "ENROLLED"
+
+
+def test_flat04_post_effect_config_drift_keeps_durable_fence(flat04):
+    f = flat04
+    f.enroll()
+    f.context.pages.remove(f.exact)
+
+    def pause_during_navigation():
+        f.i["config"]["chrome_lifecycle"] = "paused"
+        f.i["save"](f.i["config_path"], f.i["config"])
+
+    f.state.on_goto = pause_during_navigation
+    first = f.s.run()
+    assert first.status == "UNKNOWN_EFFECT" and first.route.readiness == "LOCAL_ROUTE_REGISTERED"
+    assert f.origin()["navigation"]["phase"] == "RESERVED"
+    assert f.s.run().code == "EXACT_CHAT_RECONCILED"
+    assert f.state.new_pages == 1

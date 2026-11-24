@@ -1,9 +1,4 @@
-"""One bounded WakeHub iteration and its private SQLite journal.
-
-A durable reservation precedes delivery. Recovery can look for a receipt but
-cannot send again. Delivery evidence survives optional response and consumer
-receipt processing. The enrolled native authorities are still unavailable.
-"""
+"""WakeHub source admission, local route readiness and its private SQLite journal."""
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -14,8 +9,10 @@ import ntpath
 import os
 from pathlib import Path
 import re
+from secrets import token_hex
 import sqlite3
 from threading import Event as StopEvent
+import time
 from time import monotonic, time_ns
 from types import SimpleNamespace
 from typing import Callable, Literal, Protocol
@@ -608,6 +605,13 @@ def _legacy_chrome_scope(local: Path, session: int, sid: str,
     return digest([str(local), session, sid, str(env.config_path), env.command()])
 
 
+def _owned_chrome_process(inventory: tuple, desktop: str) -> tuple[str, int]:
+    listeners, processes = inventory
+    pid = listeners[0][2]
+    created = chrome_acquisition._creation_ticks(next(row[-1] for row in processes if row[0] == pid))
+    return digest([desktop, pid, created]), created
+
+
 def _supervised_desktop(session: int, sid: str) -> str:
     """Pin the live, unlocked Windows logon, even if its session ID is reused."""
     import ctypes
@@ -781,6 +785,52 @@ class NativeChrome9444:
                     if code != "CANDIDATE_READY":
                         return code
                 return "EXACT_CHAT_CANDIDATE_ACCOUNT_MARKER_UNATTESTED"
+        except Exception:
+            return "CDP_READ_UNAVAILABLE"
+
+    def local_chat(self, binding: ResolvedBinding, *, marker_digest: str | None = None) -> str:
+        """Read one exact tab and optionally its committed USER-turn marker."""
+        try:
+            with self.adapter.inventory._browser(binding.cdp_endpoint) as browser:
+                contexts = list(browser.contexts)
+                if len(contexts) != 1:
+                    return "EXACT_CHAT_CONTEXT_AMBIGUOUS"
+                context = contexts[0]
+
+                def candidates():
+                    pages = list(context.pages)
+                    _require(len(pages) <= 32, "EXACT_CHAT_INVENTORY_UNBOUNDED")
+                    matches = [p for p in pages if type(p.url) is str
+                               and p.url.rstrip("/") == binding.chat_url]
+                    _require(matches or len(pages) < 32, "EXACT_CHAT_INVENTORY_UNBOUNDED")
+                    return matches
+
+                matches = candidates()
+                if not matches:
+                    return "EXACT_CHAT_ABSENT"
+                if len(matches) != 1:
+                    return "EXACT_CHAT_TAB_AMBIGUOUS"
+                page = matches[0]
+                if page.url != binding.chat_url:
+                    return "EXACT_CHAT_URL_DRIFT"
+                code = cdp_doorbell._preload_surface_code(page)
+                if code == "CANDIDATE_READY" and marker_digest is not None:
+                    marker = page.evaluate(cdp_doorbell._WH03_COMMITTED_SIGNAL_DOM,
+                                           {"digest": marker_digest})
+                    code = {
+                        "TEST_SIGNAL_MATCH_UNATTESTED": "LOCAL_USER_MARKER_OBSERVED",
+                        "TEST_SIGNAL_NOT_FOUND": "LOCAL_USER_MARKER_MISSING",
+                        "TEST_SIGNAL_AMBIGUOUS": "LOCAL_USER_MARKER_AMBIGUOUS",
+                    }.get(marker, "LOCAL_USER_MARKER_UNPROVEN")
+                current_contexts = list(browser.contexts)
+                current_tabs = candidates()
+                if (len(current_contexts) != 1 or current_contexts[0] is not context
+                        or len(current_tabs) != 1 or current_tabs[0] is not page
+                        or page.url != binding.chat_url):
+                    return "EXACT_CHAT_OBSERVATION_CHANGED"
+                return code
+        except RuntimeHold as exc:
+            return str(exc)
         except Exception:
             return "CDP_READ_UNAVAILABLE"
 
@@ -1002,6 +1052,30 @@ class SupervisorTickResult(Result):
     chrome_health: str
 
 
+@dataclass(frozen=True)
+class RouteReadiness:
+    source_kind: Literal["ef02-completion", "github-issue-created"]
+    source_key: str
+    route_generation: int
+    route_commitment: str
+    registration_id: str
+    marker_commitment: str
+    readiness: Literal["LOCAL_ROUTE_REGISTERED", "EXACT_CHAT_REUSED", "EXACT_CHAT_PRELOADED",
+                       "EXACT_CHAT_RECONCILED"] = "LOCAL_ROUTE_REGISTERED"
+    account_attestation: Literal["CHATGPT_ACCOUNT_SESSION_AUTHORITY_UNAVAILABLE"] = (
+        "CHATGPT_ACCOUNT_SESSION_AUTHORITY_UNAVAILABLE")
+
+
+@dataclass(frozen=True, kw_only=True)
+class RouteResult(Result):
+    route: RouteReadiness
+
+
+@dataclass(frozen=True, kw_only=True)
+class SupervisorRouteTickResult(SupervisorTickResult):
+    route: RouteReadiness
+
+
 def _private_path(path: Path, repository_root: Path) -> None:
     """No checkout, links, reparse points, hard links, UNC or alternate streams."""
     _require(path.is_absolute() and repository_root.is_absolute()
@@ -1060,6 +1134,8 @@ _CHROME_TABLE = ("CREATE TABLE chrome_lifecycle (singleton INTEGER PRIMARY KEY C
                  "record TEXT NOT NULL)")
 _SOURCE_TABLE = ("CREATE TABLE source_identities (source_key TEXT PRIMARY KEY, "
                  "event_key TEXT NOT NULL UNIQUE REFERENCES events(event_key), identity TEXT NOT NULL)")
+_ORIGIN_TABLE = ("CREATE TABLE local_origin (singleton INTEGER PRIMARY KEY CHECK(singleton=1), "
+                 "record TEXT NOT NULL)")
 _APP_ID = 0x57485231
 
 
@@ -1083,6 +1159,52 @@ def _validate_chrome(record: dict) -> None:
 
 def _chrome_digest(value: object) -> bool:
     return type(value) is str and re.fullmatch(r"[a-f0-9]{64}", value) is not None
+
+
+def _origin_commitment(origin: dict, binding: ResolvedBinding) -> cdp_doorbell.WH03SignalCommitment:
+    return cdp_doorbell.WH03SignalCommitment(
+        origin["registration_id"], origin["marker_digest"], binding.chat_url,
+        binding.generation, origin["issued_ms"], origin["expires_ms"])
+
+
+def _validate_local_origin(origin: dict, registration: Registration) -> None:
+    _require(type(origin) is dict and origin.keys() == {
+        "registration_id", "marker_digest", "issued_ms", "expires_ms",
+        "owner_scope", "chrome_config", "phase", "navigation",
+    } and registration.evidence_type == "GITHUB_AUTHENTICATED"
+        and origin["phase"] in ("PREPARED", "ENROLLED")
+        and _chrome_digest(origin["owner_scope"]) and _chrome_digest(origin["chrome_config"])
+        and type(origin["registration_id"]) is str
+        and re.fullmatch(r"[0-9a-f]{32}", origin["registration_id"]) is not None
+        and cdp_doorbell._wh03_commitment_gate_shape(
+            _origin_commitment(origin, registration.binding)) == "READY",
+        "LOCAL_ORIGIN_JOURNAL_INVALID")
+    navigation = origin["navigation"]
+    _require(navigation is None or (
+        origin["phase"] == "ENROLLED" and type(navigation) is dict
+        and navigation.keys() == {"process", "phase"}
+        and _chrome_digest(navigation["process"])
+        and navigation["phase"] in ("RESERVED", "RESOLVED")), "LOCAL_ORIGIN_JOURNAL_INVALID")
+
+
+def _route_receipt(identity: SourceIdentity, registration: Registration, origin: dict) -> RouteReadiness:
+    return RouteReadiness(identity.kind, identity.key, registration.binding.generation,
+                          digest(asdict(registration.binding)), origin["registration_id"],
+                          origin["marker_digest"])
+
+
+_EXACT_ROUTE_READY = ("EXACT_CHAT_REUSED", "EXACT_CHAT_PRELOADED", "EXACT_CHAT_RECONCILED")
+
+
+def _validate_route_receipt(proof: object, identity: SourceIdentity | None,
+                            registration: Registration, origin: dict | None) -> None:
+    _require(type(proof) is dict and identity is not None and origin is not None
+             and origin["phase"] == "ENROLLED"
+             and proof.get("readiness") in ("LOCAL_ROUTE_REGISTERED", *_EXACT_ROUTE_READY),
+             "LOCAL_ROUTE_RECEIPT_INVALID")
+    expected = replace(_route_receipt(identity, registration, origin), readiness=proof["readiness"])
+    _require(type(proof.get("route_generation")) is int and proof == asdict(expected),
+             "LOCAL_ROUTE_RECEIPT_INVALID")
 
 
 def _demand_target(owner: tuple, env: chrome_acquisition.ChromeEnvironment) -> tuple:
@@ -1148,13 +1270,17 @@ def _validate_records(data: dict, registration: Registration) -> None:
     seen, seen_turns, seen_native_turns = set(), set(), set()
     for key, record in data["events"].items():
         _require(type(record) is dict and set(record) == {"event", "status", "code", "history", "evidence"}
-                 and type(record["event"]) is dict, "JOURNAL_INVALID")
+                 and type(record["event"]) is dict and type(record["evidence"]) is dict, "JOURNAL_INVALID")
+        if "local_route" in record["evidence"]:
+            _validate_route_receipt(record["evidence"]["local_route"], by_event.get(key),
+                                    registration, data.get("local_origin"))
         try:
             if record["event"].get("kind") == _ISSUE:
                 issue = _issue_record_event(record["event"], registration)
                 _require(key == issue.identity.key and by_event.get(key) == issue.identity
                          and record["status"] == "PENDING" and record["history"] == ["PENDING"]
-                         and record["code"] == _ISSUE_ACCEPTED and record["evidence"] == {},
+                         and record["code"] == _ISSUE_ACCEPTED
+                         and record["evidence"].keys() <= {"local_route"},
                          "JOURNAL_INVALID")
                 continue
             saved = Event(**record["event"])
@@ -1164,8 +1290,7 @@ def _validate_records(data: dict, registration: Registration) -> None:
                  and type(record["history"]) is list and 1 <= len(record["history"]) <= 6
                  and record["history"][0] == "PENDING" and record["status"] == record["history"][-1]
                  and type(record["code"]) is str
-                 and re.fullmatch(r"[A-Z][A-Z0-9_]{0,95}", record["code"]) is not None
-                 and type(record["evidence"]) is dict, "JOURNAL_INVALID")
+                 and re.fullmatch(r"[A-Z][A-Z0-9_]{0,95}", record["code"]) is not None, "JOURNAL_INVALID")
         seen.add(saved.event_id)
         if key in by_event:
             identity = by_event[key]
@@ -1273,6 +1398,22 @@ class _SQLiteTransaction:
             db.rollback()
             raise
 
+    def write_local_origin(self, record: dict) -> None:
+        _validate_local_origin(record, self.registration)
+        self.journal._owner(self.owner)
+        db = self.connection
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(_ORIGIN_TABLE.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS", 1))
+            db.execute("INSERT INTO local_origin VALUES (1, ?) "
+                       "ON CONFLICT(singleton) DO UPDATE SET record=excluded.record",
+                       (json.dumps(record, sort_keys=True),))
+            self.journal._owner(self.owner)
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+
 
 class Journal:
     """One SQLite database, private custody and one OS lock across an iteration.
@@ -1342,7 +1483,7 @@ class Journal:
                                      isolation_level=None)
                 db.execute("PRAGMA trusted_schema=OFF")
                 _require(db.execute("PRAGMA quick_check").fetchall() == [("ok",)], "JOURNAL_CORRUPT")
-                version, source_table = 2, False
+                version, source_table, origin_table = 2, False, False
                 if not new:
                     version, = db.execute("PRAGMA user_version").fetchone()
                     tables = dict(_TABLES, chrome_lifecycle=_CHROME_TABLE) if version == 3 else _TABLES
@@ -1351,6 +1492,9 @@ class Journal:
                     source_table = ("table", "source_identities", _SOURCE_TABLE) in stored_tables
                     if source_table:
                         tables = dict(tables, source_identities=_SOURCE_TABLE)
+                    origin_table = ("table", "local_origin", _ORIGIN_TABLE) in stored_tables
+                    if origin_table:
+                        tables = dict(tables, local_origin=_ORIGIN_TABLE)
                     _require(version in (2, 3)
                              and db.execute("PRAGMA application_id").fetchone() == (_APP_ID,)
                              and stored_tables == [("table", name, sql) for name, sql in sorted(tables.items())],
@@ -1375,6 +1519,11 @@ class Journal:
                     if os.name != "nt":
                         os.fsync(files.directory_fd)
                 data = {"events": {}, "source_identities": {}}
+                if origin_table:
+                    rows = db.execute("SELECT singleton, record FROM local_origin").fetchall()
+                    _require(len(rows) == 1 and rows[0][0] == 1, "LOCAL_ORIGIN_JOURNAL_INVALID")
+                    data["local_origin"] = _decode_unique(rows[0][1])
+                    _validate_local_origin(data["local_origin"], registration)
                 if source_table:
                     for source_key, event_key, identity in db.execute("SELECT * FROM source_identities"):
                         data["source_identities"][source_key] = (event_key, _decode_unique(identity))
@@ -1414,7 +1563,9 @@ class Runner:
                  sender: Sender | None, orchestrator: ProductionPipelineOrchestrator,
                  grant_verifier: Callable[[Event, Registration], bool] | _RegisteredIssueAuthority,
                  brain: BrainAdapter | None = None, read_only: bool = False,
-                 supervisor_stop: Callable[[], bool] | None = None):
+                 supervisor_stop: Callable[[], bool] | None = None,
+                 route_runtime: _RuntimeConfig | None = None,
+                 route_chrome: _SupervisorChrome | None = None):
         _require(type(orchestrator) is ProductionPipelineOrchestrator, "PRODUCTION_ORCHESTRATOR_REQUIRED")
         _require(not (read_only and supervisor_stop is not None), "SUPERVISOR_MODE_INVALID")
         _require(supervisor_stop is None or registration.evidence_type == "GITHUB_AUTHENTICATED",
@@ -1424,6 +1575,7 @@ class Runner:
         self.grant_verifier = grant_verifier
         self.read_only = read_only
         self._supervisor_stop = supervisor_stop
+        self._route_runtime, self._route_chrome = route_runtime, route_chrome
 
     @property
     def _observe_only(self) -> bool:
@@ -1442,6 +1594,9 @@ class Runner:
         if self._supervisor_stop():
             return chrome
         event = self._run_event(chrome)
+        if isinstance(event, RouteResult):
+            return SupervisorRouteTickResult(event.status, event.code, event.evidence_type, event.replayed,
+                                             chrome_health=chrome.code, route=event.route)
         return SupervisorTickResult(event.status, event.code, event.evidence_type, event.replayed,
                                     chrome_health=chrome.code)
 
@@ -1506,6 +1661,10 @@ class Runner:
                 if not replayed or (envelope is not None and previous is None):
                     txn.write(data)
                 self._recover_reservations(txn, data)
+                if (self._route_runtime is not None and envelope is not None
+                        and record["status"] == "PENDING"
+                        and not (record["code"] == _LAUNCH_UNKNOWN and chrome is None)):
+                    return self._run_local_route(txn, data, record, envelope, evidence, replayed, chrome)
                 if issue:
                     return Result("HOLD_DEPENDENCY", _ISSUE_ROUTE_DEPENDENCY, evidence, replayed)
                 if record["status"] != "PENDING":
@@ -1520,6 +1679,52 @@ class Runner:
             return Result("HOLD", _safe_code(exc, "SOURCE_OR_JOURNAL_UNPROVEN"), evidence)
         except Exception:
             return Result("HOLD", "SOURCE_OR_JOURNAL_UNPROVEN", evidence)
+
+    def _run_local_route(self, txn, data: dict, record: dict, event: SourceEvent,
+                         evidence: str, replayed: bool, chrome: Result | None) -> Result:
+        registration = self.registration
+        _require(txn.owner == self._route_runtime.principal, "JOURNAL_OWNER_DRIFT")
+
+        def authorize() -> None:
+            authority = self.grant_verifier
+            if type(authority) is _RegisteredIssueAuthority:
+                authority.authorize(event, registration)
+            else:
+                _require(type(authority) is _RegisteredWakeAuthority
+                         and authority.source is self.source and not authority.native_source_only,
+                         "SIGNED_WAKE_AUTHORITY_UNAVAILABLE")
+                _require(authority.source.envelope(event.payload) == event, "SOURCE_PROOF_MISSING")
+                _require(authority.authorize(event.payload, registration) is not None, "MISSING_GRANT")
+
+        authorize()
+        origin = data.get("local_origin")
+        if origin is None or origin["phase"] != "ENROLLED":
+            return Result("HOLD_DEPENDENCY", "LOCAL_CHAT_REGISTRATION_REQUIRED", evidence, replayed)
+        route = _route_receipt(event.identity, registration, origin)
+
+        def save(receipt: RouteReadiness) -> None:
+            proof = asdict(receipt)
+            if record["evidence"].get("local_route") != proof:
+                record["evidence"]["local_route"] = proof
+                txn.write(data)
+
+        if "local_route" not in record["evidence"]:
+            save(route)
+        if chrome is None:
+            code = "EXACT_CHAT_SUPERVISOR_REQUIRED"
+        elif chrome.code not in _CHROME_READY or self._route_chrome is None:
+            code = chrome.code
+        else:
+            code = self._route_chrome.ready_route(txn, data, origin, authorize)
+        if code in _EXACT_ROUTE_READY:
+            route = replace(route, readiness=code)
+            save(route)
+        status: Status = "HOLD"
+        if chrome is not None and code == chrome.code:
+            status = chrome.status
+        elif code in (_LAUNCH_UNKNOWN, "EXACT_CHAT_PRELOAD_RECONCILE_REQUIRED"):
+            status = "UNKNOWN_EFFECT"
+        return RouteResult(status, code, evidence, replayed, route=route)
 
     @staticmethod
     def _recover_reservations(txn, data: dict) -> None:
@@ -1665,7 +1870,7 @@ class Runner:
         if status in ("UNKNOWN_EFFECT", "BLOCKED_EXTERNAL") and "UI_TURN_OBSERVED" in record["history"]:
             # Legacy rows retain their original history and their delivery evidence.
             return Result("UI_TURN_OBSERVED", code, evidence, replayed=True)
-        if (self._observe_only or status != "UNKNOWN_EFFECT" or record["evidence"]
+        if (self._observe_only or status != "UNKNOWN_EFFECT" or record["evidence"].keys() - {"local_route"}
                 or record["history"] != ["PENDING", "RESERVED", "UNKNOWN_EFFECT"]):
             return saved
 
@@ -2015,7 +2220,7 @@ def compose_native_source_only(config_path: Path, repository_root: Path, *, targ
     """Evaluate the selected source and its downstream dependencies.
 
     EF02 requires both resolve_claim_route and exact-event deliver_wake
-    grants. Issue-created admission stops at its typed route dependency.
+    grants. Issue-created uses its local route when enrolled.
     """
     return _compose_registered(config_path, repository_root, native_source_only=True, target_index=target_index)
 
@@ -2059,8 +2264,9 @@ def _read_runtime_config(config_path: Path, repository_root: Path) -> _RuntimeCo
     config = _read_owned_json(config_path, repository_root)
     source_key = "registered_targets" if "registered_targets" in config else "registered_source"
     required = {"schema", "registration", "marker", "journal", source_key}
-    _require(required <= config.keys() <= required | _EF02_CONFIG | {"chrome_lifecycle"}
+    _require(required <= config.keys() <= required | _EF02_CONFIG | {"chrome_lifecycle", "chat_preload"}
              and config["schema"] == "WakeHubRuntimeR1.v1", "LOCAL_CONFIG_INVALID")
+    _require(type(config.get("chat_preload", False)) is bool, "LOCAL_CONFIG_INVALID")
     targets = (config[source_key] if source_key == "registered_targets"
                else [{"kind": _EF02, "path": config[source_key]}])
     _require(type(targets) is list and 1 <= len(targets) <= _MAX_TARGETS, "REGISTERED_TARGETS_INVALID")
@@ -2087,6 +2293,105 @@ class _SupervisorChrome:
     config: dict
     stop: Callable[[], bool]
     evaluated_start: bool = False
+
+    def _route_snapshot(self, txn, origin: dict | None = None) -> tuple:
+        runtime = self.runtime
+        root = runtime.journal.repository_root
+        env = self.sender.environment
+        _require(not self.stop(), "SUPERVISOR_STOPPED")
+        state, snapshot = self.sender._owner_snapshot()
+        _revalidate_owned(_snapshots((runtime.path, runtime.raw), (env.config_path, self.config)),
+                          root, runtime.path, runtime.principal)
+        runtime.journal._owner(txn.owner)
+        _require(state == "OWNED", "CHROME_NOT_RUNNING_NATIVE_LAUNCH_CAPABILITY_REQUIRED")
+        local, _, sid, env, _, _ = snapshot
+        _require(_private_identity(env.config_path) == txn.owner == runtime.principal
+                 and (os.name != "nt" or sid == txn.owner), "CHROME_OWNER_UNPROVEN")
+        if origin is not None:
+            _require(origin["owner_scope"] == _chrome_scope(local, sid, env),
+                     "CHROME_OWNER_SCOPE_CHANGED")
+            _require(origin["chrome_config"] == digest(self.config), "CHROME_ENROLLMENT_DRIFT")
+        return snapshot
+
+    def ready_route(self, txn, data: dict, origin: dict, authorize: Callable[[], None]) -> str:
+        binding = self.runtime.registration.binding
+        initial = self._route_snapshot(txn, origin)
+        process, _ = _owned_chrome_process(initial[4], initial[5])
+        chrome = data["chrome"]
+        _require(chrome["process"] == process, "CHROME_OBSERVATION_CHANGED")
+        navigation = origin["navigation"]
+        navigation_reserved = navigation is not None and navigation["phase"] == "RESERVED"
+
+        def revalidate() -> None:
+            _require(self._route_snapshot(txn, origin) == initial, "CHROME_OBSERVATION_CHANGED")
+            authorize()
+            _require(not self.stop(), "SUPERVISOR_STOPPED")
+
+        def observe() -> str:
+            code = self.sender.local_chat(binding, marker_digest=origin["marker_digest"])
+            revalidate()
+            return code
+
+        code = observe()
+        if code == "LOCAL_USER_MARKER_OBSERVED":
+            if navigation_reserved:
+                # Current readiness resolves the desired route state, with no
+                # causal proof about the earlier navigation.
+                txn.write_local_origin(dict(origin, navigation={"process": process, "phase": "RESOLVED"}))
+                return "EXACT_CHAT_RECONCILED"
+            return "EXACT_CHAT_REUSED"
+        if code != "EXACT_CHAT_ABSENT":
+            return code
+        if navigation_reserved:
+            return "EXACT_CHAT_PRELOAD_RECONCILE_REQUIRED"
+        if not self.runtime.raw["chat_preload"]:
+            return "EXACT_CHAT_PRELOAD_OPT_IN_REQUIRED"
+        if self.runtime.chrome_lifecycle == "paused":
+            return "PAUSED_BY_HUMAN"
+        if chrome["launch"] is not None:
+            return _LAUNCH_UNKNOWN
+
+        reserved = dict(origin, navigation={"process": process, "phase": "RESERVED"})
+        checks = 0
+        crossed = False
+        guard_error = None
+
+        def current_binding() -> ResolvedBinding | None:
+            nonlocal checks, crossed, guard_error
+            checks += 1
+            try:
+                revalidate()
+                # The adapter checks once before attaching and again after its
+                # one-context inventory, immediately before reuse or new_page.
+                if checks == 2:
+                    txn.write_local_origin(reserved)
+                    try:
+                        revalidate()
+                    except Exception:
+                        txn.write_local_origin(origin)
+                        raise
+                    crossed = True
+                return binding
+            except Exception as exc:
+                guard_error = _safe_code(exc, "PRELOAD_AUTHORITY_UNPROVEN")
+                return None
+
+        outcome = self.sender.adapter.inventory.preload(binding, current_binding=current_binding)
+        if not crossed:
+            _require(guard_error is None, guard_error or "PRELOAD_AUTHORITY_UNPROVEN")
+            return outcome
+        try:
+            code = observe()
+        except Exception:
+            return "EXACT_CHAT_PRELOAD_RECONCILE_REQUIRED"
+        if outcome in ("PRELOAD_NAVIGATION_UNVERIFIED", "PRELOAD_DRAFT_PRESENT", "PRELOAD_SURFACE_UNPROVEN"):
+            return outcome
+        if outcome not in ("EXACT_CHAT_OPENED", "EXACT_CHAT_PRESENT"):
+            return "EXACT_CHAT_PRELOAD_RECONCILE_REQUIRED"
+        if code != "LOCAL_USER_MARKER_OBSERVED":
+            return code
+        txn.write_local_origin(dict(origin, navigation={"process": process, "phase": "RESOLVED"}))
+        return "EXACT_CHAT_PRELOADED" if outcome == "EXACT_CHAT_OPENED" else "EXACT_CHAT_REUSED"
 
     def run_once(self, *, start_after: float) -> Result:
         runtime = self.runtime
@@ -2137,10 +2442,7 @@ class _SupervisorChrome:
         if pending and launch is None:
             launch = "UNKNOWN"
         if state == "OWNED":
-            listeners, processes = inventory
-            pid = listeners[0][2]
-            created = chrome_acquisition._creation_ticks(next(row[-1] for row in processes if row[0] == pid))
-            process = digest([desktop, pid, created])
+            process, created = _owned_chrome_process(inventory, desktop)
             if (launch == "REQUESTED" and not pending and request["desktop"] == desktop
                     and created > request["after"]):
                 owner = local, session, sid
@@ -2232,6 +2534,67 @@ def _compose_supervisor_chrome(runtime: _RuntimeConfig, stop: Callable[[], bool]
     return _SupervisorChrome(runtime, NativeChrome9444(root, environment, supervised=True), config, stop)
 
 
+def register_local_chat(config_path: Path | None, repository_root: Path, *,
+                        registration_id: str | None = None) -> Result | cdp_doorbell.WH03PreparedRegistration:
+    """Prepare or consume a short-lived, manually presented local marker."""
+    prepared = None
+
+    def register() -> Result:
+        nonlocal prepared
+        _require(config_path is not None, "LOCAL_AUTHORITY_MISSING")
+        _, _, sid = chrome_acquisition._enrollment_operator()
+        runtime = _read_runtime_config(config_path, repository_root)
+        _require(os.name != "nt" or sid == runtime.principal, "CHROME_OWNER_UNPROVEN")
+        _require("chat_preload" in runtime.raw, "LOCAL_CHAT_REGISTRATION_CONFIG_REQUIRED")
+        chrome = _compose_supervisor_chrome(runtime, lambda: False)
+        binding = runtime.registration.binding
+        if registration_id is not None:
+            _require(type(registration_id) is str
+                     and re.fullmatch(r"[0-9a-f]{32}", registration_id) is not None
+                     and runtime.journal.path.exists(), "LOCAL_CHAT_REGISTRATION_ID_MISMATCH")
+        with runtime.journal.locked(runtime.registration) as (txn, data):
+            origin = data.get("local_origin")
+            _require(origin is None or origin["phase"] != "ENROLLED", "LOCAL_CHAT_ALREADY_REGISTERED")
+            before = chrome._route_snapshot(txn, origin)
+            commitment = None
+            if registration_id is not None:
+                _require(origin is not None and origin["registration_id"] == registration_id,
+                         "LOCAL_CHAT_REGISTRATION_ID_MISMATCH")
+                commitment = _origin_commitment(origin, binding)
+                gate = cdp_doorbell._wh03_commitment_gate(commitment)
+                _require(gate == "READY", gate)
+            code = chrome.sender.local_chat(binding, marker_digest=commitment.marker_digest if commitment else None)
+            _require(chrome._route_snapshot(txn, origin) == before, "CHROME_OBSERVATION_CHANGED")
+            if commitment is not None:
+                _require(code == "LOCAL_USER_MARKER_OBSERVED", code)
+                gate = cdp_doorbell._wh03_commitment_gate(commitment)
+                _require(gate == "READY", gate)
+                txn.write_local_origin(dict(origin, phase="ENROLLED"))
+                return Result("HOLD", "LOCAL_CHAT_REGISTERED_UI_EVIDENCE", "SOURCE_ONLY")
+
+            _require(code == "CANDIDATE_READY", code)
+            local, _, owner, env, _, _ = before
+            marker = "WAKEHUB_TEST_REGISTER_V1:" + token_hex(32)
+            marker_digest = bytes_digest(marker.encode("ascii"))
+            attempt_id = token_hex(16)
+            _require(origin is None or (origin["registration_id"] != attempt_id
+                                        and origin["marker_digest"] != marker_digest),
+                     "LOCAL_CHAT_REGISTRATION_REPLAY")
+            issued_ms = time.time_ns() // 1_000_000
+            expires_ms = issued_ms + 300_000
+            txn.write_local_origin({
+                "registration_id": attempt_id, "marker_digest": marker_digest,
+                "issued_ms": issued_ms, "expires_ms": expires_ms, "phase": "PREPARED",
+                "owner_scope": _chrome_scope(local, owner, env), "chrome_config": digest(chrome.config),
+                "navigation": None,
+            })
+            prepared = cdp_doorbell.WH03PreparedRegistration(attempt_id, marker, expires_ms)
+            return Result("HOLD", "LOCAL_CHAT_MARKER_PREPARED", "SOURCE_ONLY")
+
+    result = _registered_result(register)
+    return prepared if prepared is not None and result.code == "LOCAL_CHAT_MARKER_PREPARED" else result
+
+
 def _compose_registered(config_path: Path, repository_root: Path, *, native_source_only: bool,
                         target_index: int = 0) -> Runner:
     runtime = _read_runtime_config(config_path, repository_root)
@@ -2249,6 +2612,7 @@ def _compose_target(runtime: _RuntimeConfig, target_entry: object, *, native_sou
     _require(type(target_entry) is dict and set(target_entry) == {"kind", "path"}
              and target_entry["kind"] in (_EF02, _ISSUE), "REGISTERED_TARGET_INVALID")
     kind = target_entry["kind"]
+    route_runtime = runtime if "chat_preload" in config and (not native_source_only or kind == _ISSUE) else None
     paths = {"registered_source": _config_path(target_entry["path"], repository_root),
              "journal": journal.path}
     _require(len(set(paths.values()) | {config_path}) == 3, "LOCAL_CONFIG_INVALID")
@@ -2269,14 +2633,17 @@ def _compose_target(runtime: _RuntimeConfig, target_entry: object, *, native_sou
         return Runner(source=source, registration=registration, journal=journal,
                       sender=chrome.sender if chrome is not None else None,
                       orchestrator=ProductionPipelineOrchestrator(), grant_verifier=issue_authority,
-                      read_only=supervisor_stop is None, supervisor_stop=supervisor_stop)
+                      read_only=supervisor_stop is None, supervisor_stop=supervisor_stop,
+                      route_runtime=route_runtime, route_chrome=chrome)
 
-    _require(_EF02_CONFIG <= config.keys(), "LOCAL_CONFIG_INVALID")
+    source_fields = _EF02_CONFIG if route_runtime is None else _EF02_CONFIG - {"chrome_config"}
+    _require(source_fields <= config.keys(), "LOCAL_CONFIG_INVALID")
     _require(type(config["caller_id"]) is str and _ROUTE.fullmatch(config["caller_id"]) is not None,
              "LOCAL_CONFIG_INVALID")
-    for name in ("registry", "chrome_config", "grants"):
+    authority_paths = ("registry", "grants", "chrome_config") if route_runtime is None else ("registry", "grants")
+    for name in authority_paths:
         paths[name] = _config_path(config[name], repository_root)
-    _require(len(set(paths.values()) | {config_path}) == 6, "LOCAL_CONFIG_INVALID")
+    _require(len(set(paths.values()) | {config_path}) == len(paths) + 1, "LOCAL_CONFIG_INVALID")
     registered = _read_owned_json(paths["registered_source"], repository_root, limit=8192)
     _require(type(registered.get("intent")) is dict, "REGISTERED_SOURCE_INVALID")
     intent = RegistrationIntent(**registered["intent"])
@@ -2289,7 +2656,11 @@ def _compose_target(runtime: _RuntimeConfig, target_entry: object, *, native_sou
              and grants["version"] == 1 and type(grants["grants"]) is list
              and 1 <= len(grants["grants"]) <= 128
              and all(type(g) is dict for g in grants["grants"]), "GRANTS_INVALID")
-    if supervisor_stop is not None:
+    if route_runtime is not None:
+        # Browser readiness and its private config are checked on the route
+        # lane, after persisting authenticated source admission.
+        environment = chrome.sender.environment if chrome is not None else None
+    elif supervisor_stop is not None:
         _require(chrome is not None, "CHROME_OWNER_UNPROVEN")
         environment, chrome_config = chrome.sender.environment, chrome.config
     else:
@@ -2311,8 +2682,9 @@ def _compose_target(runtime: _RuntimeConfig, target_entry: object, *, native_sou
     source = GitHubEventSource(reader, target, authority, expected_event_id=registered["event_id"])
 
     snapshots = _snapshots((config_path, config), (paths["registered_source"], registered),
-                           (paths["registry"], registry), (paths["grants"], grants),
-                           (paths["chrome_config"], chrome_config))
+                           (paths["registry"], registry), (paths["grants"], grants))
+    if route_runtime is None:
+        snapshots += _snapshots((paths["chrome_config"], chrome_config))
     verify_local_authority = _RegisteredWakeAuthority(
         source, registration, repository_root, config_path, paths["registry"], snapshots,
         json.dumps(registry, sort_keys=True), origin, caller, owner, native_source_only)
@@ -2326,7 +2698,7 @@ def _compose_target(runtime: _RuntimeConfig, target_entry: object, *, native_sou
                   sender=sender, brain=NativeBrainAdapter(),
                   orchestrator=ProductionPipelineOrchestrator(), grant_verifier=verify_local_authority,
                   read_only=not native_source_only and supervisor_stop is None,
-                  supervisor_stop=supervisor_stop)
+                  supervisor_stop=supervisor_stop, route_runtime=route_runtime, route_chrome=chrome)
 
 
 def run_read_only(config_path: Path | None, repository_root: Path, *, dry_run: bool = False,
@@ -2357,7 +2729,8 @@ def _registered_result(run: Callable[[], Result]) -> Result:
     except DependencyHold as exc:
         return Result("HOLD_DEPENDENCY", _safe_code(exc, "NATIVE_DEPENDENCY_UNAVAILABLE"), "GITHUB_AUTHENTICATED")
     except (RuntimeHold, BindingError, RegistrationBlocked, TriggerBlocked, GitHubReadBlocked,
-            PrivateStateError, HandoffBlocked, chrome_acquisition.AcquisitionBlocked) as exc:
+            PrivateStateError, HandoffBlocked, chrome_acquisition.AcquisitionBlocked,
+            chrome_acquisition._EnrollmentHold, chrome_acquisition._Lifecycle9444Hold) as exc:
         return Result("HOLD", _safe_code(exc, "LOCAL_AUTHORITY_UNPROVEN"), "GITHUB_AUTHENTICATED")
     except (OSError, ValueError, TypeError, KeyError, RecursionError):
         return Result("HOLD", "LOCAL_AUTHORITY_INVALID", "GITHUB_AUTHENTICATED")
