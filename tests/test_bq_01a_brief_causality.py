@@ -645,9 +645,7 @@ def test_real_mt01_onboarding_and_a03_registered_closure():
     # already registered at BASE. Receipt's B1.5 imports now depend on the
     # creative_quality package; its reviewed B0 owners must remain selected.
     b0_owners = ["b0-3", "b0-4", "b0-s", "b0-s3", "b0-s3b"]
-    # W3b CDP imports production_runtime.receipt, which consumes creative_quality.
-    # The WakeHub owner is now a real downstream BQ consumer; retain its full MT-01 coverage.
-    assert selected["selected_groups"] == ["a03", *b0_owners, "bq-01a", "ef02-wake"]
+    assert selected["selected_groups"] == ["a03", *b0_owners, "bq-01a"]
     assert not selected["fallback"] and not selected["unknown_acs"] and not selected["unknown_consumers"]
     assert not selected["unknown_tests"]
     assert not selected["impact_v21"]["missing_mapping"]

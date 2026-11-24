@@ -12,7 +12,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import hashlib
-import json
 import os
 import re
 import secrets
@@ -22,11 +21,8 @@ from urllib.parse import urlsplit
 from typing import Callable, Protocol
 from pathlib import Path
 
-from ..production_orchestration.contracts import LocalBrainDecisionInput, OrchestrationError
-from ..production_runtime.contracts import draft_authorization, seal_contract
-from ..production_runtime.receipt import parse_brain_review_evidence_request
 from ..wakehub_cdp import authenticated_turn as cdp_turn
-from .conversation_binding import ResolvedBinding, _CHAT, _REPOSITORY, _decode_unique, _endpoint
+from .conversation_binding import ResolvedBinding, _CHAT, _REPOSITORY, _endpoint
 from .trusted_origin import (
     CompleteSearchDomainWitness, OriginError, PrivateOriginSnapshot,
     LocalCallerAttestation, OriginAuthority,
@@ -1078,7 +1074,11 @@ class LocalChromeDoorbellAdapter:
 
 
 class LocalChromePulseBrainBridge:
-    """One exact-chat PULSE review through an already-open local 9444 session."""
+    """Transport-only exact-chat turn on an existing local 9444 session.
+
+    Compose with production_orchestration.orchestrator.PulseBrainDecisionBridge
+    at the caller. The remote package must not import any production owner.
+    """
 
     def __init__(self, *, binding: ResolvedBinding, allow_submit: bool = False,
                  inventory: BrowserInventory | None = None):
@@ -1087,9 +1087,9 @@ class LocalChromePulseBrainBridge:
         self._test_only = inventory is not None
         self._inventory = _PlaywrightInventory() if inventory is None else inventory
 
-    def request_decision(
-        self, *, evidence_request: bytes, chat_ref: str, reserve_send: Callable[[], bool],
-    ) -> LocalBrainDecisionInput | None:
+    def request_turn(
+        self, *, prompt: str, header: str, chat_ref: str, reserve_send: Callable[[], bool],
+    ) -> tuple[str, bool] | None:
         binding = self._binding
         if (not self._allow_submit or (not self._test_only and not _is_windows()) or
                 type(binding) is not ResolvedBinding or binding.cdp_endpoint != "http://127.0.0.1:9444" or
@@ -1098,43 +1098,15 @@ class LocalChromePulseBrainBridge:
         match = _CHAT.fullmatch(binding.chat_url)
         if match is None or chat_ref != "chat:" + match[1]:
             return None
-
+        if (type(prompt) is not str or not 0 < len(prompt) <= 262144 or
+                type(header) is not str or
+                re.fullmatch(r"PULSE_BRAIN_DECISION [0-9a-f]{32} [0-9a-f]{64}\n", header) is None or
+                prompt.count(header) != 1):
+            return None
+        args = {**_ARGS, "url": binding.chat_url, "text": prompt,
+                "header": header, "max_chars": 16384}
+        reserving = False
         try:
-            request = parse_brain_review_evidence_request(evidence_request)
-            nonce = secrets.token_hex(16)
-            request_sha = request["request_sha256"]
-            header = f"PULSE_BRAIN_DECISION {nonce} {request_sha}\n"
-            decision_fields = {
-                "schema_version": "BrainDecision.v1",
-                "decision_id": "decision:pulse-" + nonce,
-                "journey_id": request["journey_id"],
-                "source_sha": request["source_sha"],
-                "directive_version": request["directive_version"],
-                "directive_sha256": request["directive_sha256"],
-                "scope": request["scope"],
-                "review_scope": request["review_scope"],
-                "channel": request["required_channel"],
-                "chat_ref": chat_ref,
-                "receipt_ref": request["receipt_ref"],
-                "provenance": {
-                    "actor": "CHATGPT_BRAIN", "actor_ref": "brain:chatgpt-current",
-                    "evidence_type": "HUMAN_SUPPLIED", "source_ref": request["receipt_ref"],
-                    "source_sha": request["source_sha"],
-                },
-                "authorization": draft_authorization(),
-            }
-            prompt = (
-                "Review this PULSE directive using only the supplied evidence. "
-                "Reply with the exact header below followed by one plain JSON object. "
-                "Copy the decision fields exactly and add only decision and rationale. "
-                "Choose APPROVE_DIRECTIVE, REVISE, HOLD, or STOP. Use HOLD if evidence "
-                "is insufficient. Do not use tools or take any other action.\n"
-                + header + json.dumps(decision_fields, ensure_ascii=True, sort_keys=True) + "\n"
-                + evidence_request.decode("utf-8")
-            )
-            args = {**_ARGS, "url": binding.chat_url, "text": prompt,
-                    "header": header, "max_chars": 16384}
-
             with self._inventory.pages(binding.cdp_endpoint) as pages:
                 matching = [page for page in pages if type(page.url) is str
                             and page.url.removesuffix("/") == binding.chat_url]
@@ -1142,7 +1114,12 @@ class LocalChromePulseBrainBridge:
                     return None
                 page = matching[0]
                 page.set_default_timeout(3000)
-                if page.evaluate(_CHECK, args) != "READY" or not reserve_send():
+                if page.evaluate(_CHECK, args) != "READY":
+                    return None
+                reserving = True
+                reserved = reserve_send()
+                reserving = False
+                if not reserved:
                     return None
                 if page.evaluate(_INSERT, args) is not True:
                     return None
@@ -1152,24 +1129,12 @@ class LocalChromePulseBrainBridge:
                 answer = page.wait_for_function(_PULSE_BRAIN_RESPONSE, arg=args, timeout=30000).json_value()
                 if page.url.removesuffix("/") != binding.chat_url:
                     return None
-
             if type(answer) is not str or len(answer) > args["max_chars"] or not answer.startswith(header):
                 return None
-            body = _decode_unique(answer[len(header):])
-            if type(body) is not dict or set(body) != {*decision_fields, "decision", "rationale"}:
-                return None
-            decision = seal_contract("BrainDecision", body)
-            if any(body[field] != value for field, value in decision_fields.items()):
-                return None
-            return LocalBrainDecisionInput(
-                decision_bytes=decision.raw,
-                origin_kind="TEST_ONLY" if self._test_only else "LOCAL_CHATGPT_TRANSFER",
-                origin_ref=("TEST_ONLY:" if self._test_only else "") + "pulse-cdp-ui:" + nonce,
-                chat_ref=chat_ref, evidence_request_sha256=request_sha,
-            )
-        except OrchestrationError:
-            raise
+            return answer, self._test_only
         except Exception:
+            if reserving:
+                raise
             return None
 
 

@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, replace
 import json
 from pathlib import Path
 import re
+import secrets
 import sqlite3
 import time
 from typing import Literal, Protocol
@@ -79,6 +80,87 @@ class PulseBrainBridge(Protocol):
     def request_decision(
         self, *, evidence_request: bytes, chat_ref: str, reserve_send: Callable[[], bool],
     ) -> LocalBrainDecisionInput | None: ...
+
+
+class PulseBrainTurnTransport(Protocol):
+    """Opaque exact-chat exchange; only the production owner interprets decisions."""
+
+    def request_turn(
+        self, *, prompt: str, header: str, chat_ref: str, reserve_send: Callable[[], bool],
+    ) -> tuple[str, bool] | None: ...
+
+
+class PulseBrainDecisionBridge:
+    """Compose a caller-owned chat transport with the existing PULSE contracts.
+
+    Transport implementations stay independent of production types and imports.
+    A returned UI turn is local evidence, not proof of native execution or identity.
+    """
+
+    def __init__(self, *, transport: PulseBrainTurnTransport):
+        self._transport = transport
+
+    def request_decision(
+        self, *, evidence_request: bytes, chat_ref: str, reserve_send: Callable[[], bool],
+    ) -> LocalBrainDecisionInput | None:
+        if type(chat_ref) is not str or not re.fullmatch(r"chat:[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", chat_ref):
+            return None
+        try:
+            request = runtime_receipt.parse_brain_review_evidence_request(evidence_request)
+            nonce = secrets.token_hex(16)
+            request_sha = request["request_sha256"]
+            header = f"PULSE_BRAIN_DECISION {nonce} {request_sha}\n"
+            decision_fields = {
+                "schema_version": "BrainDecision.v1",
+                "decision_id": "decision:pulse-" + nonce,
+                "journey_id": request["journey_id"],
+                "source_sha": request["source_sha"],
+                "directive_version": request["directive_version"],
+                "directive_sha256": request["directive_sha256"],
+                "scope": request["scope"],
+                "review_scope": request["review_scope"],
+                "channel": request["required_channel"],
+                "chat_ref": chat_ref,
+                "receipt_ref": request["receipt_ref"],
+                "provenance": {
+                    "actor": "CHATGPT_BRAIN", "actor_ref": "brain:chatgpt-current",
+                    "evidence_type": "HUMAN_SUPPLIED", "source_ref": request["receipt_ref"],
+                    "source_sha": request["source_sha"],
+                },
+                "authorization": pulse_draft_authorization(),
+            }
+            prompt = (
+                "Review this PULSE directive using only the supplied evidence. "
+                "Reply with the exact header below followed by one plain JSON object. "
+                "Copy the decision fields exactly and add only decision and rationale. "
+                "Choose APPROVE_DIRECTIVE, REVISE, HOLD, or STOP. Use HOLD if evidence "
+                "is insufficient. Do not use tools or take any other action.\n"
+                + header + json.dumps(decision_fields, ensure_ascii=True, sort_keys=True) + "\n"
+                + evidence_request.decode("utf-8")
+            )
+            result = self._transport.request_turn(prompt=prompt, header=header,
+                                                  chat_ref=chat_ref, reserve_send=reserve_send)
+            if type(result) is not tuple or len(result) != 2:
+                return None
+            answer, test_only = result
+            if (type(test_only) is not bool or type(answer) is not str or
+                    len(answer) > 16384 or not answer.startswith(header)):
+                return None
+            body = read_strict_json(answer[len(header):])
+            if (type(body) is not dict or set(body) != {*decision_fields, "decision", "rationale"} or
+                    any(body[field] != value for field, value in decision_fields.items())):
+                return None
+            decision = seal_pulse_contract("BrainDecision", body)
+            return LocalBrainDecisionInput(
+                decision_bytes=decision.raw,
+                origin_kind="TEST_ONLY" if test_only else "LOCAL_CHATGPT_TRANSFER",
+                origin_ref=("TEST_ONLY:" if test_only else "") + "pulse-cdp-ui:" + nonce,
+                chat_ref=chat_ref, evidence_request_sha256=request_sha,
+            )
+        except OrchestrationError:
+            raise
+        except Exception:
+            return None
 
 
 _PULSE_BRAIN_SEND_INTENT = "PulseBrainSendIntent"
