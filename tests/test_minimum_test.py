@@ -2593,7 +2593,8 @@ def test_group_failures_no_tests_and_internal_errors_never_pass(mapped, monkeypa
     assert selected["groups"][0]["state"] == selected["groups"][0]["result"] == "UNPROVEN"
 
 
-def _execute(mapped, *, prior=None, acs=("AC-A",), changed=("feature_a.py",), name="round-0", **options):
+def _execute(mapped, *, prior=None, acs=("AC-A",), changed=("feature_a.py",), name="round-0",
+             verifier=verification, **options):
     mapped.evidence.mkdir(exist_ok=True)
     files = {}
     def save(key, filename, data):
@@ -2604,7 +2605,7 @@ def _execute(mapped, *, prior=None, acs=("AC-A",), changed=("feature_a.py",), na
             handle.write(data)
         files[key] = relative
     prior = {} if prior is None else prior
-    result, selected = verification.execute_plan(
+    result, selected = verifier.execute_plan(
         repo=mapped.repo, output_dir=mapped.evidence, base_sha="a" * 40, base_files=mapped.base,
         changed_paths=list(changed), required_acs=acs, fallback_argv=options.pop("fallback_argv", FULL), prior=prior,
         # Real nested pytest startup on two twelve-worker actions is not the
@@ -2704,6 +2705,105 @@ def test_mt01_pytest_nodeid_guard_preserves_oversized_payload_and_short_id(tmp_p
         repo=repo, timeout=45)
     assert response.returncode == 0, (out + err)[-1200:]
     assert b"1 passed" in out and b"MT01_PYTEST_NODEID_TOO_LONG" not in out + err
+
+
+@pytest.fixture
+def candidate_verification():
+    import importlib.util
+
+    source = ROOT / "src/ai_commerce/engineering/verification.py"
+    module = verification
+    if Path(module.__file__).resolve() != source.resolve():
+        # The trusted verifier can preload the base package through its observer.
+        spec = importlib.util.spec_from_file_location(
+            "ai_commerce.engineering._mt01_candidate_verification", source)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    assert Path(module.__file__).resolve() == source.resolve()
+    return module
+
+
+@pytest.mark.parametrize("interpreter", ["python", "py", sys.executable])
+def test_mt01_pytest_pins_active_interpreter_and_candidate_imports(
+    candidate_verification, tmp_path, monkeypatch, interpreter,
+):
+    repo = tmp_path / "candidate"
+    repo.mkdir()
+    inherited = [str(tmp_path / "base" / "src"), str(tmp_path / "extra")]
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(inherited))
+    monkeypatch.setenv("PYTHONHOME", str(tmp_path / "other-python"))
+    monkeypatch.setenv("PYTHONNOUSERSITE", "0")
+    monkeypatch.setenv("PYTEST_PLUGINS", "reviewed.plugin")
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-ra")
+    argv = [interpreter, "-m", "pytest", "tests/test_a.py", "-q", "-n", "12"]
+
+    def run(cmd, *, executable, cwd, env, **_kwargs):
+        assert cmd == [interpreter, "-m", "pytest", "tests/test_a.py", "-q", "-n", "12"]
+        assert executable == sys.executable and cwd == repo
+        junit = Path(env["AI_COMMERCE_MT01_JUNIT_PATH"])
+        assert env["PYTHONPATH"].split(os.pathsep) == [
+            str(junit.parent), str(repo.resolve() / "src"), *inherited,
+        ]
+        assert "PYTHONHOME" not in env and env["PYTHONNOUSERSITE"] == "1"
+        assert env["PYTEST_ADDOPTS"] == "-ra"
+        assert env["PYTEST_PLUGINS"].split(",") == [
+            "reviewed.plugin", "ai_commerce.engineering.pytest_profile", "_ai_commerce_mt01_junit_plugin",
+        ]
+        assert (junit.parent / "_ai_commerce_mt01_junit_plugin.py").is_file()
+        junit.write_bytes(b"<testsuites/>")
+        return subprocess.CompletedProcess(cmd, 0, "observed stdout", "observed stderr")
+
+    monkeypatch.setattr(candidate_verification, "subprocess", SimpleNamespace(run=run))
+    response, out, err, junit, issue = candidate_verification._run_pytest_with_junit(
+        argv, repo=repo, timeout=5)
+    assert response.args == argv and response.returncode == 0
+    assert (out, err, junit, issue) == (b"observed stdout", b"observed stderr", b"<testsuites/>", None)
+
+
+@pytest.mark.parametrize("argv", [["python3", "-m", "pytest"], ["python", "-m", "other"], []])
+def test_mt01_pytest_rejects_unexpected_launcher(candidate_verification, tmp_path, monkeypatch, argv):
+    def run(*_args, **_kwargs):
+        pytest.fail("unreviewed command reached subprocess.run")
+
+    monkeypatch.setattr(candidate_verification, "subprocess", SimpleNamespace(run=run))
+    with pytest.raises(ValueError, match="MT01_PYTEST_INTERPRETER_UNSUPPORTED"):
+        candidate_verification._run_pytest_with_junit(argv, repo=tmp_path, timeout=5)
+
+
+def test_mt01_changed_test_collection_preserves_bounded_failure_evidence(
+    candidate_verification, mapped, monkeypatch,
+):
+    monkeypatch.delenv("MT01_V21_ENABLED", raising=False)
+    test_path = "tests/test_a.py"
+    (mapped.repo / test_path).write_text(
+        "import pytest\n@pytest.mark.parametrize('value', [1])\n"
+        "def test_value(value):\n    assert value == 1\n", encoding="utf-8")
+    fallback = [*FULL, "-n", "12"]
+    profiles = {"project-tests": fallback,
+                "mt01-a-tests": ["python", "-m", "pytest", test_path, "-q", "-n", "12"]}
+
+    def run(argv, **_kwargs):
+        assert argv == [sys.executable, "-m", "pytest", test_path, "--collect-only", "-q"]
+        return subprocess.CompletedProcess(
+            argv, 2, "ERROR collecting tests/test_a.py\n" + "x" * 5000 + "\n1 error during collection\n",
+            "\x1b[31mImportError: missing dependency\x1b[0m\x00\n")
+
+    monkeypatch.setattr(candidate_verification, "subprocess", SimpleNamespace(
+        run=run, CompletedProcess=subprocess.CompletedProcess, TimeoutExpired=subprocess.TimeoutExpired))
+    response, selected, prior = _execute(
+        mapped, verifier=candidate_verification, changed=(test_path,), fallback_argv=fallback,
+        registered_only=True, registered_profiles=profiles)
+    assert response.returncode == 3
+    assert not prior
+    assert selected["test_id_preflight"]["reason"] == "CHANGED_TEST_COLLECTION_UNPROVEN"
+    assert all(group["actual_argv"] is None for group in selected["groups"])
+    receipt = json.loads((mapped.evidence / "round-0/mt01.nodeid-preflight.json").read_bytes())
+    assert receipt["actual_exit_code"] == 2
+    assert "ERROR collecting tests/test_a.py" in receipt["stdout"]
+    assert "1 error during collection" in receipt["stdout"]
+    assert "[OUTPUT_TRUNCATED]" in receipt["stdout"] and "x" * 512 not in receipt["stdout"]
+    assert receipt["stderr"] == "ImportError: missing dependency"
+
 
 @pytest.mark.parametrize("expression", ["__import__(name)", "builtins.__import__(name)",
     "importlib.import_module(name)", "load(name)"])
@@ -4404,7 +4504,9 @@ def test_mt01_winerror1314_junit_reason_recorded_when_absent_or_malformed(
     assert selected["groups"][0]["reason"] == expected_reason
 
 
-def test_mt01_windows_real_subprocess_xdist_junit_winerror1314_and_replay_holds(tmp_path, monkeypatch):
+def test_mt01_windows_real_subprocess_xdist_junit_winerror1314_and_replay_holds(
+    tmp_path, monkeypatch, candidate_verification,
+):
     """Real Windows pytest -n 12 + JUnit XML subprocess integration proof for WinError 1314 skips."""
     if os.name != "nt":
         pytest.skip("Windows-only real JUnit + xdist WinError 1314 integration test")
@@ -4413,6 +4515,7 @@ def test_mt01_windows_real_subprocess_xdist_junit_winerror1314_and_replay_holds(
     import re
     import shutil
 
+    verification = candidate_verification
     assert importlib.util.find_spec("xdist") is not None, "xdist must be installed"
 
     repo = tmp_path / "repo"
@@ -4797,6 +4900,7 @@ def test_mt01_windows_real_subprocess_xdist_junit_winerror1314_and_replay_holds(
         )
         replay_res, replay_plan, replay_prior = _execute(
             fix,
+            verifier=verification,
             acs=("AC-A", "AC-B"),
             changed=("feature_a.py",),
             name=f"replay-{case_name}",
