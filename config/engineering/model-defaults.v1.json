@@ -2,14 +2,14 @@
   "version": 1,
   "hard_default": false,
   "preferred": {
-    "executor": "codex",
-    "model": "gpt-6.2-sol",
+    "executor": "antigravity",
+    "model": "gemini-4-neon",
     "effort": "high"
   },
   "fallback": {
-    "executor": "antigravity",
-    "model": "gemini-4-hydrogen",
-    "effort": "xhigh"
+    "executor": "codex",
+    "model": "gpt-6.2-sol",
+    "effort": "high"
   },
   "recovery_probe_cooldown_seconds": 3600
 }

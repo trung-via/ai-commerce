@@ -2606,12 +2606,20 @@ class ExecutorHealthLocalTests(unittest.TestCase):
                     self.assertEqual(result["state"], "VALIDATED" if raw == json.dumps(valid) else "INVALID")
                     self.assertEqual(policy.read_bytes(), before)
                     self.assertFalse((root / ".local").exists())
+                swapped = {**valid, "preferred": valid["fallback"], "fallback": valid["preferred"]}
+                policy.write_text(json.dumps(swapped), encoding="utf-8")
+                self.assertEqual(self._defaults_original()["state"], "VALIDATED")
                 policy.unlink()
                 self.assertEqual(self._defaults_original()["state"], "INVALID")
         self.native.assert_not_called()
 
     def test_strict_receipt_rejects_extra_raw_quota_identity_and_bad_types(self):
         valid = self.collect()
+        reversed_defaults = copy.deepcopy(valid)
+        reversed_defaults["defaults"]["preferred"], reversed_defaults["defaults"]["fallback"] = (
+            reversed_defaults["defaults"]["fallback"], reversed_defaults["defaults"]["preferred"])
+        self.assertEqual(hostops.validate_executor_health_local_receipt(
+            reversed_defaults)["defaults"]["preferred"]["executor"], "antigravity")
         invalid = [None, [], {**valid, "stdout": "PRIVATE_SECRET"}, {**valid, "schema_version": "v2"},
                    {**valid, "windows": 1}, {**valid, "observed_at": "today"}, {**valid, "context_identity": "PRIVATE_SECRET"},
                    {**valid, "executors": list(reversed(valid["executors"]))}]
