@@ -1892,6 +1892,166 @@ def _w3a_make_test_only_decision_input(
     return sealed.raw, decision_dict, local_input
 
 
+@pytest.mark.parametrize("case", ["approve", "hold", "wrong-source", "wrong-chat",
+                                  "wrong-correlation", "truncated", "duplicate-json", "oversized"])
+def test_pulse_brain_decision_codec_preserves_contract_and_transport_boundary(monkeypatch, case):
+    from ai_commerce.production_orchestration.orchestrator import PulseBrainDecisionBridge
+    from ai_commerce.production_runtime import receipt as runtime_receipt
+    from ai_commerce.production_runtime.contracts import parse_contract
+
+    evidence = b'{"synthetic":true}'
+    chat = "chat:codec-test"
+    request = {
+        "request_sha256": "e" * 64, "journey_id": "journey:test", "source_sha": "a" * 40,
+        "directive_version": 1, "directive_sha256": "d" * 64,
+        "scope": {"action_class": "EXPORT_DRAFT", "provider_ref": None, "account_ref": None,
+                  "surface": None, "asset_sha256": None},
+        "review_scope": "DIRECTIVE_ONLY", "required_channel": "CURRENT_CHATGPT_CHAT",
+        "receipt_ref": "receipt:" + "b" * 64,
+    }
+
+    def parse(raw):
+        assert raw == evidence
+        return request
+
+    monkeypatch.setattr(runtime_receipt, "parse_brain_review_evidence_request", parse)
+    calls = []
+
+    class Transport:
+        def request_turn(self, *, prompt, header, chat_ref, reserve_send):
+            assert chat_ref == chat and prompt.endswith(evidence.decode())
+            assert reserve_send() is True
+            calls.append(header)
+            body = json.loads(prompt.splitlines()[-2])
+            body.update(decision="HOLD" if case == "hold" else "APPROVE_DIRECTIVE",
+                        rationale="Synthetic exact evidence review.")
+            if case == "wrong-source":
+                body["source_sha"] = body["provenance"]["source_sha"] = "f" * 40
+            if case == "wrong-chat":
+                body["chat_ref"] = "chat:wrong"
+            if case == "wrong-correlation":
+                header = header.replace("e" * 64, "f" * 64)
+            answer = header + json.dumps(body)
+            if case == "truncated":
+                answer = answer[:-1]
+            if case == "duplicate-json":
+                answer = answer[:-1] + ', "decision":"HOLD"}'
+            if case == "oversized":
+                answer += "x" * 16384
+            return answer, True
+
+    result = PulseBrainDecisionBridge(transport=Transport()).request_decision(
+        evidence_request=evidence, chat_ref=chat, reserve_send=lambda: True)
+    assert len(calls) == 1
+    if case in {"approve", "hold"}:
+        assert result.is_test_only and result.origin_ref.startswith("TEST_ONLY:")
+        assert result.chat_ref == chat and result.evidence_request_sha256 == "e" * 64
+        assert parse_contract("BrainDecision", result.decision_bytes).to_dict()["decision"] == (
+            "HOLD" if case == "hold" else "APPROVE_DIRECTIVE")
+    else:
+        assert result is None
+
+
+def test_pulse_brain_codec_rejects_invalid_evidence_before_transport():
+    from ai_commerce.production_orchestration.orchestrator import PulseBrainDecisionBridge
+
+    class Transport:
+        def request_turn(self, **kwargs):
+            pytest.fail("invalid evidence must not reach transport")
+
+    assert PulseBrainDecisionBridge(transport=Transport()).request_decision(
+        evidence_request=b"{}", chat_ref="chat:codec-test",
+        reserve_send=lambda: pytest.fail("unexpected send intent")) is None
+
+
+@pytest.mark.parametrize(("outcome", "reason"), [
+    ("approve", "BRAIN_ACCEPTED"),
+    ("hold", "BRAIN_DECISION_NOT_APPROVED"),
+    ("wrong-chat", "BRAIN_CHAT_MISMATCH"),
+    ("wrong-source", "BRAIN_SOURCE_MISMATCH"),
+    ("wrong-evidence", "BRAIN_EVIDENCE_REQUEST_MISMATCH"),
+    ("incomplete", "BRAIN_CDP_UNKNOWN_EFFECT"),
+    ("crash", "BRAIN_CDP_UNKNOWN_EFFECT"),
+])
+def test_w3b_pulse_bridge_one_intent_and_w3a_intake(w2_pulse_case, outcome, reason):
+    _w2_require_windows_media()
+    from ai_commerce.production_runtime import receipt as runtime_receipt
+
+    chat = "chat:test-pulse-brain"
+    calls = []
+
+    class Interrupted(BaseException):
+        pass
+
+    class Bridge:
+        def request_decision(self, *, evidence_request, chat_ref, reserve_send):
+            assert chat_ref == chat
+            calls.append(evidence_request)
+            assert reserve_send() is True
+            assert invocation_rows(owner, "PulseBrainSendIntent")
+            assert reserve_send() is False
+            if outcome == "crash":
+                raise Interrupted
+            if outcome == "incomplete":
+                return None
+            request = runtime_receipt.parse_brain_review_evidence_request(evidence_request)
+            return _w3a_make_test_only_decision_input(
+                request, chat_ref="chat:wrong" if outcome == "wrong-chat" else chat,
+                source_sha="f" * 40 if outcome == "wrong-source" else None,
+                decision="HOLD" if outcome == "hold" else "APPROVE_DIRECTIVE",
+                input_evidence_request_sha256="f" * 64 if outcome == "wrong-evidence" else None,
+            )[2]
+
+    class Transport:
+        def request_turn(self, *, prompt, header, chat_ref, reserve_send):
+            assert chat_ref == chat and header in prompt
+            _, fields, evidence = prompt.rsplit("\n", 2)
+            calls.append(evidence.encode("utf-8"))
+            assert reserve_send() is True
+            assert invocation_rows(owner, "PulseBrainSendIntent")
+            assert reserve_send() is False
+            body = json.loads(fields)
+            body.update(decision="APPROVE_DIRECTIVE", rationale="Synthetic composed UI response.")
+            return header + json.dumps(body), True
+
+    from ai_commerce.production_orchestration.orchestrator import PulseBrainDecisionBridge
+
+    def make_bridge():
+        return PulseBrainDecisionBridge(transport=Transport()) if outcome == "approve" else Bridge()
+
+    owner = w2_pulse_case["make_owner"](pulse_brain_bridge=make_bridge())
+    done = owner.complete_a04_pulse(**w2_pulse_case["call_kwargs"])
+    assert done.status == "SUCCESS" and done.receiver_receipt["state"] == "WAIT_BRAIN"
+    key = done.completed.spec.idempotency_key
+    if outcome == "crash":
+        with pytest.raises(Interrupted):
+            owner.review_pulse_brain_decision(key, chat_ref=chat)
+    else:
+        result = owner.review_pulse_brain_decision(key, chat_ref=chat)
+        if outcome == "approve":
+            assert result.status == reason and result.accepted
+            assert result.origin_kind == "TEST_ONLY" and result.live_cdp_proven is False
+        else:
+            assert result.status == "HOLD" and result.reason == reason
+
+    reopened = w2_pulse_case["make_owner"](pulse_brain_bridge=make_bridge())
+    replay = reopened.review_pulse_brain_decision(key, chat_ref=chat)
+    if outcome == "approve":
+        assert replay.accepted and replay.idempotent_replay and replay.journal_seq == result.journal_seq
+    else:
+        assert replay.status == "HOLD" and replay.state == "UNKNOWN_EFFECT"
+        assert replay.reason == "BRAIN_CDP_UNKNOWN_EFFECT"
+    assert len(calls) == len(invocation_rows(reopened, "PulseBrainSendIntent")) == 1
+    assert len(invocation_rows(reopened, "BrainDecisionAccepted.v1")) == (1 if outcome == "approve" else 0)
+
+    if outcome == "incomplete":
+        with sqlite3.connect(reopened._state_dir / "production.sqlite") as db:
+            db.execute("UPDATE journal SET body='{}' WHERE kind='PulseBrainSendIntent'")
+        tampered = reopened.review_pulse_brain_decision(key, chat_ref=chat)
+        assert tampered.status == "HOLD" and tampered.reason == "BRAIN_CDP_SEND_INTENT_MISMATCH"
+        assert len(calls) == 1
+
+
 def test_w3a_pulse03_evidence_request_no_decision_and_pr_pass_preserve_wait_brain(w2_pulse_case, monkeypatch):
     _w2_require_windows_media()
     import time
@@ -1902,6 +2062,9 @@ def test_w3a_pulse03_evidence_request_no_decision_and_pr_pass_preserve_wait_brai
     done = owner.complete_a04_pulse(**w2_pulse_case["call_kwargs"])
     assert done.status == "SUCCESS" and done.receiver_receipt["state"] == "WAIT_BRAIN"
     key = done.completed.spec.idempotency_key
+    private_dir, _ = owner._pulse_receiver_dirs(key)
+    ledgers = (owner._state_dir / "production.sqlite", private_dir / "journal.sqlite")
+    ledger_bytes = tuple(path.read_bytes() for path in ledgers)
 
     monkeypatch.setattr(attended_worker.service, "run", lambda *a, **k: pytest.fail("W3a must never render"))
     req_raw = owner.build_pulse_brain_evidence_request(key)
@@ -1967,6 +2130,7 @@ def test_w3a_pulse03_evidence_request_no_decision_and_pr_pass_preserve_wait_brai
     assert not invocation_rows(owner, "BrainDecisionAccepted.v1")
     inspected = owner.inspect_pulse_brain_decision(key)
     assert inspected.status == "NO_DECISION" and inspected.state == "WAIT_BRAIN"
+    assert tuple(path.read_bytes() for path in ledgers) == ledger_bytes
 
 
 def test_w3a_pulse03_local_test_only_decision_accepts_once_and_reopens_idempotently(w2_pulse_case, monkeypatch):
@@ -2039,7 +2203,10 @@ def test_w3a_pulse03_local_test_only_decision_accepts_once_and_reopens_idempoten
 
     # Reopen orchestrator and confirm exact single logical decision + idempotent replay.
     reopened = w2_pulse_case["make_owner"]()
+    ledger = reopened._state_dir / "production.sqlite"
+    ledger_bytes = ledger.read_bytes()
     inspected = reopened.inspect_pulse_brain_decision(key)
+    assert ledger.read_bytes() == ledger_bytes
     assert inspected.status == "BRAIN_ACCEPTED"
     assert inspected.state == "READY_FOR_HUMAN_RELEASE"
     assert inspected.journal_seq == accepted.journal_seq

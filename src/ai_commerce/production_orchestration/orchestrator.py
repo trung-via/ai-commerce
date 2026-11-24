@@ -6,15 +6,16 @@ lease expiry. P0 wire receipts still require independent trusted receipt pins.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 import json
 from pathlib import Path
 import re
+import secrets
 import sqlite3
 import time
-from typing import Literal
+from typing import Literal, Protocol
 
 from ai_commerce.a04_pulse_handoff.handoff import (
     A04PulseHandoffPacket,
@@ -73,6 +74,98 @@ class DispatchResult:
     receiver_receipt: object | None = None
 
 
+class PulseBrainBridge(Protocol):
+    """Caller-owned transport for one exact-chat review, with a write-ahead send guard."""
+
+    def request_decision(
+        self, *, evidence_request: bytes, chat_ref: str, reserve_send: Callable[[], bool],
+    ) -> LocalBrainDecisionInput | None: ...
+
+
+class PulseBrainTurnTransport(Protocol):
+    """Opaque exact-chat exchange; only the production owner interprets decisions."""
+
+    def request_turn(
+        self, *, prompt: str, header: str, chat_ref: str, reserve_send: Callable[[], bool],
+    ) -> tuple[str, bool] | None: ...
+
+
+class PulseBrainDecisionBridge:
+    """Compose a caller-owned chat transport with the existing PULSE contracts.
+
+    Transport implementations stay independent of production types and imports.
+    A returned UI turn is local evidence, not proof of native execution or identity.
+    """
+
+    def __init__(self, *, transport: PulseBrainTurnTransport):
+        self._transport = transport
+
+    def request_decision(
+        self, *, evidence_request: bytes, chat_ref: str, reserve_send: Callable[[], bool],
+    ) -> LocalBrainDecisionInput | None:
+        if type(chat_ref) is not str or not re.fullmatch(r"chat:[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", chat_ref):
+            return None
+        try:
+            request = runtime_receipt.parse_brain_review_evidence_request(evidence_request)
+            nonce = secrets.token_hex(16)
+            request_sha = request["request_sha256"]
+            header = f"PULSE_BRAIN_DECISION {nonce} {request_sha}\n"
+            decision_fields = {
+                "schema_version": "BrainDecision.v1",
+                "decision_id": "decision:pulse-" + nonce,
+                "journey_id": request["journey_id"],
+                "source_sha": request["source_sha"],
+                "directive_version": request["directive_version"],
+                "directive_sha256": request["directive_sha256"],
+                "scope": request["scope"],
+                "review_scope": request["review_scope"],
+                "channel": request["required_channel"],
+                "chat_ref": chat_ref,
+                "receipt_ref": request["receipt_ref"],
+                "provenance": {
+                    "actor": "CHATGPT_BRAIN", "actor_ref": "brain:chatgpt-current",
+                    "evidence_type": "HUMAN_SUPPLIED", "source_ref": request["receipt_ref"],
+                    "source_sha": request["source_sha"],
+                },
+                "authorization": pulse_draft_authorization(),
+            }
+            prompt = (
+                "Review this PULSE directive using only the supplied evidence. "
+                "Reply with the exact header below followed by one plain JSON object. "
+                "Copy the decision fields exactly and add only decision and rationale. "
+                "Choose APPROVE_DIRECTIVE, REVISE, HOLD, or STOP. Use HOLD if evidence "
+                "is insufficient. Do not use tools or take any other action.\n"
+                + header + json.dumps(decision_fields, ensure_ascii=True, sort_keys=True) + "\n"
+                + evidence_request.decode("utf-8")
+            )
+            result = self._transport.request_turn(prompt=prompt, header=header,
+                                                  chat_ref=chat_ref, reserve_send=reserve_send)
+            if type(result) is not tuple or len(result) != 2:
+                return None
+            answer, test_only = result
+            if (type(test_only) is not bool or type(answer) is not str or
+                    len(answer) > 16384 or not answer.startswith(header)):
+                return None
+            body = read_strict_json(answer[len(header):])
+            if (type(body) is not dict or set(body) != {*decision_fields, "decision", "rationale"} or
+                    any(body[field] != value for field, value in decision_fields.items())):
+                return None
+            decision = seal_pulse_contract("BrainDecision", body)
+            return LocalBrainDecisionInput(
+                decision_bytes=decision.raw,
+                origin_kind="TEST_ONLY" if test_only else "LOCAL_CHATGPT_TRANSFER",
+                origin_ref=("TEST_ONLY:" if test_only else "") + "pulse-cdp-ui:" + nonce,
+                chat_ref=chat_ref, evidence_request_sha256=request_sha,
+            )
+        except OrchestrationError:
+            raise
+        except Exception:
+            return None
+
+
+_PULSE_BRAIN_SEND_INTENT = "PulseBrainSendIntent"
+
+
 class ProductionPipelineOrchestrator:
     """P0 bookkeeping plus an explicitly granted P1 local function adapter.
 
@@ -96,7 +189,8 @@ class ProductionPipelineOrchestrator:
                  verified_receipts: Iterable[tuple[str, str]] = (),
                  state_dir: str | Path | None = None, source_sha: str | None = None,
                  local_authorization: LocalAuthorization | None = None,
-                 max_attempts: int = 2, lease_seconds: int = 60) -> None:
+                 max_attempts: int = 2, lease_seconds: int = 60,
+                 pulse_brain_bridge: PulseBrainBridge | None = None) -> None:
         pins = tuple(authorized_specs)
         require(all(type(pin) is tuple and len(pin) == 2
                     and all(type(part) is str for part in pin) for pin in pins), "AUTHORIZATION_PINS")
@@ -118,6 +212,7 @@ class ProductionPipelineOrchestrator:
         self._state_dir = local_path(state_dir) if state_dir is not None else None
         self._max_attempts = max_attempts
         self._lease_seconds = lease_seconds
+        self._pulse_brain_bridge = pulse_brain_bridge
         self.last_result: DispatchResult | None = None
 
     def record_completed(self, completed: ProductionStageCompleted, *, source_bytes: bytes,
@@ -237,27 +332,38 @@ class ProductionPipelineOrchestrator:
         return grant
 
     @contextmanager
-    def _database(self):
+    def _database(self, *, read_only: bool = False):
         require(self._state_dir is not None, "STATE_DIR_REQUIRED")
-        path = ledger_path(self._state_dir / "production.sqlite", create=True)
         try:
-            db = sqlite3.connect(path, timeout=5)
+            path = ledger_path(self._state_dir / "production.sqlite", create=not read_only)
+            if read_only:
+                db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)
+            else:
+                db = sqlite3.connect(path, timeout=5)
+        except ValueError:
+            if not read_only:
+                raise
+            raise OrchestrationError("JOURNAL_UNAVAILABLE") from None
         except sqlite3.Error:
             raise OrchestrationError("JOURNAL_UNAVAILABLE") from None
         db.row_factory = sqlite3.Row
         try:
-            db.execute("PRAGMA synchronous=FULL")
-            db.execute("BEGIN IMMEDIATE")
+            if not read_only:
+                db.execute("PRAGMA synchronous=FULL")
+            db.execute("BEGIN" if read_only else "BEGIN IMMEDIATE")
             version = db.execute("PRAGMA user_version").fetchone()[0]
-            empty = not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone()
-            require(version == 1 or version == 0 and empty, "JOURNAL_SCHEMA_VERSION")
-            db.execute("PRAGMA user_version=1")
-            db.execute("""CREATE TABLE IF NOT EXISTS outbox (
-                key TEXT PRIMARY KEY, slot TEXT UNIQUE NOT NULL, completed TEXT NOT NULL,
-                state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
-                lease_until REAL, witness TEXT, dispatched TEXT, reason TEXT)""")
-            db.execute("""CREATE TABLE IF NOT EXISTS journal (
-                seq INTEGER PRIMARY KEY, key TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL)""")
+            if read_only:
+                require(version == 1, "JOURNAL_SCHEMA_VERSION")
+            else:
+                empty = not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone()
+                require(version == 1 or version == 0 and empty, "JOURNAL_SCHEMA_VERSION")
+                db.execute("PRAGMA user_version=1")
+                db.execute("""CREATE TABLE IF NOT EXISTS outbox (
+                    key TEXT PRIMARY KEY, slot TEXT UNIQUE NOT NULL, completed TEXT NOT NULL,
+                    state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+                    lease_until REAL, witness TEXT, dispatched TEXT, reason TEXT)""")
+                db.execute("""CREATE TABLE IF NOT EXISTS journal (
+                    seq INTEGER PRIMARY KEY, key TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL)""")
             yield db
             db.commit()
         except sqlite3.Error:
@@ -1653,7 +1759,7 @@ class ProductionPipelineOrchestrator:
         grant = self._grant()
         require(grant.route_id == "a04-to-pulse-offline", "LOCAL_ROUTE_MISMATCH")
         require(type(key) is str and len(key) > 0, "COMPLETED_NOT_FOUND")
-        with self._database() as db:
+        with self._database(read_only=True) as db:
             row = db.execute("SELECT * FROM outbox WHERE key=?", (key,)).fetchone()
             require(row is not None, "COMPLETED_NOT_FOUND")
             completed = ProductionStageCompleted.from_dict(json.loads(row["completed"]))
@@ -1750,6 +1856,96 @@ class ProductionPipelineOrchestrator:
             raise
         except (ValueError, TypeError, KeyError, OSError):
             raise OrchestrationError("BRAIN_EVIDENCE_REQUEST_HOLD") from None
+
+    def review_pulse_brain_decision(
+        self, key: str, *, chat_ref: str, at: int | None = None,
+        expected_fencing_generation: int | None = None,
+    ) -> BrainDecisionIntakeResult:
+        """Offer verified WAIT_BRAIN evidence once, then pass the decision to W3a intake."""
+        bridge = self._pulse_brain_bridge
+        if bridge is None:
+            return self._brain_hold("BRAIN_CDP_BRIDGE_UNAVAILABLE")
+        if type(chat_ref) is not str or not re.fullmatch(r"chat:[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", chat_ref):
+            return self._brain_hold("BRAIN_CHAT_MISMATCH")
+        if at is not None and (type(at) is not int or not 0 <= at < 2**63 - 1):
+            return self._brain_hold("EXPLICIT_TIME_REQUIRED")
+
+        try:
+            inspected = self.inspect_pulse_brain_decision(key)
+        except OrchestrationError as exc:
+            return self._brain_hold(str(exc))
+        if inspected.accepted:
+            if inspected.chat_ref != chat_ref:
+                return self._brain_hold("BRAIN_CHAT_MISMATCH")
+            return inspected
+        if inspected.status != "NO_DECISION":
+            return inspected
+
+        try:
+            evidence = self.build_pulse_brain_evidence_request(key)
+            request = runtime_receipt.parse_brain_review_evidence_request(evidence)
+        except (OrchestrationError, runtime_receipt.ReceiptHold):
+            return self._brain_hold("BRAIN_EVIDENCE_REQUEST_HOLD")
+        generation = request["journal_checkpoint"]["generation"]
+        if expected_fencing_generation is not None and (
+            type(expected_fencing_generation) is not int or expected_fencing_generation != generation
+        ):
+            return self._brain_hold("STALE_FENCING_GENERATION", live_request=request)
+
+        intent = {"request_sha256": request["request_sha256"], "chat_ref": chat_ref}
+        intent_raw = canonical_bytes(intent).decode("utf-8")
+
+        def has_intent(db) -> bool:
+            rows = db.execute("SELECT body FROM journal WHERE key=? AND kind=?",
+                              (key, _PULSE_BRAIN_SEND_INTENT)).fetchall()
+            require(not rows or len(rows) == 1 and rows[0]["body"] == intent_raw,
+                    "BRAIN_CDP_SEND_INTENT_MISMATCH")
+            return bool(rows)
+
+        reserved_here = False
+
+        def reserve_send() -> bool:
+            nonlocal reserved_here
+            with self._database() as db:
+                if has_intent(db) or db.execute(
+                    "SELECT 1 FROM journal WHERE key=? AND kind IN "
+                    "('BrainDecisionIntakeReserved.v1', 'BrainDecisionAccepted.v1')", (key,),
+                ).fetchone():
+                    return False
+                self._journal(db, key, _PULSE_BRAIN_SEND_INTENT, intent)
+            reserved_here = True
+            return True
+
+        def unknown() -> BrainDecisionIntakeResult:
+            return self._brain_hold("BRAIN_CDP_UNKNOWN_EFFECT", state="UNKNOWN_EFFECT", live_request=request)
+
+        try:
+            with self._database(read_only=True) as db:
+                if has_intent(db):
+                    return unknown()
+            decision_input = bridge.request_decision(
+                evidence_request=evidence, chat_ref=chat_ref, reserve_send=reserve_send,
+            )
+            if decision_input is None:
+                with self._database(read_only=True) as db:
+                    if has_intent(db):
+                        return unknown()
+                return self._brain_hold("BRAIN_CDP_DECISION_UNAVAILABLE", live_request=request)
+        except OrchestrationError as exc:
+            return self._brain_hold(str(exc), live_request=request)
+
+        if not reserved_here or type(decision_input) is not LocalBrainDecisionInput:
+            return self._brain_hold("BRAIN_CDP_DECISION_UNBOUND", live_request=request)
+        if decision_input.chat_ref != chat_ref:
+            return self._brain_hold("BRAIN_CHAT_MISMATCH", live_request=request, decision_input=decision_input)
+        # The canonical request hash binds the decision to the verified Q4 and WAIT_BRAIN receipt.
+        if decision_input.evidence_request_sha256 != request["request_sha256"]:
+            return self._brain_hold("BRAIN_EVIDENCE_REQUEST_MISMATCH", live_request=request,
+                                    decision_input=decision_input)
+        return self.accept_pulse_brain_decision(
+            key, decision_input=decision_input, evidence_request=evidence, at=at,
+            expected_fencing_generation=generation,
+        )
 
     @staticmethod
     def _validate_brain_journal_records(
@@ -2002,7 +2198,7 @@ class ProductionPipelineOrchestrator:
 
         # Verify journal integrity before returning NO_DECISION so tampering is never masked.
         try:
-            with self._database() as db:
+            with self._database(read_only=True) as db:
                 pre_reserved, pre_accepted, _, _ = self._validate_brain_journal_records(
                     db,
                     key=key,
@@ -2477,7 +2673,7 @@ class ProductionPipelineOrchestrator:
             return self._brain_hold("BRAIN_JOURNAL_OR_SOURCE_TAMPERED")
 
         try:
-            with self._database() as db:
+            with self._database(read_only=True) as db:
                 reserved_pair, accepted_pair, _, _ = self._validate_brain_journal_records(
                     db,
                     key=key,

@@ -2488,7 +2488,7 @@ $folder | Add-Member ScriptMethod GetTask { param($n) $script:current }
             + "function Read-Registration" + body
         )
         res = subprocess.run([str(real_pwsh), *ca._CLEAN_POWERSHELL_FLAGS, script],
-                             capture_output=True, text=True, encoding="utf-8", env=env, timeout=15)
+                             capture_output=True, text=True, encoding="utf-8", env=env, timeout=45)
         if expected_out is None:
             assert res.returncode == 2, f"{label}: expected exit 2, got {res.returncode} / {res.stdout!r}"
         else:

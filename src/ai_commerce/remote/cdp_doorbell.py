@@ -1,8 +1,8 @@
 """Opt-in Chrome CDP doorbell for an already-authenticated, exact ChatGPT chat.
 
 Adapted as an independent AI Commerce component after reading the user's
-AIOS-Renew local_chat_wake.py source. No AIOS import, credentials, session data,
-browser launching, navigation, assistant scraping or automatic activation.
+AIOS-Renew local_chat_wake.py source. The legacy wake uses only user-turn
+evidence. The opt-in PULSE bridge reads its one correlated assistant turn.
 
 A witnessed browser user turn is only *UI evidence*, not an authenticated
 ChatGPT server receipt or proof of autonomous Brain continuation. D2 therefore
@@ -47,8 +47,7 @@ _STOP = '[data-testid="stop-button"]'
 _LOGIN = '[data-testid="login-button"], a[href^="/auth/login"]'
 _WORK = '[data-workspace-type="team"], [data-workspace-type="enterprise"], [data-workspace-type="business"], [data-testid="work-composer"]'
 
-# All page-side scripts return bounded status codes, never transcript contents,
-# cookies, account data or ChatGPT response text.
+# Legacy page-side scripts return bounded status codes and user-turn evidence.
 _GUARD = """
 const visible = sel => [...document.querySelectorAll(sel)].filter(
  e => e.getClientRects().length > 0 && getComputedStyle(e).visibility === 'visible');
@@ -167,6 +166,24 @@ _PROVE = "(args) => { " + _GUARD + """
      visible(args.work).length) return false;
  const found=matches();
  return found.length===1 && found[0].getClientRects().length > 0;
+}"""
+
+_PULSE_BRAIN_RESPONSE = "(args) => { " + _GUARD + """
+ if (location.href.replace(/\\/$/,'') !== args.url ||
+     visible('main').length !== 1 || visible(args.login).length ||
+     visible(args.work).length || visible(args.stop).length) return false;
+ const turns = visible('main [data-message-author-role]');
+ const user = matches();
+ if (user.length !== 1 || turns.length < 2 || turns[turns.length - 2] !== user[0])
+   return false;
+ const answer = turns[turns.length - 1];
+ if (answer.getAttribute('data-message-author-role') !== 'assistant') return false;
+ const article = answer.closest('article');
+ if (!article || ![...article.querySelectorAll('[data-testid="copy-turn-action-button"]')]
+       .some(button => button.getClientRects().length)) return false;
+ const text = answer.innerText;
+ return typeof text === 'string' && text.length <= args.max_chars &&
+        text.startsWith(args.header) ? text : false;
 }"""
 
 _OBSERVER_CHECK = "(args) => { " + _GUARD + """
@@ -1054,6 +1071,71 @@ class LocalChromeDoorbellAdapter:
             return receipt("UNKNOWN" if staging_started or clicked else "UNSUPPORTED",
                            "SUBMISSION_UNPROVEN" if clicked else (
                                "INSERT_BLOCKED" if staging_started else "CDP_UNAVAILABLE"))
+
+
+class LocalChromePulseBrainBridge:
+    """Transport-only exact-chat turn on an existing local 9444 session.
+
+    Compose with production_orchestration.orchestrator.PulseBrainDecisionBridge
+    at the caller. The remote package must not import any production owner.
+    """
+
+    def __init__(self, *, binding: ResolvedBinding, allow_submit: bool = False,
+                 inventory: BrowserInventory | None = None):
+        self._binding = binding
+        self._allow_submit = allow_submit is True
+        self._test_only = inventory is not None
+        self._inventory = _PlaywrightInventory() if inventory is None else inventory
+
+    def request_turn(
+        self, *, prompt: str, header: str, chat_ref: str, reserve_send: Callable[[], bool],
+    ) -> tuple[str, bool] | None:
+        binding = self._binding
+        if (not self._allow_submit or (not self._test_only and not _is_windows()) or
+                type(binding) is not ResolvedBinding or binding.cdp_endpoint != "http://127.0.0.1:9444" or
+                type(binding.chat_url) is not str):
+            return None
+        match = _CHAT.fullmatch(binding.chat_url)
+        if match is None or chat_ref != "chat:" + match[1]:
+            return None
+        if (type(prompt) is not str or not 0 < len(prompt) <= 262144 or
+                type(header) is not str or
+                re.fullmatch(r"PULSE_BRAIN_DECISION [0-9a-f]{32} [0-9a-f]{64}\n", header) is None or
+                prompt.count(header) != 1):
+            return None
+        args = {**_ARGS, "url": binding.chat_url, "text": prompt,
+                "header": header, "max_chars": 16384}
+        reserving = False
+        try:
+            with self._inventory.pages(binding.cdp_endpoint) as pages:
+                matching = [page for page in pages if type(page.url) is str
+                            and page.url.removesuffix("/") == binding.chat_url]
+                if len(matching) != 1:
+                    return None
+                page = matching[0]
+                page.set_default_timeout(3000)
+                if page.evaluate(_CHECK, args) != "READY":
+                    return None
+                reserving = True
+                reserved = reserve_send()
+                reserving = False
+                if not reserved:
+                    return None
+                if page.evaluate(_INSERT, args) is not True:
+                    return None
+                page.wait_for_function(_READY, arg=args, timeout=3000)
+                if page.evaluate(_CLICK, args) is not True:
+                    return None
+                answer = page.wait_for_function(_PULSE_BRAIN_RESPONSE, arg=args, timeout=30000).json_value()
+                if page.url.removesuffix("/") != binding.chat_url:
+                    return None
+            if type(answer) is not str or len(answer) > args["max_chars"] or not answer.startswith(header):
+                return None
+            return answer, self._test_only
+        except Exception:
+            if reserving:
+                raise
+            return None
 
 
 class LocalChromeObserverAdapter:

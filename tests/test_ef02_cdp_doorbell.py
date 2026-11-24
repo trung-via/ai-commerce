@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import replace
 import hashlib
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -115,6 +116,125 @@ def test_exact_chat_only_and_no_new_tabs_or_navigation():
     outcome = call(FakeInventory(same1, same2))
     assert outcome.error_code == "AMBIGUOUS_CHAT_TARGETS"
     assert same1.counts["click"] == same2.counts["click"] == 0
+
+
+_PULSE_CHAT = "chat:" + URL.rsplit("/", 1)[1]
+
+
+_PULSE_HEADER = "PULSE_BRAIN_DECISION " + "a" * 32 + " " + "e" * 64 + "\n"
+_PULSE_PROMPT = "Synthetic exact-chat review request.\n" + _PULSE_HEADER + "{}"
+_PULSE_REPLY = '{"decision":"APPROVE_DIRECTIVE"}'
+
+
+class FakePulseBrainPage:
+    url = URL
+
+    def __init__(self, case, events):
+        self.case = case
+        self.events = events
+
+    def set_default_timeout(self, timeout):
+        assert timeout == 3000
+
+    def evaluate(self, script, args):
+        assert args["url"] == URL and args["text"] == _PULSE_PROMPT
+        if script == doorbell._CHECK:
+            return "READY"
+        if script == doorbell._INSERT:
+            self.events.append("insert")
+            return True
+        assert script == doorbell._CLICK
+        self.events.append("click")
+        if self.case == "disconnect":
+            raise OSError("synthetic ambiguous click")
+        return True
+
+    def wait_for_function(self, script, *, arg, timeout):
+        if script == doorbell._READY:
+            assert timeout == 3000
+            return
+        assert script == doorbell._PULSE_BRAIN_RESPONSE and timeout == 30000
+        self.events.append("answer")
+        if self.case == "timeout":
+            raise TimeoutError("synthetic incomplete answer")
+        reply = arg["header"] + _PULSE_REPLY
+        if self.case == "wrong-correlation":
+            reply = reply.replace("e" * 64, "f" * 64)
+        if self.case == "oversized":
+            reply += "x" * 16384
+        return SimpleNamespace(json_value=lambda: reply)
+
+
+@pytest.mark.parametrize("case", ["approve", "wrong-correlation", "oversized", "timeout", "disconnect"])
+def test_pulse_brain_one_click_and_bounded_correlated_ui_result(case):
+    events = []
+    page = FakePulseBrainPage(case, events)
+    bridge = doorbell.LocalChromePulseBrainBridge(binding=BIND, allow_submit=True, inventory=FakeInventory(page))
+
+    def reserve():
+        events.append("durable-intent")
+        return True
+
+    result = bridge.request_turn(prompt=_PULSE_PROMPT, header=_PULSE_HEADER,
+                                 chat_ref=_PULSE_CHAT, reserve_send=reserve)
+    assert events == ["durable-intent", "insert", "click"] + ([] if case == "disconnect" else ["answer"])
+    if case == "approve":
+        assert result == (_PULSE_HEADER + _PULSE_REPLY, True)
+    else:
+        assert result is None
+
+
+def test_pulse_brain_rejects_wrong_chat_and_endpoint_before_reserving():
+    page = FakePulseBrainPage("approve", [])
+    other_page = FakePulseBrainPage("approve", [])
+    other_page.url = OTHER
+    for binding, chat_ref, pages, attach in (
+        (BIND, "chat:wrong", (page,), False),
+        (replace(BIND, cdp_endpoint="http://127.0.0.1:9333"), _PULSE_CHAT, (page,), False),
+        (BIND, _PULSE_CHAT, (other_page,), True),
+        (BIND, _PULSE_CHAT, (page, page), True),
+    ):
+        inventory = FakeInventory(*pages)
+        bridge = doorbell.LocalChromePulseBrainBridge(binding=binding, allow_submit=True, inventory=inventory)
+        assert bridge.request_turn(prompt=_PULSE_PROMPT, header=_PULSE_HEADER, chat_ref=chat_ref,
+                                   reserve_send=lambda: pytest.fail("unexpected send intent")) is None
+        assert inventory.calls == ([BIND.cdp_endpoint] if attach else [])
+    assert page.events == other_page.events == []
+
+
+def test_pulse_brain_requires_opt_in_and_a_new_durable_intent():
+    page = FakePulseBrainPage("approve", [])
+    inventory = FakeInventory(page)
+    for enabled in (False, True):
+        bridge = doorbell.LocalChromePulseBrainBridge(binding=BIND, allow_submit=enabled, inventory=inventory)
+        assert bridge.request_turn(prompt=_PULSE_PROMPT, header=_PULSE_HEADER, chat_ref=_PULSE_CHAT,
+                                   reserve_send=lambda: False) is None
+    assert inventory.calls == [BIND.cdp_endpoint] and page.events == []
+
+
+@pytest.mark.parametrize("header,prompt", [
+    ("invalid", "{}"), (_PULSE_HEADER, "{}"),
+    (_PULSE_HEADER, _PULSE_HEADER * 2), (_PULSE_HEADER, _PULSE_PROMPT + "x" * 262144),
+])
+def test_pulse_brain_rejects_invalid_transport_request_without_cdp(header, prompt):
+    inventory = FakeInventory(FakePulseBrainPage("approve", []))
+    bridge = doorbell.LocalChromePulseBrainBridge(binding=BIND, allow_submit=True, inventory=inventory)
+    assert bridge.request_turn(prompt=prompt, header=header, chat_ref=_PULSE_CHAT,
+                               reserve_send=lambda: pytest.fail("unexpected send intent")) is None
+    assert inventory.calls == []
+
+
+def test_pulse_brain_propagates_owner_reservation_error_without_click():
+    page = FakePulseBrainPage("approve", [])
+    bridge = doorbell.LocalChromePulseBrainBridge(binding=BIND, allow_submit=True, inventory=FakeInventory(page))
+
+    def reject():
+        raise ValueError("synthetic owner journal mismatch")
+
+    with pytest.raises(ValueError, match="synthetic owner journal mismatch"):
+        bridge.request_turn(prompt=_PULSE_PROMPT, header=_PULSE_HEADER,
+                            chat_ref=_PULSE_CHAT, reserve_send=reject)
+    assert page.events == []
 
 
 @pytest.mark.parametrize("gate", [
