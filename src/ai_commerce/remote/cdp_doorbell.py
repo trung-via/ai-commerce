@@ -37,6 +37,7 @@ _LOCAL_UI_EVENT = re.compile(r"(?:ef02-completion|github-issue-created)-v1:[0-9a
 _UI_TURN_REF = re.compile(r"[0-9a-zA-Z._-]{1,64}\Z")
 _DOCUMENT_CLOCK = "() => performance.timeOrigin"
 LOCAL_UI_OWNER_AUTHORIZED_TURN_OBSERVED = "LOCAL_UI_OWNER_AUTHORIZED_TURN_OBSERVED"
+LOCAL_UI_EXISTING_TURN_RECONCILED = "LOCAL_UI_EXISTING_TURN_RECONCILED"
 _COMPOSER = ('#prompt-textarea[contenteditable="true"], '
              'main form [contenteditable="true"][role="textbox"][aria-multiline="true"]')
 # The observed Vietnamese ChatGPT send button has an aria-label beginning
@@ -136,6 +137,19 @@ const unobstructed = el => {
 };
 const sendEnabled = button => !button.disabled && button.getAttribute('aria-disabled') !== 'true' &&
   (!args.documentClock || (button.tagName === 'BUTTON' && unobstructed(button)));
+const turnNodes = () => document.querySelectorAll('[data-message-id], [data-turn-id]');
+const turnRefs = () => {
+ const nodes = turnNodes();
+ if (nodes.length > 4096) return false;
+ const refs = new Set();
+ for (const node of nodes) {
+   for (const attr of ['data-message-id', 'data-turn-id']) {
+     const ref = node.getAttribute(attr);
+     if (ref && /^[0-9a-zA-Z._-]{1,64}$/.test(ref)) refs.add(ref);
+   }
+ }
+ return [...refs];
+};
 const inspect = (expectText = false) => {
  if (!sameDocument() || !sameRoute()) return 'TARGET_PAGE_CHANGED';
  if (surfaceBlocked()) return 'SURFACE_UNPROVEN';
@@ -204,17 +218,10 @@ _CLICK = "(args) => { " + _GUARD + """
  const button=result.buttons[0];
  if(!sendEnabled(button)) return false;
  if (args.documentClock) {
-   const nodes = document.querySelectorAll('[data-message-id], [data-turn-id]');
-   if (nodes.length > 4096) return false;
-   const refs = new Set();
-   for (const node of nodes) {
-     for (const attr of ['data-message-id', 'data-turn-id']) {
-       const ref = node.getAttribute(attr);
-       if (ref && /^[0-9a-zA-Z._-]{1,64}$/.test(ref)) refs.add(ref);
-     }
-   }
+   const refs = turnRefs();
+   if (!refs) return false;
    button.click();
-   return [...refs];
+   return refs;
  }
  button.click(); return true;
 }"""
@@ -234,6 +241,57 @@ _PROVE = "(args) => { " + _GUARD + """
    return owners.length === 1 ? ref : false;
  }
  return found.length===1 && found[0].getClientRects().length > 0;
+}"""
+
+_PRE_STAGE_REFS = "(args) => { " + _GUARD + """
+ return sameDocument() && sameRoute() && turnRefs();
+}"""
+_EXISTING_USER_TURN = "(args) => { " + _GUARD + """
+ if (!args.documentClock || document.readyState !== 'complete' ||
+     document.querySelectorAll('*').length > 20000 ||
+     typeof inspect() === 'string' || visible(
+       'input[autocomplete="one-time-code"], input[type="password"], form[action^="/auth/"], ' +
+       'main[aria-busy="true"], main [role="progressbar"]'
+     ).length) return false;
+ const role = '[data-message-author-role]';
+ const user = '[data-message-author-role="user"]';
+ const nodes = document.querySelectorAll(`main ${role}, main [data-user-message-bubble]`);
+ if (nodes.length > 4096) return false;
+ const collapsed = args.text.replace(/\\n/g,'');
+ const found = [...nodes].filter(el => {
+   if (el.matches('[data-user-message-bubble]') && !el.matches(role) && el.closest(user)) return false;
+   const raw = el.textContent.replace(/\\r\\n/g,'\\n');
+   // Collapsed lines are a competing candidate, never sufficient proof.
+   return raw === args.text || raw === collapsed || equivalent(el);
+ });
+ if (found.length !== 1) return false;
+ const turn = found[0];
+ if (!turn.matches(user) || turn.parentElement?.closest(role) ||
+     turn.querySelector(role) || !turn.getClientRects().length ||
+     turn.closest(
+       'form, textarea, input, [contenteditable], [role="textbox"], nav, header, button, ' +
+       '[role="toolbar"], [inert], [hidden], [aria-hidden="true"]')) return false;
+ const rendered = el => {
+   const style = getComputedStyle(el);
+   return style.visibility === 'visible' && style.display !== 'none' &&
+     style.opacity !== '0' && style.contentVisibility !== 'hidden';
+ };
+ for (let el = turn; el; el = el.parentElement) if (!rendered(el)) return false;
+ if ([...turn.querySelectorAll('*')].some(el => el.textContent.trim() && (!rendered(el) ||
+    el.matches('[hidden], [inert], [aria-hidden="true"]')))) return false;
+ // Require the visible whole text too, even when raw text matched above.
+ if (!equivalent(turn)) return false;
+ const owner = turn.closest('[data-message-id], [data-turn-id]');
+ if (!owner || !owner.closest('main') || [...owner.querySelectorAll(role)].some(el => el !== turn))
+   return false;
+ const ids = ['data-message-id', 'data-turn-id'];
+ const refs = ids.map(attr => owner.getAttribute(attr)).filter(ref => ref !== null);
+ if (!refs.length || refs.some(ref => !/^[0-9a-zA-Z._-]{1,64}$/.test(ref) ||
+     args.priorRefs.includes(ref))) return false;
+ const owners = turnNodes();
+ if (owners.length > 4096 || [...owners].some(el => el !== owner &&
+     ids.some(attr => refs.includes(el.getAttribute(attr))))) return false;
+ return refs[0];
 }"""
 
 _OBSERVER_CHECK = "(args) => { " + _GUARD + """
@@ -636,18 +694,27 @@ async (args) => {
   const visible = el => {
     if (!el || el.nodeType !== 1 || !el.getClientRects().length) return false;
     const style = getComputedStyle(el);
-    return style && style.visibility === 'visible' && style.display !== 'none';
+    if (!style || style.visibility !== 'visible' || style.display === 'none') return false;
+    if (args.strict) {
+      if (!el.closest('main') || el.closest('[hidden],[inert],[aria-hidden="true"]')) return false;
+      for (let node = el; node; node = node.parentElement) {
+        const current = getComputedStyle(node);
+        if (current.opacity === '0' || current.visibility !== 'visible' ||
+            current.contentVisibility === 'hidden') return false;
+      }
+    }
+    return true;
   };
   const nodes = [...document.querySelectorAll('*')];
   if (nodes.length > 20000) return 'TEST_SIGNAL_SCOPE_UNPROVEN';
   let occurrences = 0, userTurns = 0;
   const visited = new Set();
   for (const el of nodes) {
-    if (!visible(el)) continue;
+    if (!args.strict && !visible(el)) continue;
     const text = (el.textContent || '').trim();
     if (!signal.test(text)) continue;
-    const children = [...(el.children || [])].filter(visible);
-    if (children.some(child => signal.test((child.textContent || '').trim())))
+    const children = [...(el.children || [])];
+    if (children.some(child => (args.strict || visible(child)) && signal.test((child.textContent || '').trim())))
       continue;
     const bytes = new TextEncoder().encode(text);
     const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
@@ -656,9 +723,11 @@ async (args) => {
     // count an old marker as this attempt or let it block an eligible one.
     if (digest !== args.digest) continue;
     occurrences++;
+    if (!visible(el)) continue;
     if (el.closest('form,nav,header,button,textarea,input,[contenteditable="true"],[role="textbox"],[role="toolbar"],[role="navigation"]') ||
         el.closest('[data-message-author-role="assistant"]')) continue;
-    const user = el.closest('[data-message-author-role="user"],[data-user-message-bubble]');
+    const user = el.closest(args.strict ? '[data-message-author-role="user"]' :
+      '[data-message-author-role="user"],[data-user-message-bubble]');
     if (!visible(user)) continue;
     const turn = user.closest('[data-message-id],[data-turn-id]') || user;
     const id = turn.getAttribute('data-message-id') || turn.getAttribute('data-turn-id');
@@ -1083,26 +1152,56 @@ class LocalChromeDoorbellAdapter:
     def send_registered_ui(self, *, binding: ResolvedBinding, event_id: str,
                            marker_digest: str,
                            revalidate: Callable[[], None],
-                           before_stage: Callable[[], None]) -> LocalUISendResult:
+                           before_stage: Callable[[str, list[str]], None]) -> LocalUISendResult:
         """Deliver on the owner's supervisor reservation with local UI evidence only."""
+        return self._registered_ui(binding, event_id, marker_digest, revalidate,
+                                   before_stage=before_stage)
+
+    def observe_registered_ui(self, *, binding: ResolvedBinding, event_id: str,
+                              marker_digest: str, revalidate: Callable[[], None],
+                              surface: str, prior_refs: list[str]) -> LocalUISendResult:
+        """Look once for an existing UI turn on the original scoped document."""
+        return self._registered_ui(binding, event_id, marker_digest, revalidate,
+                                   observation=(surface, prior_refs))
+
+    def _registered_ui(self, binding, event_id, marker_digest, revalidate, *,
+                       before_stage=None, observation=None) -> LocalUISendResult:
         if (type(binding) is not ResolvedBinding or type(binding.chat_url) is not str
                 or not _CHAT.fullmatch(binding.chat_url)
                 or binding.cdp_endpoint != "http://127.0.0.1:9444"
                 or type(event_id) is not str or not _LOCAL_UI_EVENT.fullmatch(event_id)
                 or not _is_windows()):
             return LocalUISendResult("NATIVE_DESKTOP_UNPROVEN")
-        if not self.allow_submit or not self.send_only or self.fixed_check_test:
+        if observation is None and (not self.allow_submit or not self.send_only or self.fixed_check_test):
             return LocalUISendResult("CDP_PROBE_DISABLED")
 
         def check_page(page) -> None:
-            if page.evaluate(_WH03_COMMITTED_SIGNAL_DOM, {"digest": marker_digest}) != "TEST_SIGNAL_MATCH_UNATTESTED":
+            args = {"digest": marker_digest}
+            if observation is not None:
+                args["strict"] = True
+            if page.evaluate(_WH03_COMMITTED_SIGNAL_DOM, args) != "TEST_SIGNAL_MATCH_UNATTESTED":
                 raise ValueError("LOCAL_UI_MARKER_UNPROVEN")
 
         return self._send_ui(binding, _doorbell_text(event_id, self.repository, send_only=True),
-                             check_page=check_page, revalidate=revalidate, before_stage=before_stage)
+                             check_page=check_page, revalidate=revalidate, before_stage=before_stage,
+                             observation=observation)
+
+    @staticmethod
+    def _surface_commitment(context, page, clock: float) -> str:
+        session = context.new_cdp_session(page)
+        try:
+            info = session.send("Target.getTargetInfo")["targetInfo"]
+        finally:
+            session.detach()
+        target, context_id = info.get("targetId"), info.get("browserContextId")
+        if (info.get("type") != "page" or any(type(ref) is not str or
+                not re.fullmatch(r"[a-fA-F0-9]{32}", ref) for ref in (target, context_id))):
+            raise ValueError("EXACT_CHAT_CDP_TARGET_UNPROVEN")
+        return hashlib.sha256(f"{context_id}:{target}:{float(clock).hex()}".encode("ascii")).hexdigest()
 
     def _send_ui(self, binding: ResolvedBinding, doorbell: str, *,
-                 check_page=None, revalidate=None, before_stage=None) -> LocalUISendResult:
+                 check_page=None, revalidate=None, before_stage=None,
+                 observation=None) -> LocalUISendResult:
         args = {**_ARGS, "url": binding.chat_url, "text": doorbell}
         scoped = check_page is not None
         # Timer polling keeps the scoped checks usable on an unfocused tab.
@@ -1128,7 +1227,8 @@ class LocalChromeDoorbellAdapter:
                     return LocalUISendResult("EXACT_CHAT_TAB_NOT_FOUND" if not matching
                                              else "AMBIGUOUS_CHAT_TARGETS")
                 page = matching[0]
-                page.set_default_timeout(3000)
+                if observation is None:
+                    page.set_default_timeout(3000)
                 if scoped:
                     clock = page.evaluate(_DOCUMENT_CLOCK)
                     if type(clock) not in (int, float) or not 0 < clock < 2**53:
@@ -1153,6 +1253,18 @@ class LocalChromeDoorbellAdapter:
                         revalidate()
                     stable_page()
 
+                if observation is not None:
+                    surface, prior_refs = observation
+                    if self._surface_commitment(context, page, clock) != surface:
+                        return LocalUISendResult("TARGET_PAGE_CHANGED")
+                    revalidate()
+                    guard()
+                    ref = page.evaluate(_EXISTING_USER_TURN, {**args, "priorRefs": prior_refs})
+                    if type(ref) is not str or not _UI_TURN_REF.fullmatch(ref) or ref in prior_refs:
+                        return LocalUISendResult("EXISTING_USER_TURN_UNPROVEN")
+                    guard()
+                    return LocalUISendResult(LOCAL_UI_EXISTING_TURN_RECONCILED, turn_ref=ref)
+
                 result = page.evaluate(_CHECK, args)
                 if result != "READY":
                     code = result if result in {
@@ -1162,7 +1274,12 @@ class LocalChromeDoorbellAdapter:
                     return LocalUISendResult(code)
                 guard()
                 if scoped:
-                    before_stage()
+                    surface = self._surface_commitment(context, page, clock)
+                    refs = page.evaluate(_PRE_STAGE_REFS, args)
+                    if (type(refs) is not list or len(refs) > 8192 or
+                            any(type(ref) is not str or not _UI_TURN_REF.fullmatch(ref) for ref in refs)):
+                        return LocalUISendResult("EXACT_CHAT_TURN_INVENTORY_UNPROVEN")
+                    before_stage(surface, sorted(set(refs)))
                     guard()
                 stage = "INSERT"
                 if page.evaluate(_INSERT, args) is not True:

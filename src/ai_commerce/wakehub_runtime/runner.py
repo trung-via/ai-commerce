@@ -60,7 +60,9 @@ _ISSUE_ROUTE_DEPENDENCY = "ISSUE_CREATED_ROUTE_AUTHORITY_UNAVAILABLE"
 _UI_SEND_RESERVED = "LOCAL_UI_SEND_RESERVED"
 _UI_STAGING = "LOCAL_UI_STAGING"
 _UI_TURN_OBSERVED = cdp_doorbell.LOCAL_UI_OWNER_AUTHORIZED_TURN_OBSERVED
+_UI_TURN_RECONCILED = cdp_doorbell.LOCAL_UI_EXISTING_TURN_RECONCILED
 _UI_DELIVERY_SCHEMA = "WakeHubLocalUIDelivery.v2"
+_MAX_JOURNAL_EVENTS = 128
 _MAX_TARGETS = 16
 _CHROME_READY = {"CHROME_OWNED", "CHROME_OWNED_LAUNCH_UNRESOLVED"}
 # These returns from the fixed task script precede RunEx.
@@ -1278,14 +1280,24 @@ def _event_columns(raw: dict, registration: Registration) -> tuple:
 def _validate_local_send(record: dict, request: DoorbellRequest, registration: Registration) -> None:
     proof = record["evidence"]
     reservation = proof["local_send"]
-    _require(type(reservation) is dict and set(reservation) == {
-        "phase", "doorbell_sha256", "consent_sha256",
-    } and reservation["doorbell_sha256"] == bytes_digest(request.canonical_bytes)
+    fields = {"phase", "doorbell_sha256", "consent_sha256"}
+    _require(type(reservation) is dict and fields <= reservation.keys() <= fields | {"surface"}
+        and reservation["doorbell_sha256"] == bytes_digest(request.canonical_bytes)
         and _chrome_digest(reservation["consent_sha256"])
         and proof.get("local_route", {}).get("readiness") in _EXACT_ROUTE_READY,
         "LOCAL_UI_RESERVATION_INVALID")
     status = record["status"]
     phase = reservation["phase"]
+    if "surface" in reservation:
+        scope = reservation["surface"]
+        _require(phase == "STAGING" and type(scope) is dict
+                 and scope.keys() == {"process", "document", "prior_refs"}
+                 and _chrome_digest(scope["process"]) and _chrome_digest(scope["document"]),
+                 "LOCAL_UI_RESERVATION_INVALID")
+        refs = scope["prior_refs"]
+        _require(type(refs) is list and len(refs) <= 8192
+                 and all(type(ref) is str and cdp_doorbell._UI_TURN_REF.fullmatch(ref) for ref in refs)
+                 and refs == sorted(set(refs)), "LOCAL_UI_RESERVATION_INVALID")
     expected_history = ["PENDING", "RESERVED"]
     expected_proof = {"local_route", "local_send"}
     if status == "RESERVED":
@@ -1294,19 +1306,29 @@ def _validate_local_send(record: dict, request: DoorbellRequest, registration: R
     else:
         _require(status in ("UI_TURN_OBSERVED", "UNKNOWN_EFFECT") and phase == "STAGING",
                  "LOCAL_UI_RESERVATION_INVALID")
-        expected_history.append(status)
         if status == "UI_TURN_OBSERVED":
             ref = proof.get("user_turn_ref")
             _require(type(ref) is str and cdp_doorbell._UI_TURN_REF.fullmatch(ref) is not None
-                     and proof.get("marker") == registration.marker and record["code"] == _UI_TURN_OBSERVED,
+                     and proof.get("marker") == registration.marker,
                      "JOURNAL_PROOF_INVALID")
             expected_proof.update(("user_turn_ref", "marker"))
+            if record["code"] == _UI_TURN_RECONCILED:
+                _require("surface" in reservation and ref not in reservation["surface"]["prior_refs"]
+                         and type(proof.get("local_unknown_code")) is str
+                         and re.fullmatch(r"[A-Z][A-Z0-9_]{0,95}", proof["local_unknown_code"])
+                         and proof["local_unknown_code"] not in (_UI_TURN_OBSERVED, _UI_TURN_RECONCILED),
+                         "JOURNAL_PROOF_INVALID")
+                expected_history.append("UNKNOWN_EFFECT")
+                expected_proof.add("local_unknown_code")
+            else:
+                _require(record["code"] == _UI_TURN_OBSERVED, "JOURNAL_PROOF_INVALID")
+        expected_history.append(status)
     _require(record["history"] == expected_history and set(proof) == expected_proof,
              "LOCAL_UI_RESERVATION_INVALID")
 
 
 def _validate_records(data: dict, registration: Registration) -> None:
-    _require(type(data["events"]) is dict and len(data["events"]) <= 128, "JOURNAL_INVALID")
+    _require(type(data["events"]) is dict and len(data["events"]) <= _MAX_JOURNAL_EVENTS, "JOURNAL_INVALID")
     sources = data["source_identities"]
     _require(len(sources) <= len(data["events"]), "JOURNAL_INVALID")
     by_event = {}
@@ -1587,8 +1609,10 @@ class Journal:
                     _validate_local_origin(data["local_origin"], registration)
                 if source_table:
                     for source_key, event_key, identity in db.execute("SELECT * FROM source_identities"):
+                        _require(len(data["source_identities"]) < _MAX_JOURNAL_EVENTS, "JOURNAL_INVALID")
                         data["source_identities"][source_key] = (event_key, _decode_unique(identity))
                 for key, event_id, sha, attempt, generation, raw in db.execute("SELECT * FROM events"):
+                    _require(len(data["events"]) < _MAX_JOURNAL_EVENTS, "JOURNAL_INVALID")
                     record = _decode_unique(raw)
                     _require(type(record) is dict and type(record.get("event")) is dict, "JOURNAL_INVALID")
                     _require((event_id, sha, attempt, generation) ==
@@ -1712,7 +1736,7 @@ class Runner:
                     _require(issue or not any(
                         r["event"].get("event_id") == selected.event_id for r in records.values()),
                              "EVENT_IDENTITY_DRIFT")
-                    _require(len(records) < 128, "JOURNAL_FULL")
+                    _require(len(records) < _MAX_JOURNAL_EVENTS, "JOURNAL_FULL")
                     record = {"event": encoded, "status": "PENDING", "code": code,
                               "history": ["PENDING"], "evidence": {}}
                     records[key] = record
@@ -1723,8 +1747,9 @@ class Runner:
                     txn.write(data)
                 self._recover_reservations(txn, data)
                 if "local_send" in record["evidence"]:
-                    # The local Send lane has no response consumer in FLAT-05.
                     route = RouteReadiness(**record["evidence"]["local_route"])
+                    if record["status"] == "UNKNOWN_EFFECT" and envelope is not None:
+                        self._reconcile_local_ui(txn, data, record, envelope, chrome)
                     return RouteResult(record["status"], record["code"], evidence, replayed=True, route=route)
                 if (self._route_runtime is not None and envelope is not None
                         and record["status"] == "PENDING"
@@ -1751,15 +1776,7 @@ class Runner:
         _require(txn.owner == self._route_runtime.principal, "JOURNAL_OWNER_DRIFT")
 
         def authorize() -> None:
-            authority = self.grant_verifier
-            if type(authority) is _RegisteredIssueAuthority:
-                authority.authorize(event, registration)
-            else:
-                _require(type(authority) is _RegisteredWakeAuthority
-                         and authority.source is self.source and not authority.native_source_only,
-                         "SIGNED_WAKE_AUTHORITY_UNAVAILABLE")
-                _require(authority.source.envelope(event.payload) == event, "SOURCE_PROOF_MISSING")
-                _require(authority.authorize(event.payload, registration) is not None, "MISSING_GRANT")
+            self._authorize_local_source(event)
 
         authorize()
         origin = data.get("local_origin")
@@ -1793,6 +1810,72 @@ class Runner:
             status = "UNKNOWN_EFFECT"
         return RouteResult(status, code, evidence, replayed, route=route)
 
+    def _authorize_local_source(self, event: SourceEvent) -> None:
+        authority = self.grant_verifier
+        if type(authority) is _RegisteredIssueAuthority and authority.source is self.source:
+            authority.authorize(event, self.registration)
+        else:
+            _require(type(authority) is _RegisteredWakeAuthority
+                     and authority.source is self.source and not authority.native_source_only,
+                     "SIGNED_WAKE_AUTHORITY_UNAVAILABLE")
+            _require(authority.source.envelope(event.payload) == event, "SOURCE_PROOF_MISSING")
+            _require(authority.authorize(event.payload, self.registration) is not None, "MISSING_GRANT")
+
+    @staticmethod
+    def _ui_consent_digest(consent: dict, grant: dict) -> str:
+        return digest({**{k: v for k, v in consent.items() if k != "grants"}, "grant": grant})
+
+    def _reconcile_local_ui(self, txn, data: dict, record: dict, event: SourceEvent,
+                            health: Result | None) -> None:
+        runtime, chrome = self._route_runtime, self._route_chrome
+        proof = record["evidence"]
+        reservation = proof["local_send"]
+        scope = reservation.get("surface")
+        if (scope is None or self._supervisor_stop is None or runtime is None or chrome is None
+                or health is None or health.code != "CHROME_OWNED" or runtime.chrome_lifecycle == "paused"):
+            return
+        consent = runtime.raw.get("ui_delivery")
+        if consent is None:
+            return
+        grant = next((g for g in consent["grants"] if g["source_key"] == event.identity.key), None)
+        if grant is None or self._ui_consent_digest(consent, grant) != reservation["consent_sha256"]:
+            return
+        origin = data["local_origin"]
+        request = DoorbellRequest.for_source(event, self.registration)
+        if (consent["route_marker"], consent["registration_id"], consent["marker_digest"]) != (
+                request.marker, origin["registration_id"], origin["marker_digest"]):
+            return
+
+        def revalidate() -> None:
+            _require(grant["expires_ms"] > time.time_ns() // 1_000_000, "LOCAL_UI_DELIVERY_GRANT_EXPIRED")
+            _require(data["chrome"]["launch"] is None and not chrome_acquisition._clean_launch_pending(),
+                     "CHROME_LAUNCH_RECONCILE_REQUIRED")
+            _require(data["chrome"]["process"] == scope["process"], "CHROME_OBSERVATION_CHANGED")
+            current = chrome._route_snapshot(txn, origin)
+            _require(_owned_chrome_process(current[4], current[5])[0] == scope["process"],
+                     "CHROME_OBSERVATION_CHANGED")
+            # The exact v2 owner opt-in and current source route permission
+            # gate the read. The EF02 deliver_wake operation is only for Send.
+            self._authorize_local_source(event)
+            _require(not self._supervisor_stop(), "SUPERVISOR_STOPPED")
+
+        try:
+            revalidate()
+            adapter = LocalChromeDoorbellAdapter(repository=event.identity.repository, send_only=True,
+                                                 inventory=chrome.sender.adapter.inventory)
+            outcome = adapter.observe_registered_ui(
+                binding=request.binding, event_id=request.event_id, marker_digest=origin["marker_digest"],
+                revalidate=revalidate, surface=scope["document"], prior_refs=scope["prior_refs"])
+        except Exception:
+            return  # An inconclusive observation leaves the original row intact.
+        ref = outcome.turn_ref
+        if outcome.code != _UI_TURN_RECONCILED or ref is None or self._supervisor_stop() or any(
+                ref in (row["evidence"].get("user_turn_ref"), row["evidence"].get("user_turn_id"))
+                for row in data["events"].values()):
+            return
+        self._move(txn, data, record, "UI_TURN_OBSERVED", _UI_TURN_RECONCILED,
+                   proof={"marker": request.marker, "user_turn_ref": ref, "local_unknown_code": record["code"]})
+
     def _send_local_ui(self, txn, data: dict, record: dict, event: SourceEvent,
                        route: RouteReadiness, evidence: str, replayed: bool,
                        authorize_source: Callable[[], None]) -> RouteResult:
@@ -1810,8 +1893,8 @@ class Runner:
             return result("HOLD_DEPENDENCY", "LOCAL_UI_DELIVERY_GRANT_REQUIRED")
 
         initial = chrome._route_snapshot(txn, origin)
-        _require(_owned_chrome_process(initial[4], initial[5])[0] == data["chrome"]["process"],
-                 "CHROME_OBSERVATION_CHANGED")
+        process, _ = _owned_chrome_process(initial[4], initial[5])
+        _require(process == data["chrome"]["process"], "CHROME_OBSERVATION_CHANGED")
         if event.identity.kind == _EF02:
             # A historical row lacks a run ID until its exact event is observed.
             # An unresolved same-attempt row may alias this source.
@@ -1853,14 +1936,15 @@ class Runner:
         reservation = {
             "phase": "PRE_STAGE",
             "doorbell_sha256": bytes_digest(request.canonical_bytes),
-            "consent_sha256": digest({**{k: v for k, v in consent.items() if k != "grants"}, "grant": grant}),
+            "consent_sha256": self._ui_consent_digest(consent, grant),
         }
         self._move(txn, data, record, "RESERVED", _UI_SEND_RESERVED, proof={"local_send": reservation})
 
-        def before_stage() -> None:
+        def before_stage(surface: str, refs: list[str]) -> None:
             # On restart, an interrupted PRE_STAGE reservation may be retried.
             # STAGING is durable before the first page mutation can start.
             reservation["phase"] = "STAGING"
+            reservation["surface"] = {"process": process, "document": surface, "prior_refs": refs}
             record["code"] = _UI_STAGING
             txn.write(data)
 

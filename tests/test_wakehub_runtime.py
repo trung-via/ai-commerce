@@ -4191,11 +4191,31 @@ def flat05(flat04, r3a_ingress, monkeypatch):
     f.rows = rows
     # The default inventory sees an idle composer on a page with a closed account menu.
     # The fake browser provides neither an account identifier nor a session reference.
-    f.ui = SimpleNamespace(clock=12345, outbound={}, draft="", inserts=0, clicks=0,
+    f.ui = SimpleNamespace(clock=12345, target="a" * 32, context="b" * 32,
+                           outbound={}, draft="", inserts=0, clicks=0, observations=0,
                            fail_at=None, on_stage={}, ref_mode=None, blocked=None)
     ui = f.ui
     adapter = r.cdp_doorbell
     base_evaluate = f.exact.evaluate
+
+    def new_cdp_session(page):
+        assert page is f.exact
+
+        def send(method):
+            assert method == "Target.getTargetInfo"
+            return {"targetInfo": {"type": "page", "targetId": ui.target, "browserContextId": ui.context}}
+
+        return SimpleNamespace(send=send, detach=lambda: None)
+
+    f.context.new_cdp_session = new_cdp_session
+
+    def select(kind):
+        f.sources.targets[:] = [target for target in f.sources.targets if target["kind"] == kind]
+        save()
+        return (event["event_id"] if kind == "ef02-completion" else
+                "github-issue-created-v1:" + f.issue.target.identity.key)
+
+    f.select = select
 
     def evaluate(script, args=None):
         if script == adapter._DOCUMENT_CLOCK:
@@ -4204,6 +4224,18 @@ def flat05(flat04, r3a_ingress, monkeypatch):
             return base_evaluate(script, args)
         assert args["url"] == f.exact.url and args["documentClock"] == ui.clock
         text = args["text"]
+        if script == adapter._PRE_STAGE_REFS:
+            return list(ui.outbound)
+        if script == adapter._EXISTING_USER_TURN:
+            ui.observations += 1
+            assert any(row["status"] == "UNKNOWN_EFFECT" for row in rows().values())
+            if "observe" in ui.on_stage:
+                ui.on_stage["observe"]()
+            refs = [ref for ref, content in ui.outbound.items() if content == text]
+            if (len(refs) == 1 and refs[0] not in args["priorRefs"] and not ui.draft
+                    and ui.blocked is None and f.exact.surface == "CANDIDATE_READY"):
+                return refs[0]
+            return False
         phase = {adapter._CHECK: "check", adapter._INSERT: "insert", adapter._READY: "ready",
                  adapter._CLICK: "click", adapter._PROVE: "prove"}[script]
         reserved = next(row for row in rows().values() if row["status"] == "RESERVED")
@@ -4378,11 +4410,11 @@ def test_flat05_determinate_holds_leave_send_unattempted(flat05, fault, expected
     assert f.ui.inserts == f.ui.clicks == 0
 
 
+@pytest.mark.parametrize("kind", ["ef02-completion", "github-issue-created"])
 @pytest.mark.parametrize("phase", ["check", "insert", "click", "prove", "after-observation"])
-def test_flat05_restart_only_retries_unstaged_reservation(flat05, monkeypatch, phase):
+def test_flat06_restart_only_retries_unstaged_reservation(flat05, monkeypatch, kind, phase):
     f = flat05
-    f.sources.targets.pop()
-    f.save()
+    event_id = f.select(kind)
     f.ui.fail_at = phase
     with monkeypatch.context() as patch:
         if phase == "after-observation":
@@ -4397,16 +4429,203 @@ def test_flat05_restart_only_retries_unstaged_reservation(flat05, monkeypatch, p
             patch.setattr(r._SQLiteTransaction, "write", crash_before_proof_commit)
         with pytest.raises(SimulatedWakeHubCrash):
             f.s.run()
-    event_id = f.i["event"]["event_id"]
     reservation = f.rows()[event_id]["evidence"]["local_send"]
     assert reservation["phase"] == ("PRE_STAGE" if phase == "check" else "STAGING")
     f.ui.fail_at = None
     resumed = f.s.run()
     if phase == "check":
         assert resumed.code == "LOCAL_UI_OWNER_AUTHORIZED_TURN_OBSERVED" and f.ui.clicks == 1
-    else:
+        assert f.ui.observations == 0
+    elif phase == "insert":
         assert (resumed.status, resumed.code) == ("UNKNOWN_EFFECT", "INTERRUPTED_NO_REPLAY")
-        assert f.ui.inserts == 1 and f.ui.clicks == (0 if phase == "insert" else 1)
+        assert f.rows()[event_id]["history"] == ["PENDING", "RESERVED", "UNKNOWN_EFFECT"]
+        assert f.ui.inserts == 1 and f.ui.clicks == 0
+    else:
+        assert (resumed.status, resumed.code, resumed.replayed) == (
+            "UI_TURN_OBSERVED", "LOCAL_UI_EXISTING_TURN_RECONCILED", True)
+        row = f.rows()[event_id]
+        assert row["history"] == ["PENDING", "RESERVED", "UNKNOWN_EFFECT", "UI_TURN_OBSERVED"]
+        assert row["evidence"]["local_unknown_code"] == "INTERRUPTED_NO_REPLAY"
+        assert row["evidence"]["user_turn_ref"] == "turn-1" and row["evidence"]["local_send"] == reservation
+        assert f.s.run() == resumed and f.rows()[event_id] == row
+        assert f.ui.inserts == f.ui.clicks == f.ui.observations == 1
+        assert f.unrelated.reads == f.state.new_pages == 0 and not f.state.navigations
+
+
+@pytest.mark.parametrize("kind", ["ef02-completion", "github-issue-created"])
+@pytest.mark.parametrize("fault", [
+    "absent", "duplicate", "wrong-text", "prior-ref", "marker", "owner", "profile", "route",
+    "context", "context-id", "target-id", "document", "revoked", "expired", "changed-grant",
+    "changed-registration", "paused", "pause-during-read", "stop-during-read", "draft", "login", "verification", "modal",
+    "unproven-history",
+])
+def test_flat06_inconclusive_observation_preserves_unknown(flat05, monkeypatch, kind, fault):
+    f = flat05
+    event_id = f.select(kind)
+    f.ui.outbound["turn-old"] = "An unrelated earlier turn"
+    f.ui.ref_mode = "boolean"
+    original = f.s.run()
+    assert (original.status, original.code) == ("UNKNOWN_EFFECT", "SUBMISSION_UNPROVEN")
+    text = f.ui.outbound["turn-1"]
+    grant = f.consent["grants"][0 if kind == "ef02-completion" else 1]
+    if fault == "absent":
+        del f.ui.outbound["turn-1"]
+    elif fault == "duplicate":
+        f.ui.outbound["turn-duplicate"] = text
+    elif fault == "wrong-text":
+        f.ui.outbound["turn-1"] += "\nextra"
+    elif fault == "prior-ref":
+        f.ui.outbound["turn-old"] = f.ui.outbound.pop("turn-1")
+    elif fault == "marker":
+        f.exact.turns.clear()
+    elif fault == "owner":
+        f.s.new_logon(8)
+    elif fault == "profile":
+        argv = f.i["environment"].command()
+        argv[2] = "--profile-directory=Other"
+        f.i["process"]["CommandLine"] = json.dumps(argv)
+    elif fault == "route":
+        f.exact.url = f.unrelated.url
+    elif fault == "context":
+        f.browser.contexts.append(SimpleNamespace(pages=[]))
+    elif fault == "context-id":
+        f.ui.context = "c" * 32
+    elif fault == "target-id":
+        f.ui.target = "c" * 32
+    elif fault == "document":
+        f.ui.clock += 1
+    elif fault == "revoked":
+        f.consent["grants"].remove(grant)
+    elif fault == "expired":
+        monkeypatch.setattr(r, "time", SimpleNamespace(time_ns=lambda: grant["expires_ms"] * 1_000_000))
+    elif fault == "changed-grant":
+        grant["expires_ms"] += 1
+    elif fault == "changed-registration":
+        f.consent["registration_id"] = "a" * 32
+    elif fault == "paused":
+        f.i["config"]["chrome_lifecycle"] = "paused"
+    elif fault == "pause-during-read":
+        def pause():
+            f.i["config"]["chrome_lifecycle"] = "paused"
+            f.save()
+        f.ui.on_stage["observe"] = pause
+    elif fault == "stop-during-read":
+        f.ui.on_stage["observe"] = lambda: setattr(f.s.stops[-1], "stopped", True)
+    elif fault == "draft":
+        f.ui.draft = text
+    elif fault in ("login", "verification", "modal"):
+        f.ui.blocked = fault
+    elif fault == "unproven-history":
+        runner = r.compose_read_only(f.i["config_path"], f.i["root"])
+        with runner.journal.locked(runner.registration) as (txn, data):
+            del next(iter(data["events"].values()))["evidence"]["local_send"]["surface"]
+            txn.write(data)
+    f.save()
+    before = f.rows()
+    resumed = f.s.run()
+    if fault == "stop-during-read":
+        assert resumed.code == "SUPERVISOR_STOPPED"
+        resumed = f.s.ticks[-1][0]
+    assert (resumed.status, resumed.code, resumed.replayed) == (original.status, original.code, True)
+    assert f.rows() == before and event_id in before
+    assert f.ui.inserts == f.ui.clicks == 1
+    assert f.ui.observations <= 1 and f.unrelated.reads == f.state.new_pages == 0
+
+
+@pytest.mark.parametrize("operation", ["deliver_wake", "resolve_claim_route"])
+def test_flat06_observation_requires_current_route_permission(flat05, operation):
+    f = flat05
+    event_id = f.select("ef02-completion")
+    f.ui.ref_mode = "boolean"
+    assert f.s.run().status == "UNKNOWN_EFFECT"
+    before = f.rows()[event_id]
+    grants = f.i["grants"]
+    grants["grants"][:] = [grant for grant in grants["grants"] if grant["operation"] != operation]
+    f.i["save"](r.Path(f.i["config"]["grants"]), grants)
+    result = f.s.run()
+    if operation == "deliver_wake":
+        assert result.code == "LOCAL_UI_EXISTING_TURN_RECONCILED"
+    else:
+        assert result.status == "UNKNOWN_EFFECT" and f.rows()[event_id] == before
+        assert f.ui.observations == 0
+    assert f.ui.inserts == f.ui.clicks == 1
+
+
+@pytest.mark.parametrize("kind,expected", [
+    ("ef02-completion", "RUN_IDENTITY_MISMATCH"),
+    ("github-issue-created", "ISSUE_IDENTITY_UNPROVEN"),
+])
+def test_flat06_observation_requires_original_authenticated_source(flat05, kind, expected):
+    f = flat05
+    event_id = f.select(kind)
+    f.ui.ref_mode = "boolean"
+    assert f.s.run().status == "UNKNOWN_EFFECT"
+    before = f.rows()[event_id]
+    if kind == "ef02-completion":
+        f.i["run"]["run_attempt"] += 1
+    else:
+        f.issue.issue["id"] += 1
+    assert f.s.run().code == expected
+    assert f.rows()[event_id] == before and f.ui.observations == 0
+    assert f.ui.inserts == f.ui.clicks == 1
+
+
+def test_flat06_reconciliation_rejects_reference_owned_by_another_source(flat05):
+    f = flat05
+    assert f.s.run().code == "LOCAL_UI_OWNER_AUTHORIZED_TURN_OBSERVED"
+    f.ui.outbound.clear()
+    event_id = f.select("github-issue-created")
+    f.ui.ref_mode = "boolean"
+    assert f.s.run().status == "UNKNOWN_EFFECT"
+    f.ui.outbound["turn-1"] = f.ui.outbound.pop("turn-2")
+    before = f.rows()
+    assert "turn-1" not in before[event_id]["evidence"]["local_send"]["surface"]["prior_refs"]
+    assert f.s.run().status == "UNKNOWN_EFFECT"
+    assert f.rows() == before and f.ui.observations == 1
+    assert f.ui.inserts == f.ui.clicks == 2
+
+
+def test_flat06_full_journal_preserves_prior_dedup_and_unknown(flat05):
+    f = flat05
+    assert f.s.run().code == "LOCAL_UI_OWNER_AUTHORIZED_TURN_OBSERVED"
+    ef02, issue = f.sources.targets
+    f.sources.targets[:] = [issue, ef02]
+    f.save()
+    f.ui.ref_mode = "missing"
+    assert f.s.run().status == "UNKNOWN_EFFECT"
+    runner = r.compose_read_only(f.i["config_path"], f.i["root"])
+    registration = runner.registration
+    with runner.journal.locked(registration) as (txn, data):
+        legacy = next(row for row in data["events"].values() if row["status"] == "UI_TURN_OBSERVED")
+        del legacy["evidence"]["local_send"]["surface"]
+        for index in range(2, 128):
+            event = r.Event(f"ef02-completion-v1:{index:064x}", registration.source_sha, index,
+                            "d" * 64, "GITHUB_AUTHENTICATED")
+            data["events"][event.key(registration)] = {
+                "event": asdict(event), "status": "PENDING", "code": "EVENT_PENDING",
+                "history": ["PENDING"], "evidence": {},
+            }
+        txn.write(data)
+
+    def raw_rows():
+        with sqlite3.connect(f.s.path) as db:
+            return tuple(db.execute("SELECT * FROM events ORDER BY event_key")), tuple(db.execute(
+                "SELECT * FROM source_identities ORDER BY source_key"))
+
+    before = raw_rows()
+    assert len(before[0]) == 128 and len(before[1]) == 2
+    f.sources.add(1318)
+    new = f.sources.targets[-1]
+    f.sources.targets[:] = [new, ef02, issue]
+    f.save()
+    assert f.s.run().code == "JOURNAL_FULL"
+    f.sources.targets[:] = [ef02, issue]
+    f.save()
+    assert f.s.run().code == "LOCAL_UI_OWNER_AUTHORIZED_TURN_OBSERVED"
+    f.sources.targets.reverse()
+    f.save()
+    assert f.s.run().status == "UNKNOWN_EFFECT"
+    assert raw_rows() == before and f.ui.inserts == f.ui.clicks == 2
 
 
 @pytest.mark.parametrize("fault,expected,clicks", [
