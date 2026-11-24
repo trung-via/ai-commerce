@@ -154,12 +154,29 @@ def test_duplicate_delivery_and_reopen_do_not_resend_or_handoff(composition):
     assert path.read_bytes() == first_bytes
 
 
+def test_send_only_records_ui_evidence_and_never_needs_brain(composition):
+    make, event, registration, _, path, _ = composition
+    runner = make(brain=None)
+    expected = r.Result("UI_TURN_OBSERVED", "UI_USER_TURN_OBSERVED", "SYNTHETIC_FIXTURE")
+    assert runner.run_once() == expected
+    saved = record(path, event, registration)
+    assert saved["history"] == ["PENDING", "RESERVED", "UI_TURN_OBSERVED"]
+    assert saved["evidence"] == {"user_turn_ref": "fixture:user-turn:" + event.key(registration),
+                                 "marker": registration.marker}
+    assert runner.run_once() == replace(expected, replayed=True)
+    reopened = make(brain=None)
+    assert reopened.run_once() == replace(expected, replayed=True)
+    assert record(path, event, registration) == saved
+    assert runner.sender.calls == 1 and reopened.sender.calls == 0
+    assert runner.orchestrator._completed == reopened.orchestrator._completed == {}
+
+
 class Crash(BaseException):
     pass
 
 
 @pytest.mark.parametrize("phase", ["RESERVED", "UI_TURN_OBSERVED", "BRAIN_CORRELATED"])
-def test_crash_recovery_never_replays_ambiguous_effect(composition, phase, monkeypatch):
+def test_crash_recovery_resumes_after_last_committed_phase(composition, phase, monkeypatch):
     make, event, registration, _, path, _ = composition
     runner = make()
 
@@ -178,9 +195,58 @@ def test_crash_recovery_never_replays_ambiguous_effect(composition, phase, monke
         runner.run_once()
     recovered = make()
     result = recovered.run_once()
-    assert result == r.Result("UNKNOWN_EFFECT", "INTERRUPTED_NO_REPLAY", "SYNTHETIC_FIXTURE", True)
-    assert recovered.sender.calls == 0 and recovered.orchestrator._completed == {}
-    assert make().run_once().status == "UNKNOWN_EFFECT"
+    expected = (("UNKNOWN_EFFECT", "INTERRUPTED_NO_REPLAY") if phase == "RESERVED"
+                else ("ACK", "CONSUMER_RECEIPT_RECORDED"))
+    assert result == r.Result(*expected, "SYNTHETIC_FIXTURE", True)
+    assert recovered.sender.calls == 0
+    assert bool(recovered.orchestrator._completed) == (phase == "UI_TURN_OBSERVED")
+    assert make().run_once().status == expected[0]
+
+
+@pytest.mark.parametrize("receipt", ["matching", "cross-event", "malformed"])
+def test_interrupted_delivery_can_only_reconcile_existing_receipt(composition, monkeypatch, receipt):
+    make, event, registration, _, path, _ = composition
+    runner = make(brain=None)
+    original = runner.sender.send
+    sent = []
+
+    def crash_after_send(*args):
+        assert record(path, event, registration)["status"] == "RESERVED"
+        sent.append(original(*args))
+        raise Crash()
+
+    monkeypatch.setattr(runner.sender, "send", crash_after_send)
+    with pytest.raises(Crash):
+        runner.run_once()
+    assert runner.sender.calls == 1
+    reopened = make(brain=None)
+    lookups = []
+
+    def lookup(current, binding):
+        assert current == event and binding == registration
+        assert record(path, event, registration)["status"] == "UNKNOWN_EFFECT"
+        lookups.append(current)
+        observation = sent[0]
+        if receipt == "cross-event":
+            other = replace(observation.receipt, event_id="ef02-completion-v1:" + "f" * 64)
+            return replace(observation, receipt=other)
+        if receipt == "malformed":
+            return replace(observation, receipt=replace(observation.receipt, generation=True))
+        return observation
+
+    monkeypatch.setattr(reopened.sender, "reconcile", lookup)
+    monkeypatch.setattr(reopened.sender, "preflight", lambda *args: pytest.fail("Readiness repeated"))
+    if receipt == "matching":
+        assert reopened.run_once() == r.Result("UI_TURN_OBSERVED", "UI_USER_TURN_OBSERVED",
+                                               "SYNTHETIC_FIXTURE", True)
+        assert record(path, event, registration)["history"] == [
+            "PENDING", "RESERVED", "UNKNOWN_EFFECT", "UI_TURN_OBSERVED"]
+        assert reopened.run_once().status == "UI_TURN_OBSERVED"
+    else:
+        assert reopened.run_once() == r.Result("UNKNOWN_EFFECT", "INTERRUPTED_NO_REPLAY",
+                                               "SYNTHETIC_FIXTURE", True)
+        assert record(path, event, registration)["evidence"] == {}
+    assert reopened.sender.calls == 0 and lookups == [event]
 
 
 def test_pending_recovery_is_safe_before_reservation(composition, monkeypatch):
@@ -198,7 +264,57 @@ def test_pending_recovery_is_safe_before_reservation(composition, monkeypatch):
     assert recovered.run_once().status == "ACK" and recovered.sender.calls == 1
 
 
-@pytest.mark.parametrize("drift", ["chat", "generation", "source", "marker", "event", "turn", "status", "brain"])
+@pytest.mark.parametrize("blocked", ["DRAFT_PRESENT", "CDP_READ_UNAVAILABLE", "CHROME_OBSERVATION_UNKNOWN",
+                                     "PREFLIGHT_UNPROVEN"])
+def test_transient_readiness_keeps_same_event_pending_for_later_retry(composition, monkeypatch, blocked):
+    make, event, registration, _, path, _ = composition
+    runner = make(brain=None)
+    reads = []
+
+    def preflight(current):
+        assert current == registration
+        assert record(path, event, registration)["history"] == ["PENDING"]
+        reads.append(current)
+        if len(reads) == 1:
+            if blocked == "PREFLIGHT_UNPROVEN":
+                raise TimeoutError("fixture timeout")
+            return blocked
+        return None
+
+    monkeypatch.setattr(runner.sender, "preflight", preflight)
+    assert runner.run_once() == r.Result("HOLD", blocked, "SYNTHETIC_FIXTURE")
+    assert runner.sender.calls == 0 and record(path, event, registration)["status"] == "PENDING"
+    assert runner.run_once().status == "UI_TURN_OBSERVED"
+    assert runner.run_once().replayed and runner.sender.calls == 1
+    assert reads == [registration, registration]
+
+
+def test_source_outage_and_drift_cannot_consume_a_pending_reservation(composition, monkeypatch):
+    make, event, registration, _, path, _ = composition
+    runner = make(brain=None)
+    with monkeypatch.context() as patch:
+        patch.setattr(runner.sender, "preflight", lambda *_: "CDP_READ_UNAVAILABLE")
+        assert runner.run_once().code == "CDP_READ_UNAVAILABLE"
+    saved = record(path, event, registration)
+
+    def unavailable():
+        raise r.GitHubReadBlocked("GITHUB_READ_UNAVAILABLE")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runner.source, "next_event", unavailable)
+        assert runner.run_once().code == "GITHUB_READ_UNAVAILABLE"
+    assert record(path, event, registration) == saved
+
+    runner.source.event = replace(event, payload_sha256="d" * 64)
+    assert runner.run_once().code == "EVENT_IDENTITY_DRIFT"
+    assert runner.sender.calls == 0 and record(path, event, registration) == saved
+    runner.source.event = event
+    assert runner.run_once().status == "UI_TURN_OBSERVED"
+    assert runner.sender.calls == 1
+
+
+@pytest.mark.parametrize("drift", ["chat", "generation", "source", "marker", "event", "turn", "status", "brain",
+                                    "witness"])
 def test_sender_observation_is_not_brain_success(composition, drift, monkeypatch):
     make, _, _, _, _, _ = composition
     runner = make()
@@ -216,7 +332,7 @@ def test_sender_observation_is_not_brain_success(composition, drift, monkeypatch
         values = {"generation": {"generation": 2}, "source": {"route_id": "different-route"},
                   "event": {"event_id": "ef02-completion-v1:" + "d" * 64},
                   "status": {"delivery_status": "CONFIRMED"},
-                  "brain": {"brain_continuation_proven": True}}
+                  "brain": {"brain_continuation_proven": True}, "witness": {"witness_evidence": {"native": True}}}
         return replace(observation, receipt=replace(receipt, **values[drift]))
 
     monkeypatch.setattr(runner.sender, "send", wrong)
@@ -226,14 +342,45 @@ def test_sender_observation_is_not_brain_success(composition, drift, monkeypatch
     assert runner.orchestrator._completed == {}
 
 
-def test_ui_user_turn_without_brain_receipt_is_blocked(composition, monkeypatch):
+@pytest.mark.parametrize("failure", ["missing", "timeout"])
+def test_response_can_be_reconciled_on_restart_without_resending(composition, monkeypatch, failure):
     make, event, registration, _, path, _ = composition
     runner = make()
-    monkeypatch.setattr(runner.brain, "correlate", lambda *args: None)
+    def unavailable(*args):
+        assert record(path, event, registration)["status"] == "UI_TURN_OBSERVED"
+        if failure == "timeout":
+            raise TimeoutError("fixture timeout")
+        return None
+
+    monkeypatch.setattr(runner.brain, "correlate", unavailable)
     result = runner.run_once()
-    assert result.status == "BLOCKED_EXTERNAL" and result.code == "BRAIN_RECEIPT_UNAVAILABLE"
-    assert record(path, event, registration)["history"][-2:] == ["UI_TURN_OBSERVED", "BLOCKED_EXTERNAL"]
+    assert result == r.Result("UI_TURN_OBSERVED", "BRAIN_RECEIPT_UNAVAILABLE", "SYNTHETIC_FIXTURE")
+    saved = record(path, event, registration)
+    assert saved["history"] == ["PENDING", "RESERVED", "UI_TURN_OBSERVED"]
     assert runner.orchestrator._completed == {}
+    waiting = make(brain=None)
+    assert waiting.run_once().status == "UI_TURN_OBSERVED" and waiting.sender.calls == 0
+    assert record(path, event, registration) == saved
+    recovered = make()
+    assert recovered.run_once() == r.Result("ACK", "CONSUMER_RECEIPT_RECORDED", "SYNTHETIC_FIXTURE", True)
+    assert recovered.sender.calls == 0 and runner.sender.calls == 1
+    assert recovered.orchestrator.dispatch(event.key(registration)).status == "RECEIPT_RECORDED"
+    assert record(path, event, registration)["evidence"]["user_turn_ref"] == saved["evidence"]["user_turn_ref"]
+
+
+def test_legacy_response_failure_retains_observed_delivery_without_rewriting_history(composition):
+    make, event, registration, _, path, _ = composition
+    assert make(brain=None).run_once().status == "UI_TURN_OBSERVED"
+    saved = record(path, event, registration)
+    saved.update(status="BLOCKED_EXTERNAL", code="BRAIN_RECEIPT_UNAVAILABLE",
+                 history=[*saved["history"], "BLOCKED_EXTERNAL"])
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE events SET record=?", (json.dumps(saved),))
+    reopened = make()
+    assert reopened.run_once() == r.Result("UI_TURN_OBSERVED", "BRAIN_RECEIPT_UNAVAILABLE",
+                                           "SYNTHETIC_FIXTURE", True)
+    assert reopened.sender.calls == 0 and reopened.orchestrator._completed == {}
+    assert record(path, event, registration) == saved
 
 
 @pytest.mark.parametrize("field", ["event_key", "marker", "user_turn_ref", "evidence_type"])
@@ -242,7 +389,7 @@ def test_brain_receipt_requires_exact_correlation(composition, field, monkeypatc
     runner = make()
     original = runner.brain.correlate
     monkeypatch.setattr(runner.brain, "correlate", lambda *args: replace(original(*args), **{field: "wrong"}))
-    assert runner.run_once().status == "UNKNOWN_EFFECT"
+    assert runner.run_once() == r.Result("UI_TURN_OBSERVED", "BRAIN_CORRELATION_MISMATCH", "SYNTHETIC_FIXTURE")
     assert runner.orchestrator._completed == {}
 
 
@@ -251,7 +398,7 @@ def test_wake_receipt_cannot_substitute_for_consumer_receipt(composition):
     runner = make()
     runner.brain.handoff = replace(handoff, receipt=runner.sender.send(
         runner.source.event, runner.registration).receipt)
-    assert runner.run_once().status == "UNKNOWN_EFFECT"
+    assert runner.run_once() == r.Result("UI_TURN_OBSERVED", "CONSUMER_RECEIPT_REQUIRED", "SYNTHETIC_FIXTURE")
     assert runner.orchestrator._completed == {}
 
 
@@ -260,9 +407,13 @@ def test_unverified_consumer_receipt_cannot_ack(composition):
     spec = handoff.completed.spec
     runner = make(orchestrator=ProductionPipelineOrchestrator(
         authorized_specs=((spec.authorization.authorization_ref, spec.sha256),)))
-    assert runner.run_once().status == "UNKNOWN_EFFECT"
+    assert runner.run_once() == r.Result("UI_TURN_OBSERVED", "RECEIPT_NOT_VERIFIED", "SYNTHETIC_FIXTURE")
     assert runner.orchestrator.dispatch(spec.idempotency_key).status == "NOT_DISPATCHED"
-    assert "BRAIN_CORRELATED" not in record(path, event, registration)["history"]
+    saved = record(path, event, registration)
+    assert saved["history"] == ["PENDING", "RESERVED", "UI_TURN_OBSERVED"]
+    reopened = make()
+    assert reopened.run_once() == r.Result("ACK", "CONSUMER_RECEIPT_RECORDED", "SYNTHETIC_FIXTURE", True)
+    assert reopened.sender.calls == 0 and runner.sender.calls == 1
 
 
 def test_missing_grant_is_durable_without_sender_call(composition):
@@ -1400,9 +1551,9 @@ def test_r3a_test_only_mock_ambiguous_attempt_never_retries(composition, monkeyp
 def test_r3a_missing_native_brain_transport_never_accepts_ui_as_brain(composition):
     make, event, registration, _, path, _ = composition
     runner = make(brain=r.NativeBrainAdapter())
-    assert runner.run_once() == r.Result("BLOCKED_EXTERNAL", "BRAIN_RECEIPT_UNAVAILABLE", "SYNTHETIC_FIXTURE")
+    assert runner.run_once() == r.Result("UI_TURN_OBSERVED", "BRAIN_RECEIPT_UNAVAILABLE", "SYNTHETIC_FIXTURE")
     assert record(path, event, registration)["history"] == [
-        "PENDING", "RESERVED", "UI_TURN_OBSERVED", "BLOCKED_EXTERNAL"]
+        "PENDING", "RESERVED", "UI_TURN_OBSERVED"]
     assert runner.orchestrator._completed == {}
 
 
@@ -1691,8 +1842,8 @@ def test_r3b1_synthetic_mode_cannot_promote_native_receipt_values(composition, r
         original = runner.brain.correlate
         monkeypatch.setattr(runner.brain, "correlate", lambda *args: replace(
             original(*args), authenticated_receipt=r3b1_pins.brain))
-    assert runner.run_once() == r.Result("UNKNOWN_EFFECT", "SYNTHETIC_NATIVE_PROOF_FORBIDDEN",
-                                       "SYNTHETIC_FIXTURE")
+    expected = "UNKNOWN_EFFECT" if boundary == "sender" else "UI_TURN_OBSERVED"
+    assert runner.run_once() == r.Result(expected, "SYNTHETIC_NATIVE_PROOF_FORBIDDEN", "SYNTHETIC_FIXTURE")
     assert "BRAIN_CORRELATED" not in record(path, event, registration)["history"]
     assert runner.orchestrator._completed == {} and runner.orchestrator._receipts == {}
 
@@ -1750,8 +1901,8 @@ def test_r3b1_commit_failure_preserves_durable_effect_boundary(composition, monk
     recovered = make()
     result = recovered.run_once()
     safe_pending = phase == "RESERVED" and position == "before"
-    committed_ack = phase == "ACK" and position == "after"
-    assert result.status == ("ACK" if safe_pending or committed_ack else "UNKNOWN_EFFECT")
+    committed_delivery = phase == "ACK" or (phase == "UI_TURN_OBSERVED" and position == "after")
+    assert result.status == ("ACK" if safe_pending or committed_delivery else "UNKNOWN_EFFECT")
     assert recovered.sender.calls == (1 if safe_pending else 0)
     assert runner.sender.calls == (0 if phase == "RESERVED" else 1)
     assert recovered.run_once().replayed
@@ -1781,7 +1932,7 @@ def test_r3b1_missing_post_reserve_witness_never_replays(composition, monkeypatc
     assert reopened.orchestrator._completed == {}
 
 
-def test_r3b1_native_recovery_never_repeats_readiness_or_send(r3a_ingress):
+def test_r3b1_native_recovery_never_repeats_readiness_or_send(r3a_ingress, monkeypatch):
     i = r3a_ingress
     runner = r.compose_native_source_only(i["config_path"], i["root"])
     assert runner.run_once().status == "HOLD_DEPENDENCY"
@@ -1793,10 +1944,22 @@ def test_r3b1_native_recovery_never_repeats_readiness_or_send(r3a_ingress):
     calls, reads = list(i["native_calls"]), i["browser"].reads
     for _ in range(2):
         reopened = r.compose_native_source_only(i["config_path"], i["root"])
+        monkeypatch.setattr(reopened.sender, "reconcile",
+                            lambda *args: pytest.fail("Unenrolled native receipt lookup invoked"))
         assert reopened.run_once() == r.Result("UNKNOWN_EFFECT", "INTERRUPTED_NO_REPLAY",
                                                "GITHUB_AUTHENTICATED", True)
         assert reopened.orchestrator._completed == {} and reopened.orchestrator._receipts == {}
     assert i["native_calls"] == calls and i["browser"].reads == reads
+
+
+def test_native_source_only_without_brain_still_requires_enrolled_origin(r3a_ingress):
+    i = r3a_ingress
+    runner = r.compose_native_source_only(i["config_path"], i["root"])
+    runner.brain = None
+    assert runner.run_once() == r.Result("HOLD_DEPENDENCY", "NATIVE_ORIGIN_AUTHORITY_UNAVAILABLE",
+                                        "GITHUB_AUTHENTICATED")
+    assert_read_only_pending(i)
+    assert i["page"].reads == 2 and runner.sender.owner.adapter.allow_submit is False
 
 
 def test_r3b1_changing_composer_labels_do_not_supply_stable_native_identity(r3a_ingress, monkeypatch):
