@@ -4158,3 +4158,314 @@ def test_flat04_post_effect_config_drift_keeps_durable_fence(flat04):
     assert f.origin()["navigation"]["phase"] == "RESERVED"
     assert f.s.run().code == "EXACT_CHAT_RECONCILED"
     assert f.state.new_pages == 1
+
+
+class SimulatedWakeHubCrash(BaseException):
+    pass
+
+
+@pytest.fixture
+def flat05(flat04, r3a_ingress, monkeypatch):
+    f = flat04
+    prepared = f.enroll()
+    event = f.i["event"]
+    f.ef02 = r.SourceIdentity("ef02-completion", event["repository"], event["run_id"], event["run_attempt"])
+    f.consent = {
+        "schema": "WakeHubLocalUIDelivery.v2",
+        "route_marker": f.i["registration"].marker,
+        "registration_id": prepared.registration_id,
+        "marker_digest": f.origin()["marker_digest"],
+        "grants": [{"source_key": key, "expires_ms": prepared.expires_ms}
+                   for key in (f.ef02.key, f.issue.target.identity.key)],
+    }
+    f.i["config"]["ui_delivery"] = f.consent
+
+    def save():
+        f.i["save"](f.i["config_path"], f.i["config"])
+
+    def rows():
+        with sqlite3.connect(f.s.path) as db:
+            return {event_id: json.loads(raw) for event_id, raw in db.execute("SELECT event_id, record FROM events")}
+
+    f.save = save
+    f.rows = rows
+    # The default inventory sees an idle composer on a page with a closed account menu.
+    # The fake browser provides neither an account identifier nor a session reference.
+    f.ui = SimpleNamespace(clock=12345, outbound={}, draft="", inserts=0, clicks=0,
+                           fail_at=None, on_stage={}, ref_mode=None, blocked=None)
+    ui = f.ui
+    adapter = r.cdp_doorbell
+    base_evaluate = f.exact.evaluate
+
+    def evaluate(script, args=None):
+        if script == adapter._DOCUMENT_CLOCK:
+            return ui.clock
+        if script in (adapter._CHAT_A_READ_ONLY_SURFACE, adapter._WH03_COMMITTED_SIGNAL_DOM):
+            return base_evaluate(script, args)
+        assert args["url"] == f.exact.url and args["documentClock"] == ui.clock
+        text = args["text"]
+        phase = {adapter._CHECK: "check", adapter._INSERT: "insert", adapter._READY: "ready",
+                 adapter._CLICK: "click", adapter._PROVE: "prove"}[script]
+        reserved = next(row for row in rows().values() if row["status"] == "RESERVED")
+        assert reserved["evidence"]["local_send"]["phase"] == ("PRE_STAGE" if phase == "check" else "STAGING")
+        if phase in ui.on_stage:
+            ui.on_stage[phase]()
+        if phase == "check":
+            if ui.fail_at == phase:
+                raise SimulatedWakeHubCrash()
+            if ui.blocked is not None:
+                return ui.blocked
+            return "OUTBOUND_ALREADY_PRESENT" if text in ui.outbound.values() else "READY"
+        if phase == "insert":
+            ui.inserts += 1
+            ui.draft = text
+            if ui.fail_at == phase:
+                raise SimulatedWakeHubCrash()
+            return True
+        if phase == "ready":
+            return ui.blocked is None and ui.draft == text
+        if phase == "click":
+            if ui.blocked is not None:
+                return False
+            assert ui.draft == text and text not in ui.outbound.values()
+            prior = list(ui.outbound)
+            ui.clicks += 1
+            if ui.ref_mode != "missing":
+                ui.outbound[f"turn-{ui.clicks}"] = text
+            ui.draft = ""
+            if ui.fail_at == phase:
+                raise SimulatedWakeHubCrash()
+            return prior
+        if ui.fail_at == phase:
+            raise SimulatedWakeHubCrash()
+        if ui.ref_mode == "reused":
+            return "turn-old"
+        if ui.ref_mode == "boolean":
+            return True
+        return next((ref for ref, content in ui.outbound.items() if content == text), False)
+
+    def wait(script, *, arg, timeout, polling):
+        assert polling == 100
+        if not evaluate(script, arg):
+            raise TimeoutError()
+
+    f.exact.evaluate = evaluate
+    f.exact.wait_for_function = wait
+    f.exact.set_default_timeout = lambda timeout: None
+
+    def read_account(*args):
+        pytest.fail("Local UI delivery requested account evidence")
+
+    monkeypatch.setattr(_PlaywrightInventory, "read_enrolled_local_ui_account", read_account, raising=False)
+    save()
+    return f
+
+
+def test_flat05_supervisor_sends_each_authenticated_source_once(flat05):
+    f = flat05
+    observed = "LOCAL_UI_OWNER_AUTHORIZED_TURN_OBSERVED"
+    assert f.s.run(3).code == observed
+    first, second, duplicate = (tick[0] for tick in f.s.ticks)
+    assert first.code == second.code == observed and duplicate.replayed
+    assert first.route.account_attestation == second.route.account_attestation == (
+        "CHATGPT_ACCOUNT_SESSION_AUTHORITY_UNAVAILABLE")
+    assert first.route.source_key == f.ef02.key
+    assert second.route.source_key == f.issue.target.identity.key != first.route.source_key
+    issue_id = "github-issue-created-v1:" + second.route.source_key
+    event_ids = (f.i["event"]["event_id"], issue_id)
+    for index, event_id in enumerate(event_ids, start=1):
+        text = f.ui.outbound[f"turn-{index}"]
+        assert text == r.cdp_doorbell._doorbell_text(event_id, "trung-via/ai-commerce", send_only=True)
+        row = f.rows()[event_id]
+        assert row["code"] == observed
+        assert row["history"] == ["PENDING", "RESERVED", "UI_TURN_OBSERVED"]
+        assert set(row["evidence"]) == {"local_route", "local_send", "marker", "user_turn_ref"}
+        assert row["evidence"]["user_turn_ref"] == f"turn-{index}"
+        assert "Discard this title" not in text and "@" not in text
+    assert "attempt" not in f.rows()[issue_id]["event"]
+    f.sources.targets.reverse()
+    f.save()
+    assert f.s.run(2).replayed
+    assert f.ui.inserts == f.ui.clicks == 2 and f.unrelated.reads == f.state.new_pages == 0
+
+
+@pytest.mark.parametrize("schema", ["WakeHubLocalUIDelivery.v1", "WakeHubLocalUIDelivery.v99"])
+def test_flat05_supervisor_rejects_old_or_unrecognized_opt_in(flat05, schema):
+    f = flat05
+    f.consent["schema"] = schema
+    if schema.endswith(".v1"):
+        f.consent.update(account_sha256="a" * 64, session_sha256=None)
+    f.save()
+    assert f.s.run().code == "LOCAL_UI_DELIVERY_CONFIG_INVALID"
+    assert f.rows() == {} and f.ui.inserts == f.ui.clicks == 0
+
+
+@pytest.mark.parametrize("fault,expected", [
+    ("disabled", "EXACT_CHAT_REUSED"),
+    ("wrong-grant", "LOCAL_UI_DELIVERY_GRANT_REQUIRED"),
+    ("expired", "LOCAL_UI_DELIVERY_GRANT_EXPIRED"),
+    ("signed-grant", "DELIVER_WAKE_GRANT_REQUIRED"),
+    ("registration", "LOCAL_UI_ENROLLMENT_DRIFT"),
+    ("consent-route", "LOCAL_UI_ENROLLMENT_DRIFT"),
+    ("consent-marker", "LOCAL_UI_ENROLLMENT_DRIFT"),
+    ("profile", "BROWSER_OWNERSHIP_UNPROVEN"),
+    ("marker", "LOCAL_USER_MARKER_MISSING"),
+    ("draft", "PRELOAD_DRAFT_PRESENT"),
+    ("busy-or-login", "PRELOAD_SURFACE_UNPROVEN"),
+    ("verification-or-confirmation", "SURFACE_UNPROVEN"),
+    ("disabled-composer", "SURFACE_UNPROVEN"),
+    ("attachment", "DRAFT_PRESENT"),
+    ("tab", "EXACT_CHAT_TAB_AMBIGUOUS"),
+    ("context", "EXACT_CHAT_CONTEXT_AMBIGUOUS"),
+    ("existing", "OUTBOUND_ALREADY_PRESENT"),
+    ("config-after-reservation", "LOCAL_AUTHORITY_DRIFT"),
+    ("source-after-reservation", "LOCAL_AUTHORITY_DRIFT"),
+    ("document-after-reservation", "TARGET_PAGE_CHANGED"),
+    ("route-after-reservation", "TARGET_PAGE_CHANGED"),
+    ("stale-launch", "CHROME_LAUNCH_RECONCILE_REQUIRED"),
+])
+def test_flat05_determinate_holds_leave_send_unattempted(flat05, fault, expected):
+    f = flat05
+    event_id = f.i["event"]["event_id"]
+    if fault == "disabled":
+        del f.i["config"]["ui_delivery"]
+    elif fault == "wrong-grant":
+        f.consent["grants"].pop(0)
+    elif fault == "expired":
+        f.consent["grants"][0]["expires_ms"] = 1
+    elif fault == "signed-grant":
+        f.i["grants"]["grants"].pop()
+        f.i["save"](r.Path(f.i["config"]["grants"]), f.i["grants"])
+    elif fault == "registration":
+        f.consent["registration_id"] = "a" * 32
+    elif fault == "consent-route":
+        f.consent["route_marker"] = "wakehub-r1:" + "a" * 64
+    elif fault == "consent-marker":
+        f.consent["marker_digest"] = "a" * 64
+    elif fault == "profile":
+        argv = f.i["environment"].command()
+        argv[2] = "--profile-directory=Other"
+        f.i["process"]["CommandLine"] = json.dumps(argv)
+    elif fault == "marker":
+        f.exact.turns.clear()
+    elif fault in ("draft", "busy-or-login"):
+        f.exact.surface = "DRAFT_PRESENT" if fault == "draft" else "SURFACE_UNPROVEN"
+    elif fault in ("verification-or-confirmation", "disabled-composer", "attachment"):
+        f.ui.blocked = "DRAFT_PRESENT" if fault == "attachment" else "SURFACE_UNPROVEN"
+    elif fault == "tab":
+        f.context.pages.append(Flat04Page(f.exact.url))
+    elif fault == "context":
+        f.browser.contexts.append(SimpleNamespace(pages=[]))
+    elif fault == "existing":
+        f.ui.outbound["turn-old"] = r.cdp_doorbell._doorbell_text(event_id, "trung-via/ai-commerce", send_only=True)
+    elif fault == "config-after-reservation":
+        def pause():
+            f.i["config"]["chrome_lifecycle"] = "paused"
+            f.save()
+        f.ui.on_stage["check"] = pause
+    elif fault == "source-after-reservation":
+        path = r.Path(f.sources.targets[0]["path"])
+        f.ui.on_stage["check"] = lambda: f.i["save"](path, {**f.i["registered"], "run_id": 18})
+    elif fault == "document-after-reservation":
+        f.ui.on_stage["check"] = lambda: setattr(f.ui, "clock", f.ui.clock + 1)
+    elif fault == "route-after-reservation":
+        f.ui.on_stage["check"] = lambda: setattr(f.exact, "url", f.unrelated.url)
+    elif fault == "stale-launch":
+        f.s.slot.pending = True
+    f.save()
+    assert f.s.run().code == expected
+    assert f.rows()[event_id]["history"] == ["PENDING"]
+    assert f.ui.inserts == f.ui.clicks == 0
+
+
+@pytest.mark.parametrize("phase", ["check", "insert", "click", "prove", "after-observation"])
+def test_flat05_restart_only_retries_unstaged_reservation(flat05, monkeypatch, phase):
+    f = flat05
+    f.sources.targets.pop()
+    f.save()
+    f.ui.fail_at = phase
+    with monkeypatch.context() as patch:
+        if phase == "after-observation":
+            write = r._SQLiteTransaction.write
+
+            def crash_before_proof_commit(txn, data):
+                if any(row["status"] == "UI_TURN_OBSERVED" for row in data["events"].values()):
+                    assert f.ui.outbound and f.ui.clicks == 1
+                    raise SimulatedWakeHubCrash()
+                write(txn, data)
+
+            patch.setattr(r._SQLiteTransaction, "write", crash_before_proof_commit)
+        with pytest.raises(SimulatedWakeHubCrash):
+            f.s.run()
+    event_id = f.i["event"]["event_id"]
+    reservation = f.rows()[event_id]["evidence"]["local_send"]
+    assert reservation["phase"] == ("PRE_STAGE" if phase == "check" else "STAGING")
+    f.ui.fail_at = None
+    resumed = f.s.run()
+    if phase == "check":
+        assert resumed.code == "LOCAL_UI_OWNER_AUTHORIZED_TURN_OBSERVED" and f.ui.clicks == 1
+    else:
+        assert (resumed.status, resumed.code) == ("UNKNOWN_EFFECT", "INTERRUPTED_NO_REPLAY")
+        assert f.ui.inserts == 1 and f.ui.clicks == (0 if phase == "insert" else 1)
+
+
+@pytest.mark.parametrize("fault,expected,clicks", [
+    ("blocked-send", "INSERT_BLOCKED", 0),
+    ("prompt-before-click", "SEND_BLOCKED", 0),
+    ("owner", "CHROME_OBSERVATION_CHANGED", 0),
+    ("document", "TARGET_PAGE_CHANGED", 0),
+    ("marker", "LOCAL_UI_MARKER_UNPROVEN", 0),
+    ("missing", "SUBMISSION_UNPROVEN", 1),
+    ("reused", "SUBMISSION_UNPROVEN", 1),
+    ("boolean", "SUBMISSION_UNPROVEN", 1),
+    ("config-after-click", "LOCAL_AUTHORITY_DRIFT", 1),
+])
+def test_flat05_staging_or_click_ambiguity_cannot_replay(flat05, fault, expected, clicks):
+    f = flat05
+    f.sources.targets.pop()
+    f.save()
+    if fault == "blocked-send":
+        f.ui.on_stage["insert"] = lambda: setattr(f.ui, "blocked", "SURFACE_UNPROVEN")
+    elif fault == "prompt-before-click":
+        f.ui.on_stage["click"] = lambda: setattr(f.ui, "blocked", "SURFACE_UNPROVEN")
+    elif fault == "owner":
+        f.ui.on_stage["insert"] = lambda: f.s.new_logon(8)
+    elif fault == "document":
+        # Drift on the final _READY call, before the preceding identity is used to click.
+        def reload_after_ready():
+            f.ui.on_stage["ready"] = lambda: setattr(f.ui, "clock", f.ui.clock + 1)
+        f.ui.on_stage["ready"] = reload_after_ready
+    elif fault == "marker":
+        f.ui.on_stage["insert"] = f.exact.turns.clear
+    elif fault == "config-after-click":
+        def pause():
+            f.i["config"]["chrome_lifecycle"] = "paused"
+            f.save()
+        f.ui.on_stage["click"] = pause
+    else:
+        f.ui.ref_mode = fault
+        f.ui.outbound["turn-old"] = "A different message"
+    first = f.s.run()
+    assert (first.status, first.code) == ("UNKNOWN_EFFECT", expected)
+    assert f.s.run().replayed and f.ui.inserts == 1 and f.ui.clicks == clicks
+
+
+def test_flat05_other_modes_and_legacy_unknown_do_not_send(flat05):
+    f = flat05
+    config, root, registration = f.i["config_path"], f.i["root"], f.i["registration"]
+    assert r.run_read_only(config, root).code == "EXACT_CHAT_SUPERVISOR_REQUIRED"
+    f.context.pages.remove(f.unrelated)
+    assert r.run_native_source_only(config, root).status == "HOLD_DEPENDENCY"
+    event_id = f.i["event"]["event_id"]
+    event = r.Event(event_id, registration.source_sha, 1, digest(f.i["event"]), "GITHUB_AUTHENTICATED")
+    legacy = {"event": asdict(event), "status": "UNKNOWN_EFFECT", "code": "INTERRUPTED_NO_REPLAY",
+              "history": ["PENDING", "RESERVED", "UNKNOWN_EFFECT"], "evidence": {}}
+    journal = r.compose_read_only(config, root).journal
+    with journal.locked(registration) as (txn, data):
+        data["events"][event.key(registration)] = legacy
+        txn.write(data)
+    assert f.s.run().code == legacy["code"] and f.rows()[event_id] == legacy
+    f.sources.targets.reverse()
+    f.save()
+    assert f.s.run().code == "LOCAL_UI_OWNER_AUTHORIZED_TURN_OBSERVED"
+    assert f.rows()[event_id] == legacy and f.ui.clicks == 1
