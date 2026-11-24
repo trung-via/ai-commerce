@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+from threading import Event as StopEvent
 from types import SimpleNamespace
 from typing import Callable, Literal, Protocol
 
@@ -49,6 +50,18 @@ Status = Literal["PENDING", "RESERVED", "UI_TURN_OBSERVED", "USER_TURN_AUTHENTIC
                  "ACK", "BLOCKED_EXTERNAL", "FAILED", "UNKNOWN_EFFECT", "HOLD", "HOLD_DEPENDENCY"]
 _CODE_ROOT = Path(__file__).resolve().parents[3]
 _DELIVERY_STATES = {"UI_TURN_OBSERVED", "USER_TURN_AUTHENTICATED"}
+_LAUNCH_UNKNOWN = "CHROME_LAUNCH_RECONCILE_REQUIRED"
+_ACQUISITION_REPORTED = "CHROME_ACQUISITION_REPORTED"
+# The acquisition API also uses WINDOWS_PROBE_UNAVAILABLE to normalize
+# unrecognized subprocess output. That receipt cannot prove a no-effect HOLD.
+_ACQUISITION_NO_EFFECT = frozenset({
+    "LOCAL_OPERATOR_ONLY", "WINDOWS_INTERACTIVE_REQUIRED", "WINDOWS_TOKEN_UNAVAILABLE",
+    "ELEVATED_CHROME_DISALLOWED", "ENROLLMENT_IDENTITY_UNPROVEN", "OPT_IN_REQUIRED",
+    "WINDOWS_OWNER_CONTEXT_UNVERIFIED", "PROFILE_UNAVAILABLE", "PROFILE_LOCKED",
+    "PROFILE_ALREADY_ACTIVE_NO_CDP", "CHROME_PATH_INVALID", "CHROME_EXECUTABLE_UNTRUSTED",
+    "SUPERVISOR_ACTIVE", "WINDOWS_PROBE_INVALID", "FOREIGN_PORT_OWNER",
+    "BROWSER_OWNERSHIP_UNPROVEN", "CDP_PROTOCOL_UNAVAILABLE",
+})
 _NEXT = {
     "PENDING": {"RESERVED", "BLOCKED_EXTERNAL", "FAILED"},
     "RESERVED": _DELIVERY_STATES | {"UNKNOWN_EFFECT", "BLOCKED_EXTERNAL"},
@@ -66,6 +79,18 @@ class RuntimeHold(ValueError):
 
 class DependencyHold(RuntimeHold):
     """A missing enrolled source owner, never a journal state or a send retry."""
+
+
+def _supervisor_start_authority(registration: Registration, owner: tuple[Path, int, str],
+                                environment: chrome_acquisition.ChromeEnvironment) -> Literal[True] | str:
+    """Seam for the locally enrolled 9444 lifecycle owner.
+
+    A future binding must independently verify current owner, unlocked desktop,
+    pause release, receiver, exact registered target and explicit start consent,
+    bound to the native acquisition boundary. The attended acquisition opt-in
+    and G2 advisory receipts supply no such binding for a logon supervisor.
+    """
+    raise DependencyHold("INTERACTIVE_9444_START_AUTHORITY_UNAVAILABLE")
 
 
 def _require(condition: bool, code: str) -> None:
@@ -427,9 +452,11 @@ class NativeChrome9444:
     evidence_type = "GITHUB_AUTHENTICATED"
 
     def __init__(self, repository_root: Path,
-                 environment: chrome_acquisition.ChromeEnvironment | None = None):
+                 environment: chrome_acquisition.ChromeEnvironment | None = None,
+                 *, supervised: bool = False):
         self.repository_root = repository_root
         self.environment = environment
+        self.supervised = supervised
         self.adapter = LocalChromeDoorbellAdapter(allow_submit=False)
 
     def _owner_snapshot(self) -> tuple:
@@ -437,7 +464,8 @@ class NativeChrome9444:
         _require(type(env) is chrome_acquisition.ChromeEnvironment
                  and env.port == 9444 and env.endpoint == "http://127.0.0.1:9444",
                  "CDP_OWNER_MISMATCH")
-        local, session, sid = chrome_acquisition._enrollment_operator()
+        operator = chrome_acquisition._enrollment_operator
+        local, session, sid = operator(attended=False) if self.supervised else operator()
         current = chrome_acquisition._read_9444_config(
             env.config_path, local, self.repository_root, sid)
         _require(current == env, "CHROME_ENROLLMENT_DRIFT")
@@ -504,7 +532,9 @@ class NativeChrome9444:
         except Exception:
             return "CDP_READ_UNAVAILABLE"
 
-    def preflight(self, registration: Registration, *, exclusive: bool = False) -> str:
+    def preflight(self, registration: Registration, *, exclusive: bool = False,
+                  on_absent: Callable[[tuple[Path, int, str]], str | None] | None = None,
+                  reconcile_launch: bool = False) -> str:
         if self.environment is None:
             return "UNSUPPORTED_NATIVE_OWNER"
         observed = False
@@ -517,12 +547,26 @@ class NativeChrome9444:
             # Two identical native observations are needed even for clean OFF.
             if self._owner_snapshot() != before:
                 return "CHROME_OBSERVATION_CHANGED"
+            if reconcile_launch:
+                return _LAUNCH_UNKNOWN
             if before[0] == "ABSENT":
-                return "CHROME_NOT_RUNNING_NATIVE_LAUNCH_CAPABILITY_REQUIRED"
+                if on_absent is None:
+                    return "CHROME_NOT_RUNNING_NATIVE_LAUNCH_CAPABILITY_REQUIRED"
+                code = on_absent(before[1][:3])
+                if code is not None:
+                    return code
+                after = self._owner_snapshot()
+                if after[1][:4] != before[1][:4]:
+                    return "CHROME_OBSERVATION_CHANGED"
+                if after[0] != "OWNED":
+                    return "CHROME_ACQUISITION_NOT_READY"
+                before = after
             code = self._exact_chat_candidate(registration, exclusive=exclusive)
             if self._owner_snapshot() != before:
                 return "CHROME_OBSERVATION_CHANGED"
             return code
+        except DependencyHold:
+            raise
         except (chrome_acquisition.AcquisitionBlocked, chrome_acquisition._EnrollmentHold,
                 chrome_acquisition._Lifecycle9444Hold,
                 RuntimeHold, HandoffBlocked) as exc:
@@ -983,16 +1027,25 @@ class Runner:
     def __init__(self, *, source: EventSource, registration: Registration, journal: Journal,
                  sender: Sender, orchestrator: ProductionPipelineOrchestrator,
                  grant_verifier: Callable[[Event, Registration], bool],
-                 brain: BrainAdapter | None = None, read_only: bool = False):
+                 brain: BrainAdapter | None = None, read_only: bool = False,
+                 supervisor_stop: Callable[[], bool] | None = None):
         _require(type(orchestrator) is ProductionPipelineOrchestrator, "PRODUCTION_ORCHESTRATOR_REQUIRED")
+        _require(not (read_only and supervisor_stop is not None), "SUPERVISOR_MODE_INVALID")
+        _require(supervisor_stop is None or registration.evidence_type == "GITHUB_AUTHENTICATED",
+                 "SUPERVISOR_MODE_INVALID")
         self.source, self.registration, self.journal = source, registration, journal
         self.sender, self.brain, self.orchestrator = sender, brain, orchestrator
         self.grant_verifier = grant_verifier
         self.read_only = read_only
+        self._supervisor_stop = supervisor_stop
+
+    @property
+    def _observe_only(self) -> bool:
+        return self.read_only or self._supervisor_stop is not None
 
     @property
     def _native(self) -> bool:
-        return not self.read_only and self.registration.evidence_type == "GITHUB_AUTHENTICATED"
+        return not self._observe_only and self.registration.evidence_type == "GITHUB_AUTHENTICATED"
 
     def run_once(self) -> Result:
         evidence = self.registration.evidence_type
@@ -1045,15 +1098,16 @@ class Runner:
         if self.registration.evidence_type != "GITHUB_AUTHENTICATED":
             _require(not self.read_only, "READ_ONLY_COMPOSITION_INVALID")
             return
-        native_owner = NativeChrome9444 if self.read_only else NativeSender
+        native_owner = NativeChrome9444 if self._observe_only else NativeSender
         if type(self.sender) is not native_owner:
             raise DependencyHold("UNSUPPORTED_NATIVE_OWNER")
         _require(type(self.source) is GitHubEventSource, "AUTHENTICATED_SOURCE_REQUIRED")
-        if self._native:
+        if self._native or self._supervisor_stop is not None:
             if (type(self.grant_verifier) is not _RegisteredWakeAuthority
-                    or self.grant_verifier.native_source_only is not True
+                    or self.grant_verifier.native_source_only is not self._native
                     or self.grant_verifier.source is not self.source):
                 raise DependencyHold("SIGNED_WAKE_AUTHORITY_UNAVAILABLE")
+        if self._native:
             # Reject a substituted native response owner. Omitting response
             # acquisition, or using the closed source owner, permits Send-only.
             if self.brain is not None and type(self.brain) is not NativeBrainAdapter:
@@ -1066,6 +1120,9 @@ class Runner:
             return self._finish(txn, data, record, "BLOCKED_EXTERNAL", "SOURCE_DRIFT")
         if event.evidence_type != evidence or self.sender.evidence_type != evidence:
             return self._finish(txn, data, record, "BLOCKED_EXTERNAL", "EVIDENCE_MODE_MISMATCH")
+        launch_unknown = record["code"] == _LAUNCH_UNKNOWN
+        if launch_unknown and self._supervisor_stop is None:
+            return Result("UNKNOWN_EFFECT", _LAUNCH_UNKNOWN, evidence, replayed=True)
         self._check_composition()
         try:
             authorization = self.grant_verifier.authorize(event, registration) if self._native else None
@@ -1074,13 +1131,22 @@ class Runner:
             if not granted:
                 if self._native:
                     return Result("HOLD_DEPENDENCY", "MISSING_GRANT", evidence)
-                if self.read_only:
+                if self._observe_only:
                     return Result("HOLD", "MISSING_GRANT", evidence)
                 return self._finish(txn, data, record, "BLOCKED_EXTERNAL", "MISSING_GRANT")
-            code = self.sender.preflight(registration)
+            if self._supervisor_stop is None:
+                code = self.sender.preflight(registration)
+            else:
+                if self._supervisor_stop():
+                    return Result("HOLD", "SUPERVISOR_STOPPED", evidence)
+                code = self.sender.preflight(
+                    registration, reconcile_launch=launch_unknown,
+                    on_absent=lambda owner: self._acquire_chrome(txn, data, record, event, owner))
+                if record["code"] == _LAUNCH_UNKNOWN:
+                    return Result("UNKNOWN_EFFECT", _LAUNCH_UNKNOWN, evidence, replayed=launch_unknown)
             valid_code = type(code) is str and re.fullmatch(r"[A-Z][A-Z0-9_]{0,95}", code) is not None
-            _require(valid_code or (code is None and not self.read_only), "PREFLIGHT_RESULT_INVALID")
-            if self.read_only:
+            _require(valid_code or (code is None and not self._observe_only), "PREFLIGHT_RESULT_INVALID")
+            if self._observe_only:
                 _require(self.grant_verifier(event, registration) is True, "MISSING_GRANT")
                 return Result("HOLD", code, evidence)
             if code is not None:
@@ -1124,6 +1190,55 @@ class Runner:
         self._save_delivery(txn, data, record, status, proof)
         return self._respond(txn, data, record, event, observation, replayed=False)
 
+    def _acquire_chrome(self, txn, data: dict, record: dict, event: Event,
+                        owner: tuple[Path, int, str]) -> str | None:
+        # Called only after stable, independently observed absence, under the
+        # existing journal lock. This code on PENDING is separate from Send.
+        if record["code"] == _ACQUISITION_REPORTED:
+            return "CHROME_ACQUISITION_NOT_READY"
+        if any(saved["code"] == _LAUNCH_UNKNOWN for saved in data["events"].values()):
+            return _LAUNCH_UNKNOWN
+        environment = self.sender.environment
+        authority = _supervisor_start_authority(self.registration, owner, environment)
+        if authority is not True:
+            return authority if type(authority) is str else "INTERACTIVE_9444_START_AUTHORITY_UNAVAILABLE"
+        try:
+            target, _ = chrome_acquisition._clean_target(owner)
+        except (chrome_acquisition._Clean9444Hold, OSError) as exc:
+            return _safe_code(exc, "CHROME_ACQUISITION_TARGET_UNAVAILABLE")
+        if target.command() != environment.command() or target.endpoint != environment.endpoint:
+            return "CHROME_ACQUISITION_TARGET_MISMATCH"
+        if self.grant_verifier(event, self.registration) is not True:
+            return "MISSING_GRANT"
+        if self._supervisor_stop():
+            return "SUPERVISOR_STOPPED"
+        state, identity = self.sender._owner_snapshot()
+        if state != "ABSENT" or identity[:3] != owner:
+            return "CHROME_OBSERVATION_CHANGED"
+        record["code"] = _LAUNCH_UNKNOWN
+        txn.write(data)
+        if self._supervisor_stop():
+            record["code"] = "EVENT_PENDING"
+            txn.write(data)
+            return "SUPERVISOR_STOPPED"
+        try:
+            receipt = chrome_acquisition.ensure_clean_9444(opt_in=True)
+        except Exception:
+            return _LAUNCH_UNKNOWN
+        if (type(receipt) is not dict or set(receipt) != {"status", "code"}
+                or type(receipt["status"]) is not str or type(receipt["code"]) is not str):
+            return _LAUNCH_UNKNOWN
+        status, code = receipt["status"], receipt["code"]
+        if status == "HOLD" and code in _ACQUISITION_NO_EFFECT:
+            record["code"] = "EVENT_PENDING"
+            txn.write(data)
+            return code
+        if status in ("STARTED", "REUSE") and code == "CDP_VERIFIED":
+            record["code"] = _ACQUISITION_REPORTED
+            txn.write(data)
+            return None
+        return _LAUNCH_UNKNOWN
+
     def _effect_code(self, outcome: cdp_turn.SendOutcome, error: Exception | None = None) -> str:
         if self._native:
             return NativeTurnAuthority.post_reservation_code(self.sender.turn_authority, outcome=outcome)
@@ -1134,16 +1249,16 @@ class Runner:
         status, code = record["status"], record["code"]
         saved = Result(status, code, evidence, replayed=True)
         if evidence == "GITHUB_AUTHENTICATED":
-            if self.read_only and status in ("USER_TURN_AUTHENTICATED", "BRAIN_CORRELATED", "ACK"):
+            if self._observe_only and status in ("USER_TURN_AUTHENTICATED", "BRAIN_CORRELATED", "ACK"):
                 return Result("HOLD", "NATIVE_RECEIPT_UNPROVEN", evidence, replayed=True)
             if status in ("BRAIN_CORRELATED", "ACK"):
                 return Result("HOLD_DEPENDENCY", "BRAIN_RECEIPT_UNAVAILABLE", evidence, replayed=True)
         if status == "BRAIN_CORRELATED":
-            if not self.read_only and "consumer_receipt" in record["evidence"]:
+            if not self._observe_only and "consumer_receipt" in record["evidence"]:
                 self._move(txn, data, record, "ACK", "CONSUMER_RECEIPT_RECORDED")
                 return Result("ACK", "CONSUMER_RECEIPT_RECORDED", evidence, replayed=True)
             return saved
-        if status in _DELIVERY_STATES and not self.read_only:
+        if status in _DELIVERY_STATES and not self._observe_only:
             observation = self._saved_observation(record, event)
             if status == "USER_TURN_AUTHENTICATED":
                 self._check_composition()
@@ -1154,7 +1269,7 @@ class Runner:
         if status in ("UNKNOWN_EFFECT", "BLOCKED_EXTERNAL") and "UI_TURN_OBSERVED" in record["history"]:
             # Legacy rows retain their original history and their delivery evidence.
             return Result("UI_TURN_OBSERVED", code, evidence, replayed=True)
-        if (self.read_only or status != "UNKNOWN_EFFECT" or record["evidence"]
+        if (self._observe_only or status != "UNKNOWN_EFFECT" or record["evidence"]
                 or record["history"] != ["PENDING", "RESERVED", "UNKNOWN_EFFECT"]):
             return saved
 
@@ -1483,7 +1598,8 @@ def compose_native_source_only(config_path: Path, repository_root: Path) -> Runn
     return _compose_registered(config_path, repository_root, native_source_only=True)
 
 
-def _compose_registered(config_path: Path, repository_root: Path, *, native_source_only: bool) -> Runner:
+def _compose_registered(config_path: Path, repository_root: Path, *, native_source_only: bool,
+                        supervisor_stop: Callable[[], bool] | None = None) -> Runner:
     config = _read_owned_json(config_path, repository_root)
     _require(set(config) == {"schema", "registration", "marker", "registered_source",
              "registry", "journal", "chrome_config", "grants", "caller_id"}
@@ -1552,9 +1668,11 @@ def _compose_registered(config_path: Path, repository_root: Path, *, native_sour
     return Runner(source=source, registration=registration,
                   journal=Journal(paths["journal"], repository_root),
                   sender=(NativeSender(repository_root, registration, environment) if native_source_only
-                          else NativeChrome9444(repository_root, environment)), brain=NativeBrainAdapter(),
+                          else NativeChrome9444(repository_root, environment,
+                                                supervised=supervisor_stop is not None)), brain=NativeBrainAdapter(),
                   orchestrator=ProductionPipelineOrchestrator(), grant_verifier=verify_local_authority,
-                  read_only=not native_source_only)
+                  read_only=not native_source_only and supervisor_stop is None,
+                  supervisor_stop=supervisor_stop)
 
 
 def run_read_only(config_path: Path | None, repository_root: Path, *, dry_run: bool = False) -> Result:
@@ -1580,6 +1698,87 @@ def _run_registered(config_path: Path | None, repository_root: Path, *, dry_run:
         return Result("HOLD", _safe_code(exc, "LOCAL_AUTHORITY_UNPROVEN"), "GITHUB_AUTHENTICATED")
     except (OSError, ValueError, TypeError, KeyError, RecursionError):
         return Result("HOLD", "LOCAL_AUTHORITY_INVALID", "GITHUB_AUTHENTICATED")
+
+
+@contextmanager
+def _supervisor_slot():
+    """One receiver across Windows sessions, released automatically on exit."""
+    if os.name != "nt":
+        raise RuntimeHold("WINDOWS_INTERACTIVE_REQUIRED")
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateMutexExW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD]
+    kernel.CreateMutexExW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    ctypes.set_last_error(0)
+    # The existing clean-launch mutex remains owned by the acquisition command.
+    handle = kernel.CreateMutexExW(None, r"Global\AI-Commerce-WakeHub-9444-Receiver-v1", 0, 0x100000)
+    error = ctypes.get_last_error()
+    _require(bool(handle), "SUPERVISOR_SLOT_UNAVAILABLE")
+    try:
+        _require(error != 183, "SUPERVISOR_ACTIVE")  # ERROR_ALREADY_EXISTS
+        yield
+    finally:
+        kernel.CloseHandle(handle)
+
+
+class SupervisorStop(Protocol):
+    def is_set(self) -> bool: ...
+    def wait(self, timeout: float) -> bool: ...
+
+
+def supervise(tick: Callable[[], Result], *, stop: SupervisorStop, max_ticks: int | None = None,
+              idle_seconds: int = 30, max_backoff_seconds: int = 300) -> Result:
+    """Run serial ticks under a receiver slot, interruptible between ticks."""
+    stopped = Result("HOLD", "SUPERVISOR_STOPPED", "SOURCE_ONLY")
+    if (type(idle_seconds) is not int or type(max_backoff_seconds) is not int
+            or not 1 <= idle_seconds <= max_backoff_seconds <= 3600
+            or (max_ticks is not None and (type(max_ticks) is not int or max_ticks < 1))):
+        return Result("HOLD", "SUPERVISOR_BUDGET_INVALID", "SOURCE_ONLY")
+    if stop.is_set():
+        return stopped
+    try:
+        with _supervisor_slot():
+            delay = idle_seconds
+            count = 0
+            while not stop.is_set():
+                result = tick()
+                count += 1
+                if stop.is_set():
+                    break
+                if count == max_ticks:
+                    return result
+                idle = result.code == "NO_EVENT" or result.status in ("ACK", "UI_TURN_OBSERVED",
+                                                                     "USER_TURN_AUTHENTICATED")
+                if idle:
+                    delay = idle_seconds
+                if stop.wait(delay):
+                    break
+                if not idle:
+                    delay = min(max_backoff_seconds, 2 * delay)
+    except RuntimeHold as exc:
+        return Result("HOLD", _safe_code(exc, "SUPERVISOR_SLOT_UNAVAILABLE"), "SOURCE_ONLY")
+    except KeyboardInterrupt:
+        pass
+    return stopped
+
+
+def run_supervisor(config_path: Path | None, repository_root: Path, *, dry_run: bool = False,
+                   max_ticks: int | None = None, idle_seconds: int = 30,
+                   max_backoff_seconds: int = 300) -> Result:
+    if dry_run:
+        return Result("HOLD", "DRY_RUN_NO_EFFECTS", "SOURCE_ONLY")
+    stop = StopEvent()
+
+    def compose(path: Path, root: Path) -> Runner:
+        return _compose_registered(path, root, native_source_only=False, supervisor_stop=stop.is_set)
+
+    return supervise(lambda: _run_registered(config_path, repository_root, dry_run=False, compose=compose),
+                     stop=stop, max_ticks=max_ticks, idle_seconds=idle_seconds,
+                     max_backoff_seconds=max_backoff_seconds)
 
 
 def diagnostic(path: Path, repository_root: Path) -> Result:
