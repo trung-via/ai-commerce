@@ -35,6 +35,9 @@ def main(argv: list[str] | None = None) -> int:
     supervisor.add_argument("--max-backoff-seconds", type=int, default=300,
                             help="Maximum retry delay per source and for Chrome demand-start (default 300).")
     supervisor.add_argument("--dry-run", action="store_true", help="Report wiring without acquiring the receiver.")
+    supervisor.add_argument("--observe-only", action="store_true",
+                            help="Read Chrome health from the owner desktop using an existing private config. "
+                                 "Stops on config drift and disables source admission, preload, demand start and Send.")
     run = sub.add_parser("run", help="Verify one registered event and read-only readiness; exits HOLD.")
     mode = run.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true",
@@ -80,7 +83,9 @@ def main(argv: list[str] | None = None) -> int:
                                 max_ticks=args.max_ticks, idle_seconds=args.idle_seconds,
                                 max_backoff_seconds=args.max_backoff_seconds,
                                 on_health=lambda code: print(json.dumps({"chrome_health": code}),
-                                                             file=sys.stderr, flush=True))
+                                                             file=sys.stderr, flush=True),
+                                observe_only=args.observe_only,
+                                _deployment=globals().get("_PROTECTED_DEPLOYMENT"))
         print(json.dumps(result.to_dict(), sort_keys=True))
         return 0 if result.code == "SUPERVISOR_STOPPED" else 2
     if args.diagnostic:
