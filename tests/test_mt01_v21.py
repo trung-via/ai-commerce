@@ -91,6 +91,42 @@ def test_explicit_package_import_keeps_real_consumer_and_multihop(tmp_path):
     assert impact.selected_groups == ("bridge", "commerce", "creative")
 
 
+def test_proven_bridge_symbol_change_narrows_ancestor_import_coverage(tmp_path, monkeypatch):
+    from ai_commerce.engineering import impact_v21
+
+    bridge = "src/ai_commerce/opportunity/bridge/briefs.py"
+    personal = "src/ai_commerce/hostops_v3/personal.py"
+    handoff = "src/ai_commerce/creative/v2.py"
+    mk(tmp_path, bridge, "def validate_bridge(): pass\ndef format_brief(): pass\n")
+    mk(tmp_path, "src/ai_commerce/opportunity/__init__.py",
+       "from .bridge.briefs import format_brief\n")
+    mk(tmp_path, "src/ai_commerce/opportunity/core/models.py", "class Signal: pass\n")
+    mk(tmp_path, personal, "from ai_commerce.opportunity.core.models import Signal\n")
+    mk(tmp_path, "src/ai_commerce/production_orchestration/orchestrator.py",
+       "from ai_commerce.opportunity.bridge.briefs import validate_bridge\n")
+    mk(tmp_path, handoff, "from ai_commerce.production_orchestration.orchestrator import validate_bridge\n")
+    groups = (
+        group("bridge", ("tests/test_brief.py",), (bridge,)),
+        group("media", ("tests/test_media.py",), (), contracts=(handoff,)),
+        group("personal", ("tests/test_personal.py",), (personal,)),
+        group("reconcile", ("tests/test_reconcile.py",), (), consumers=(personal,)),
+    )
+    for owner in groups:
+        mk(tmp_path, owner.tests[0])
+
+    uncertain = select_impact(root=tmp_path, changed_paths=(bridge,), groups=groups)
+    assert uncertain.selected_groups == ("bridge", "media", "personal", "reconcile")
+    assert uncertain.mode == "AFFECTED"
+    # Inject only the binding delta normally read from an immutable baseline.
+    # The imports and reviewed A04/HostOps coverage are resolved from disk.
+    monkeypatch.setattr(impact_v21, "_changed_module_symbols", lambda *_: {"validate_bridge"})
+    proven = select_impact(root=tmp_path, changed_paths=(bridge,), groups=groups)
+    assert proven.mode == "AFFECTED"
+    assert proven.selected_groups == ("bridge", "media")
+    assert proven.selected_tests == ("tests/test_brief.py", "tests/test_media.py")
+    assert personal not in proven.affected_paths
+
+
 def test_r3_additive_facade_selects_changed_symbols_not_unchanged_importers(tmp_path):
     """#1096 regression: A03/A04 remain covered without unrelated WakeHub/BQ."""
     import subprocess
@@ -1651,7 +1687,7 @@ def test_mt01_impact_control_only_selects_reviewed_self_tests():
 
 
 def test_bq01a_current_owner_closure_keeps_b0_imports_but_not_test_only_fanout():
-    """A package edit reaches receipt; editing its test cannot reach B0."""
+    """A package edit reaches runtime consumers; editing its test stays local."""
     import subprocess
     from ai_commerce.engineering.impact_v21 import load_baseline_component_owner_records
     from ai_commerce.engineering.minimum_test import approved_groups, digest, import_graph
@@ -1667,23 +1703,29 @@ def test_bq01a_current_owner_closure_keeps_b0_imports_but_not_test_only_fanout()
     package = "src/ai_commerce/creative_quality/__init__.py"
     receipt = "src/ai_commerce/production_runtime/receipt.py"
     worker = "src/ai_commerce/production_runtime/attended_worker.py"
-    sources = {p: digest((root / p).read_bytes()) for p in (package, receipt, worker)}
+    orchestrator = "src/ai_commerce/production_orchestration/orchestrator.py"
+    sources = {p: digest((root / p).read_bytes()) for p in (package, receipt, worker, orchestrator)}
     graph, complete = import_graph(root, sources)
     assert complete and package in graph[receipt] and receipt in graph[worker]
+    assert receipt in graph[orchestrator]
+    assert worker in by_name["a04-pulse-handoff"].consumers
+    assert orchestrator in by_name["production-orchestration"].paths
+    assert orchestrator in by_name["wakehub-runtime"].consumers
 
     affected = select_impact(root=root, changed_paths=[package], groups=groups)
     # Without immutable proof of an additive facade-only change, preserve
-    # the conservative package-initializer consumer closure.
+    # the package-initializer closure through receipt into the PULSE worker
+    # and orchestrator, both covered by reviewed owner registrations.
     expected = (
-        "a03", "b0-3", "b0-4", "b0-s", "b0-s3", "b0-s3b",
+        "a03", "a04-pulse-handoff", "b0-3", "b0-4", "b0-s", "b0-s3", "b0-s3b",
         "b1-3-audio", "b1-3-subtitle", "b3-next-brief", "b3-operations-dashboard",
         "b3-portfolio", "bq-01a", "bq-01b", "bq-02a", "bq-02b", "bq-03a",
         "bq-03b", "bq-04a", "bq-04b", "bq-05a", "bq-05b0", "bq-05b1",
-        "bq-06a", "bq-06b",
+        "bq-06a", "bq-06b", "production-orchestration", "wakehub-runtime",
     )
     assert affected.runnable and not affected.missing_mapping
     assert affected.selected_groups == expected
-    assert {package, receipt, worker} <= set(affected.affected_paths)
+    assert {package, receipt, worker, orchestrator} <= set(affected.affected_paths)
     for name in ("b0-3", "b0-4", "b0-s", "b0-s3", "b0-s3b"):
         assert receipt in (*by_name[name].paths, *by_name[name].consumers)
     for name in expected[1:]:
@@ -1703,7 +1745,7 @@ def test_bq01a_current_owner_closure_keeps_b0_imports_but_not_test_only_fanout()
     assert test_only.selected_tests == tuple(sorted({
         path for name in ("a03", "bq-01a") for path in by_name[name].tests
     }))
-    assert receipt not in test_only.affected_paths and worker not in test_only.affected_paths
+    assert not {package, receipt, worker, orchestrator} & set(test_only.affected_paths)
 
 
 def test_windows_collection_sandbox_control_selects_registered_owner_after_recovery(tmp_path):
