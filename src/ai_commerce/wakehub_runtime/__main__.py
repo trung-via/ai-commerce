@@ -7,23 +7,24 @@ from pathlib import Path
 import sys
 
 from .runner import (
-    Result, RuntimeHold, _CODE_ROOT, diagnostic, register_local_chat, run_native_source_only, run_read_only,
-    run_supervisor,
+    Result, RuntimeHold, _CODE_ROOT, diagnostic, probe_local_ui_account, register_local_chat,
+    run_native_source_only, run_read_only, run_supervisor,
 )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Source-only WakeHub intake for exact EF02 runs and GitHub Issue creations. "
+        description="WakeHub intake for exact EF02 runs and GitHub Issue creations. "
                     "Chrome 9444 readiness and locally opted-in exact-chat preload. "
-                    "No UI Send, "
-                    "login, scheduler, HostOps or GitHub writes.")
+                    "Scoped UI Send is available only through the supervisor with enrolled local evidence.")
     sub = parser.add_subparsers(dest="command", required=True)
     supervisor = sub.add_parser(
         "supervise", help="Run serial ticks for the interactive owner on Windows.",
         description="Observe Chrome 9444 by default. An owner-controlled private runtime config may set "
                     "chrome_lifecycle to demand-start for the verified demand task, or paused to withhold effects. "
-                    "Set chat_preload to true to allow dedicated-browser preload after local registration.")
+                    "Set chat_preload to true to allow dedicated-browser preload after local registration. "
+                    "Use register account for the current local UI scope before opting in to exact source grants. "
+                    "Without private ui_delivery consent, Send is disabled.")
     supervisor.add_argument("--max-ticks", type=int,
                             help="Count all ticks, including Chrome health ticks with no eligible source.")
     supervisor.add_argument("--idle-seconds", type=int, default=30,
@@ -54,7 +55,25 @@ def main(argv: list[str] | None = None) -> int:
     prepare = actions.add_parser("prepare", help="Print a fresh private marker for manual presentation.")
     observe = actions.add_parser("observe", help="Verify and consume that marker in the exact Chat A.")
     observe.add_argument("registration_id")
-    for command in (run, supervisor, prepare, observe):
+    account = actions.add_parser(
+        "account", help="Read the enrolled Chat A account scope and print private commitments.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="FLAT07 read-only probe for the owner in the enrolled Windows desktop and Chrome profile. "
+                    "After register observe succeeds, keep the exact Chat A tab and manually open its nonmodal "
+                    "Account or Profile menu. Run this command with the menu visible and the unobstructed "
+                    "composer focused. "
+                    "The reader requires a single visible 'Signed in as: <address>' text row in the app menu "
+                    "controlled by its named Account or Profile button. Live support for that surface is unverified. "
+                    "Repeat with the menu closed to verify evidence becomes unavailable. Reopen it to verify the "
+                    "same commitment. If the menu is missing, ambiguous, or cannot stay visible with the composer "
+                    "unobstructed, keep delivery on HOLD.",
+        epilog="Keep the output in the owner terminal. Confirm the visible account is the one you intend to "
+               "authorize, then copy "
+               "the five commitment fields into private ui_delivery with schema WakeHubLocalUIDelivery.v1. "
+               "session_sha256 is null when visible session identity is unavailable. Add grants only for "
+               "the exact source events you authorize. Use their source_key from the registered source route "
+               "result and an expires_ms UTC epoch deadline. This probe creates no grant and stages no turn.")
+    for command in (run, supervisor, prepare, observe, account):
         command.add_argument("--repository-root", type=Path, help="Checkout excluded from private journal storage.")
         command.add_argument("--config", type=Path,
                              help="Existing private WakeHubRuntimeR1.v1 local config; never an Issue payload.")
@@ -62,6 +81,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "register":
         configured = os.environ.get("AI_COMMERCE_WAKEHUB_CONFIG")
         config = args.config if args.config is not None else Path(configured) if configured else None
+        if args.action == "account":
+            result = probe_local_ui_account(config, args.repository_root or _CODE_ROOT)
+            print(json.dumps(result.to_dict(), sort_keys=True))
+            return 0 if result.code == "LOCAL_UI_ACCOUNT_SCOPE_OBSERVED" else 2
         result = register_local_chat(config, args.repository_root or _CODE_ROOT,
                                      registration_id=getattr(args, "registration_id", None))
         if not isinstance(result, Result):

@@ -1,7 +1,7 @@
 """WakeHub source admission, local route readiness and its private SQLite journal."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 import json
@@ -57,6 +57,8 @@ _ISSUE = "github-issue-created"
 _ISSUE_EVIDENCE = "GITHUB_ISSUE_AUTHENTICATED"
 _ISSUE_ACCEPTED = "ISSUE_CREATED_SOURCE_ACCEPTED"
 _ISSUE_ROUTE_DEPENDENCY = "ISSUE_CREATED_ROUTE_AUTHORITY_UNAVAILABLE"
+_UI_SEND_RESERVED = "LOCAL_UI_SEND_RESERVED"
+_UI_STAGING = "LOCAL_UI_STAGING"
 _MAX_TARGETS = 16
 _CHROME_READY = {"CHROME_OWNED", "CHROME_OWNED_LAUNCH_UNRESOLVED"}
 # These returns from the fixed task script precede RunEx.
@@ -409,16 +411,22 @@ class DoorbellRequest:
     binding: ResolvedBinding
     marker: str
     canonical_bytes: bytes
+    source_identity: SourceIdentity | None = None
 
     def __post_init__(self) -> None:
+        identity = self.source_identity
+        _require(identity is None or type(identity) is SourceIdentity, "DOORBELL_REQUEST_INVALID")
+        issue = identity is not None and identity.kind == _ISSUE
+        repository = identity.repository if identity is not None else REPOSITORY
         _require(type(self.event_id) is str
-                 and re.fullmatch(r"ef02-completion-v1:[0-9a-f]{64}", self.event_id) is not None
+                 and (self.event_id == "github-issue-created-v1:" + identity.key and self.event_key == identity.key
+                      if issue else cdp_doorbell._EVENT.fullmatch(self.event_id) is not None)
                  and type(self.event_key) is str and re.fullmatch(r"[0-9a-f]{64}", self.event_key) is not None
                  and type(self.binding) is ResolvedBinding
                  and self.binding.cdp_endpoint == "http://127.0.0.1:9444" and _reference(self.marker)
                  and type(self.canonical_bytes) is bytes
                  and self.canonical_bytes == cdp_doorbell._doorbell_text(
-                     self.event_id, "trung-via/ai-commerce", send_only=True).encode("utf-8"),
+                     self.event_id, repository, send_only=True).encode("utf-8"),
                  "DOORBELL_REQUEST_INVALID")
 
     @classmethod
@@ -428,6 +436,17 @@ class DoorbellRequest:
         return cls(event.event_id, event.key(registration), registration.binding, registration.marker,
                    cdp_doorbell._doorbell_text(event.event_id, "trung-via/ai-commerce",
                                                send_only=True).encode("utf-8"))
+
+    @classmethod
+    def for_source(cls, event: SourceEvent, registration: Registration) -> DoorbellRequest:
+        identity = event.identity
+        if identity.kind == _EF02:
+            return replace(cls.for_event(event.payload, registration), source_identity=identity)
+        event.payload.check_route(registration)
+        event_id = "github-issue-created-v1:" + identity.key
+        content = cdp_doorbell._doorbell_text(event_id, identity.repository, send_only=True)
+        return cls(event_id, identity.key, registration.binding, registration.marker,
+                   content.encode("utf-8"), identity)
 
 
 def _turn_request(registration: Registration, event: Event, request: DoorbellRequest,
@@ -788,8 +807,9 @@ class NativeChrome9444:
         except Exception:
             return "CDP_READ_UNAVAILABLE"
 
-    def local_chat(self, binding: ResolvedBinding, *, marker_digest: str | None = None) -> str:
-        """Read one exact tab and optionally its committed USER-turn marker."""
+    def local_chat(self, binding: ResolvedBinding, *, marker_digest: str | None = None,
+                   read_account: bool = False) -> str | cdp_doorbell.LocalUIAccountEvidence:
+        """Read one exact tab, its committed USER marker, and optional account."""
         try:
             with self.adapter.inventory._browser(binding.cdp_endpoint) as browser:
                 contexts = list(browser.contexts)
@@ -813,6 +833,10 @@ class NativeChrome9444:
                 page = matches[0]
                 if page.url != binding.chat_url:
                     return "EXACT_CHAT_URL_DRIFT"
+                if read_account:
+                    clock = page.evaluate(cdp_doorbell._DOCUMENT_CLOCK)
+                    if type(clock) not in (int, float) or not 0 < clock < 2**53:
+                        return "EXACT_CHAT_OBSERVATION_CHANGED"
                 code = cdp_doorbell._preload_surface_code(page)
                 if code == "CANDIDATE_READY" and marker_digest is not None:
                     marker = page.evaluate(cdp_doorbell._WH03_COMMITTED_SIGNAL_DOM,
@@ -822,11 +846,17 @@ class NativeChrome9444:
                         "TEST_SIGNAL_NOT_FOUND": "LOCAL_USER_MARKER_MISSING",
                         "TEST_SIGNAL_AMBIGUOUS": "LOCAL_USER_MARKER_AMBIGUOUS",
                     }.get(marker, "LOCAL_USER_MARKER_UNPROVEN")
+                if read_account and code == "LOCAL_USER_MARKER_OBSERVED":
+                    try:
+                        code = cdp_doorbell._read_local_ui_account(self.adapter.inventory, page)
+                    except ValueError:
+                        code = "LOCAL_UI_ACCOUNT_EVIDENCE_UNAVAILABLE"
                 current_contexts = list(browser.contexts)
                 current_tabs = candidates()
                 if (len(current_contexts) != 1 or current_contexts[0] is not context
                         or len(current_tabs) != 1 or current_tabs[0] is not page
-                        or page.url != binding.chat_url):
+                        or page.url != binding.chat_url
+                        or (read_account and page.evaluate(cdp_doorbell._DOCUMENT_CLOCK) != clock)):
                     return "EXACT_CHAT_OBSERVATION_CHANGED"
                 return code
         except RuntimeHold as exc:
@@ -1047,6 +1077,15 @@ class Result:
         return asdict(self)
 
 
+@dataclass(frozen=True, kw_only=True, repr=False)
+class LocalUIEnrollmentResult(Result):
+    route_marker: str
+    registration_id: str
+    marker_digest: str
+    account_sha256: str
+    session_sha256: str | None
+
+
 @dataclass(frozen=True, kw_only=True)
 class SupervisorTickResult(Result):
     chrome_health: str
@@ -1254,6 +1293,36 @@ def _event_columns(raw: dict, registration: Registration) -> tuple:
     return raw.get("event_id"), raw.get("source_sha"), raw.get("attempt")
 
 
+def _validate_local_send(record: dict, request: DoorbellRequest, registration: Registration) -> None:
+    proof = record["evidence"]
+    reservation = proof["local_send"]
+    _require(type(reservation) is dict and set(reservation) == {
+        "phase", "doorbell_sha256", "consent_sha256",
+    } and reservation["doorbell_sha256"] == bytes_digest(request.canonical_bytes)
+        and _chrome_digest(reservation["consent_sha256"])
+        and proof.get("local_route", {}).get("readiness") in _EXACT_ROUTE_READY,
+        "LOCAL_UI_RESERVATION_INVALID")
+    status = record["status"]
+    phase = reservation["phase"]
+    expected_history = ["PENDING", "RESERVED"]
+    expected_proof = {"local_route", "local_send"}
+    if status == "RESERVED":
+        _require((phase, record["code"]) in (("PRE_STAGE", _UI_SEND_RESERVED), ("STAGING", _UI_STAGING)),
+                 "LOCAL_UI_RESERVATION_INVALID")
+    else:
+        _require(status in ("UI_TURN_OBSERVED", "UNKNOWN_EFFECT") and phase == "STAGING",
+                 "LOCAL_UI_RESERVATION_INVALID")
+        expected_history.append(status)
+        if status == "UI_TURN_OBSERVED":
+            ref = proof.get("user_turn_ref")
+            _require(type(ref) is str and cdp_doorbell._UI_TURN_REF.fullmatch(ref) is not None
+                     and proof.get("marker") == registration.marker and record["code"] == "UI_USER_TURN_OBSERVED",
+                     "JOURNAL_PROOF_INVALID")
+            expected_proof.update(("user_turn_ref", "marker"))
+    _require(record["history"] == expected_history and set(proof) == expected_proof,
+             "LOCAL_UI_RESERVATION_INVALID")
+
+
 def _validate_records(data: dict, registration: Registration) -> None:
     _require(type(data["events"]) is dict and len(data["events"]) <= 128, "JOURNAL_INVALID")
     sources = data["source_identities"]
@@ -1274,31 +1343,41 @@ def _validate_records(data: dict, registration: Registration) -> None:
         if "local_route" in record["evidence"]:
             _validate_route_receipt(record["evidence"]["local_route"], by_event.get(key),
                                     registration, data.get("local_origin"))
+        is_issue = record["event"].get("kind") == _ISSUE
         try:
-            if record["event"].get("kind") == _ISSUE:
+            if is_issue:
                 issue = _issue_record_event(record["event"], registration)
-                _require(key == issue.identity.key and by_event.get(key) == issue.identity
-                         and record["status"] == "PENDING" and record["history"] == ["PENDING"]
-                         and record["code"] == _ISSUE_ACCEPTED
-                         and record["evidence"].keys() <= {"local_route"},
-                         "JOURNAL_INVALID")
-                continue
-            saved = Event(**record["event"])
+                _require(key == issue.identity.key and by_event.get(key) == issue.identity, "JOURNAL_INVALID")
+                if "local_send" not in record["evidence"]:
+                    _require(record["status"] == "PENDING" and record["history"] == ["PENDING"]
+                             and record["code"] == _ISSUE_ACCEPTED and record["evidence"].keys() <= {"local_route"},
+                             "JOURNAL_INVALID")
+                    continue
+            else:
+                saved = Event(**record["event"])
+                _require(saved.key(registration) == key and saved.event_id not in seen, "JOURNAL_INVALID")
+                seen.add(saved.event_id)
+                if key in by_event:
+                    identity = by_event[key]
+                    _require(identity.kind == _EF02 and identity.attempt == saved.attempt
+                             and saved.evidence_type == "GITHUB_AUTHENTICATED", "JOURNAL_INVALID")
         except (TypeError, RuntimeHold):
             raise RuntimeHold("JOURNAL_INVALID") from None
-        _require(saved.key(registration) == key and saved.event_id not in seen
-                 and type(record["history"]) is list and 1 <= len(record["history"]) <= 6
+        _require(type(record["history"]) is list and 1 <= len(record["history"]) <= 6
                  and record["history"][0] == "PENDING" and record["status"] == record["history"][-1]
                  and type(record["code"]) is str
                  and re.fullmatch(r"[A-Z][A-Z0-9_]{0,95}", record["code"]) is not None, "JOURNAL_INVALID")
-        seen.add(saved.event_id)
-        if key in by_event:
-            identity = by_event[key]
-            _require(identity.kind == _EF02 and identity.attempt == saved.attempt
-                     and saved.evidence_type == "GITHUB_AUTHENTICATED", "JOURNAL_INVALID")
         _require(all(b in _NEXT.get(a, set()) for a, b in
                      zip(record["history"], record["history"][1:])), "JOURNAL_INVALID")
         proof = record["evidence"]
+        if "local_send" in proof:
+            _require(key in by_event, "LOCAL_UI_RESERVATION_INVALID")
+            source = issue if is_issue else SourceEvent(by_event[key], saved.payload_sha256, saved)
+            _validate_local_send(record, DoorbellRequest.for_source(source, registration), registration)
+            if record["status"] == "UI_TURN_OBSERVED":
+                _require(proof["user_turn_ref"] not in seen_turns, "USER_TURN_REFERENCE_REUSED")
+                seen_turns.add(proof["user_turn_ref"])
+            continue
         delivery = _DELIVERY_STATES.intersection(record["history"])
         if delivery:
             _require(sum(state in _DELIVERY_STATES for state in record["history"]) == 1
@@ -1444,6 +1523,40 @@ class Journal:
         actual = json.dumps(_decode_unique(rows[0][1]), sort_keys=True)
         _require(actual == json.dumps(asdict(registration), sort_keys=True), "REGISTRATION_DRIFT")
 
+    @staticmethod
+    def _read_local_origin(db, registration: Registration) -> dict:
+        rows = db.execute("SELECT singleton, record FROM local_origin").fetchall()
+        _require(len(rows) == 1 and rows[0][0] == 1, "LOCAL_ORIGIN_JOURNAL_INVALID")
+        origin = _decode_unique(rows[0][1])
+        _validate_local_origin(origin, registration)
+        return origin
+
+    def read_enrolled_origin(self, registration: Registration, principal: str) -> dict:
+        """Read the current enrollment without creating or updating journal files."""
+        try:
+            with _private_access(self.path, self.repository_root) as (owner, files):
+                _require(owner == principal, "JOURNAL_OWNER_DRIFT")
+                self._owner(owner)
+                _require(self.path.exists(), "LOCAL_CHAT_REGISTRATION_REQUIRED")
+                fd = files.open(self.path.name, os.O_RDONLY)
+                with os.fdopen(fd, "rb"), closing(sqlite3.connect(
+                        self.path.as_uri() + "?mode=ro", uri=True, timeout=0)) as db:
+                    db.execute("PRAGMA trusted_schema=OFF")
+                    db.execute("BEGIN")
+                    _require(db.execute("PRAGMA application_id").fetchone() == (_APP_ID,)
+                             and db.execute("PRAGMA user_version").fetchone() in ((2,), (3,)),
+                             "JOURNAL_SCHEMA_INCOMPATIBLE")
+                    tables = dict(db.execute("SELECT name, sql FROM sqlite_master WHERE type='table'"))
+                    _require(tables.get("identity") == _TABLES["identity"], "JOURNAL_SCHEMA_INCOMPATIBLE")
+                    self._check_registration(db, owner, registration)
+                    _require(tables.get("local_origin") == _ORIGIN_TABLE, "LOCAL_CHAT_REGISTRATION_REQUIRED")
+                    origin = self._read_local_origin(db, registration)
+                    _require(origin["phase"] == "ENROLLED", "LOCAL_CHAT_REGISTRATION_REQUIRED")
+                    self._owner(owner)
+                    return origin
+        except sqlite3.DatabaseError:
+            raise RuntimeHold("LOCAL_CHAT_REGISTRATION_READ_UNAVAILABLE") from None
+
     @contextmanager
     def locked(self, registration: Registration):
         db, lock_fd, unlock = None, None, None
@@ -1520,10 +1633,7 @@ class Journal:
                         os.fsync(files.directory_fd)
                 data = {"events": {}, "source_identities": {}}
                 if origin_table:
-                    rows = db.execute("SELECT singleton, record FROM local_origin").fetchall()
-                    _require(len(rows) == 1 and rows[0][0] == 1, "LOCAL_ORIGIN_JOURNAL_INVALID")
-                    data["local_origin"] = _decode_unique(rows[0][1])
-                    _validate_local_origin(data["local_origin"], registration)
+                    data["local_origin"] = self._read_local_origin(db, registration)
                 if source_table:
                     for source_key, event_key, identity in db.execute("SELECT * FROM source_identities"):
                         data["source_identities"][source_key] = (event_key, _decode_unique(identity))
@@ -1661,6 +1771,10 @@ class Runner:
                 if not replayed or (envelope is not None and previous is None):
                     txn.write(data)
                 self._recover_reservations(txn, data)
+                if "local_send" in record["evidence"]:
+                    # The local Send lane has no response consumer in FLAT-05.
+                    route = RouteReadiness(**record["evidence"]["local_route"])
+                    return RouteResult(record["status"], record["code"], evidence, replayed=True, route=route)
                 if (self._route_runtime is not None and envelope is not None
                         and record["status"] == "PENDING"
                         and not (record["code"] == _LAUNCH_UNKNOWN and chrome is None)):
@@ -1719,6 +1833,8 @@ class Runner:
         if code in _EXACT_ROUTE_READY:
             route = replace(route, readiness=code)
             save(route)
+            if self._supervisor_stop is not None and self._route_runtime.raw.get("ui_delivery") is not None:
+                return self._send_local_ui(txn, data, record, event, route, evidence, replayed, authorize)
         status: Status = "HOLD"
         if chrome is not None and code == chrome.code:
             status = chrome.status
@@ -1726,12 +1842,115 @@ class Runner:
             status = "UNKNOWN_EFFECT"
         return RouteResult(status, code, evidence, replayed, route=route)
 
+    def _send_local_ui(self, txn, data: dict, record: dict, event: SourceEvent,
+                       route: RouteReadiness, evidence: str, replayed: bool,
+                       authorize_source: Callable[[], None]) -> RouteResult:
+        runtime, chrome = self._route_runtime, self._route_chrome
+        registration = self.registration
+        origin = data["local_origin"]
+        consent = runtime.raw["ui_delivery"]
+        request = DoorbellRequest.for_source(event, registration)
+
+        def result(status: Status, code: str) -> RouteResult:
+            return RouteResult(status, code, evidence, replayed, route=route)
+
+        grant = next((grant for grant in consent["grants"] if grant["source_key"] == event.identity.key), None)
+        if grant is None:
+            return result("HOLD_DEPENDENCY", "LOCAL_UI_DELIVERY_GRANT_REQUIRED")
+
+        initial = chrome._route_snapshot(txn.owner, origin)
+        _require(_owned_chrome_process(initial[4], initial[5])[0] == data["chrome"]["process"],
+                 "CHROME_OBSERVATION_CHANGED")
+        if event.identity.kind == _EF02:
+            # A historical row lacks a run ID until its exact event is observed.
+            # An unresolved same-attempt row may alias this source.
+            indexed = {key for key, _ in data["source_identities"].values()}
+            if any(key not in indexed and old["status"] != "PENDING"
+                   and old["event"].get("evidence_type") == evidence
+                   and old["event"].get("attempt") == event.identity.attempt
+                   for key, old in data["events"].items()):
+                return result("HOLD_DEPENDENCY", "LEGACY_EF02_SOURCE_IDENTITY_UNAVAILABLE")
+
+        def revalidate() -> None:
+            _require(runtime.chrome_lifecycle != "paused", "PAUSED_BY_HUMAN")
+            _require(data["chrome"]["launch"] is None and not chrome_acquisition._clean_launch_pending(),
+                     "CHROME_LAUNCH_RECONCILE_REQUIRED")
+            _require(chrome._route_snapshot(txn.owner, origin) == initial, "CHROME_OBSERVATION_CHANGED")
+            _require((consent["route_marker"], consent["registration_id"], consent["marker_digest"])
+                     == (registration.marker, origin["registration_id"], origin["marker_digest"]),
+                     "LOCAL_UI_ENROLLMENT_DRIFT")
+            if event.identity.kind == _EF02:
+                authority = self.grant_verifier
+                _require(type(authority) is _RegisteredWakeAuthority and authority.source is self.source
+                         and authority.source.envelope(event.payload) == event, "SOURCE_PROOF_MISSING")
+                _require(authority.authorize(event.payload, registration, require_delivery=True) is not None,
+                         "MISSING_GRANT")
+            else:
+                authorize_source()
+            _require(grant["expires_ms"] > time.time_ns() // 1_000_000, "LOCAL_UI_DELIVERY_GRANT_EXPIRED")
+            _require(not chrome.stop(), "SUPERVISOR_STOPPED")
+
+        try:
+            revalidate()
+        except DependencyHold as exc:
+            return result("HOLD_DEPENDENCY", _safe_code(exc, "LOCAL_UI_AUTHORITY_UNPROVEN"))
+        except Exception as exc:
+            return result("HOLD", _safe_code(exc, "LOCAL_UI_AUTHORITY_UNPROVEN"))
+
+        adapter = LocalChromeDoorbellAdapter(repository=event.identity.repository, allow_submit=True,
+                                             send_only=True, inventory=chrome.sender.adapter.inventory)
+        reservation = {
+            "phase": "PRE_STAGE",
+            "doorbell_sha256": bytes_digest(request.canonical_bytes),
+            "consent_sha256": digest({**{k: v for k, v in consent.items() if k != "grants"}, "grant": grant}),
+        }
+        self._move(txn, data, record, "RESERVED", _UI_SEND_RESERVED, proof={"local_send": reservation})
+
+        def before_stage() -> None:
+            # On restart, an interrupted PRE_STAGE reservation may be retried.
+            # STAGING is durable before the first page mutation can start.
+            reservation["phase"] = "STAGING"
+            record["code"] = _UI_STAGING
+            txn.write(data)
+
+        outcome = adapter.send_registered_ui(
+            binding=request.binding, event_id=request.event_id, marker_digest=route.marker_commitment,
+            account_sha256=consent["account_sha256"], session_sha256=consent["session_sha256"],
+            revalidate=revalidate, before_stage=before_stage)
+        if not outcome.staged:
+            self._release_local_reservation(record)
+            txn.write(data)
+            status = ("HOLD_DEPENDENCY" if outcome.code in (
+                "LOCAL_UI_ACCOUNT_EVIDENCE_UNAVAILABLE", "DELIVER_WAKE_GRANT_REQUIRED") else "HOLD")
+            return result(status, outcome.code)
+
+        ref = outcome.turn_ref
+        if outcome.code == "UI_USER_TURN_OBSERVED" and ref is not None:
+            if any(other["evidence"].get("user_turn_ref") == ref for other in data["events"].values()):
+                self._move(txn, data, record, "UNKNOWN_EFFECT", "USER_TURN_REFERENCE_REUSED")
+                return result("UNKNOWN_EFFECT", "USER_TURN_REFERENCE_REUSED")
+            self._save_delivery(txn, data, record, "UI_TURN_OBSERVED",
+                                {"marker": registration.marker, "user_turn_ref": ref})
+            return result("UI_TURN_OBSERVED", outcome.code)
+        code = outcome.code if outcome.code != "UI_USER_TURN_OBSERVED" else "SUBMISSION_UNPROVEN"
+        self._move(txn, data, record, "UNKNOWN_EFFECT", code)
+        return result("UNKNOWN_EFFECT", code)
+
+    @staticmethod
+    def _release_local_reservation(record: dict) -> None:
+        del record["evidence"]["local_send"]
+        pending = _ISSUE_ACCEPTED if record["event"].get("kind") == _ISSUE else "EVENT_PENDING"
+        record.update(status="PENDING", code=pending, history=["PENDING"])
+
     @staticmethod
     def _recover_reservations(txn, data: dict) -> None:
         interrupted = [record for record in data["events"].values() if record["status"] == "RESERVED"]
         for record in interrupted:
-            record.update(status="UNKNOWN_EFFECT", code="INTERRUPTED_NO_REPLAY",
-                          history=[*record["history"], "UNKNOWN_EFFECT"])
+            if record["evidence"].get("local_send", {}).get("phase") == "PRE_STAGE":
+                Runner._release_local_reservation(record)
+            else:
+                record.update(status="UNKNOWN_EFFECT", code="INTERRUPTED_NO_REPLAY",
+                              history=[*record["history"], "UNKNOWN_EFFECT"])
         if interrupted:
             txn.write(data)
 
@@ -2173,7 +2392,8 @@ class _RegisteredWakeAuthority:
     def revalidate_local(self) -> None:
         _revalidate_owned(self.snapshots, self.repository_root, self.config_path, self.principal)
 
-    def authorize(self, event: Event, current: Registration) -> SignedWakeAuthorization | None:
+    def authorize(self, event: Event, current: Registration, *,
+                  require_delivery: bool = False) -> SignedWakeAuthorization | None:
         _require(current == self.registration, "REGISTRATION_DRIFT")
         full_event = self.source.verified_event
         _require(full_event is not None and digest(full_event) == event.payload_sha256,
@@ -2192,7 +2412,7 @@ class _RegisteredWakeAuthority:
                 context={**context, "registry": registry}):
             return None
         operations = ("resolve_claim_route",)
-        if self.native_source_only:
+        if self.native_source_only or require_delivery:
             if not SignedOriginConsentAuthority.authorize_origin(
                 self.origin, self.caller, operation="deliver_wake",
                 context={"event": full_event, "registry": registry}):
@@ -2249,6 +2469,27 @@ def _snapshots(*entries: tuple[Path, dict]) -> tuple[tuple[Path, str], ...]:
 _EF02_CONFIG = frozenset({"registry", "chrome_config", "grants", "caller_id"})
 
 
+def _validate_ui_delivery(consent: object) -> None:
+    """Validate private owner opt-in and exact event scopes, independently of source JSON."""
+    _require(type(consent) is dict and set(consent) == {
+        "schema", "route_marker", "registration_id", "marker_digest", "account_sha256", "session_sha256", "grants",
+    } and consent["schema"] == "WakeHubLocalUIDelivery.v1"
+        and type(consent["route_marker"]) is str
+        and re.fullmatch(r"wakehub-r1:[0-9a-f]{64}", consent["route_marker"]) is not None
+        and type(consent["registration_id"]) is str
+        and re.fullmatch(r"[0-9a-f]{32}", consent["registration_id"]) is not None
+        and _chrome_digest(consent["marker_digest"]) and _chrome_digest(consent["account_sha256"])
+        and (consent["session_sha256"] is None or _chrome_digest(consent["session_sha256"]))
+        and type(consent["grants"]) is list and 1 <= len(consent["grants"]) <= _MAX_TARGETS,
+        "LOCAL_UI_DELIVERY_CONFIG_INVALID")
+    seen = set()
+    for grant in consent["grants"]:
+        _require(type(grant) is dict and set(grant) == {"source_key", "expires_ms"}
+                 and _chrome_digest(grant["source_key"]) and grant["source_key"] not in seen
+                 and _github_id(grant["expires_ms"]), "LOCAL_UI_DELIVERY_CONFIG_INVALID")
+        seen.add(grant["source_key"])
+
+
 @dataclass(frozen=True, repr=False)
 class _RuntimeConfig:
     path: Path
@@ -2264,9 +2505,12 @@ def _read_runtime_config(config_path: Path, repository_root: Path) -> _RuntimeCo
     config = _read_owned_json(config_path, repository_root)
     source_key = "registered_targets" if "registered_targets" in config else "registered_source"
     required = {"schema", "registration", "marker", "journal", source_key}
-    _require(required <= config.keys() <= required | _EF02_CONFIG | {"chrome_lifecycle", "chat_preload"}
+    _require(required <= config.keys() <= required | _EF02_CONFIG | {"chrome_lifecycle", "chat_preload", "ui_delivery"}
              and config["schema"] == "WakeHubRuntimeR1.v1", "LOCAL_CONFIG_INVALID")
     _require(type(config.get("chat_preload", False)) is bool, "LOCAL_CONFIG_INVALID")
+    if "ui_delivery" in config:
+        _require("chat_preload" in config, "LOCAL_CHAT_REGISTRATION_CONFIG_REQUIRED")
+        _validate_ui_delivery(config["ui_delivery"])
     targets = (config[source_key] if source_key == "registered_targets"
                else [{"kind": _EF02, "path": config[source_key]}])
     _require(type(targets) is list and 1 <= len(targets) <= _MAX_TARGETS, "REGISTERED_TARGETS_INVALID")
@@ -2294,7 +2538,7 @@ class _SupervisorChrome:
     stop: Callable[[], bool]
     evaluated_start: bool = False
 
-    def _route_snapshot(self, txn, origin: dict | None = None) -> tuple:
+    def _route_snapshot(self, owner: str, origin: dict | None = None) -> tuple:
         runtime = self.runtime
         root = runtime.journal.repository_root
         env = self.sender.environment
@@ -2302,11 +2546,11 @@ class _SupervisorChrome:
         state, snapshot = self.sender._owner_snapshot()
         _revalidate_owned(_snapshots((runtime.path, runtime.raw), (env.config_path, self.config)),
                           root, runtime.path, runtime.principal)
-        runtime.journal._owner(txn.owner)
+        runtime.journal._owner(owner)
         _require(state == "OWNED", "CHROME_NOT_RUNNING_NATIVE_LAUNCH_CAPABILITY_REQUIRED")
         local, _, sid, env, _, _ = snapshot
-        _require(_private_identity(env.config_path) == txn.owner == runtime.principal
-                 and (os.name != "nt" or sid == txn.owner), "CHROME_OWNER_UNPROVEN")
+        _require(_private_identity(env.config_path) == owner == runtime.principal
+                 and (os.name != "nt" or sid == owner), "CHROME_OWNER_UNPROVEN")
         if origin is not None:
             _require(origin["owner_scope"] == _chrome_scope(local, sid, env),
                      "CHROME_OWNER_SCOPE_CHANGED")
@@ -2315,7 +2559,7 @@ class _SupervisorChrome:
 
     def ready_route(self, txn, data: dict, origin: dict, authorize: Callable[[], None]) -> str:
         binding = self.runtime.registration.binding
-        initial = self._route_snapshot(txn, origin)
+        initial = self._route_snapshot(txn.owner, origin)
         process, _ = _owned_chrome_process(initial[4], initial[5])
         chrome = data["chrome"]
         _require(chrome["process"] == process, "CHROME_OBSERVATION_CHANGED")
@@ -2323,7 +2567,7 @@ class _SupervisorChrome:
         navigation_reserved = navigation is not None and navigation["phase"] == "RESERVED"
 
         def revalidate() -> None:
-            _require(self._route_snapshot(txn, origin) == initial, "CHROME_OBSERVATION_CHANGED")
+            _require(self._route_snapshot(txn.owner, origin) == initial, "CHROME_OBSERVATION_CHANGED")
             authorize()
             _require(not self.stop(), "SUPERVISOR_STOPPED")
 
@@ -2534,6 +2778,15 @@ def _compose_supervisor_chrome(runtime: _RuntimeConfig, stop: Callable[[], bool]
     return _SupervisorChrome(runtime, NativeChrome9444(root, environment, supervised=True), config, stop)
 
 
+def _registration_chrome(config_path: Path | None, repository_root: Path) -> _SupervisorChrome:
+    _require(config_path is not None, "LOCAL_AUTHORITY_MISSING")
+    _, _, sid = chrome_acquisition._enrollment_operator()
+    runtime = _read_runtime_config(config_path, repository_root)
+    _require(os.name != "nt" or sid == runtime.principal, "CHROME_OWNER_UNPROVEN")
+    _require("chat_preload" in runtime.raw, "LOCAL_CHAT_REGISTRATION_CONFIG_REQUIRED")
+    return _compose_supervisor_chrome(runtime, lambda: False)
+
+
 def register_local_chat(config_path: Path | None, repository_root: Path, *,
                         registration_id: str | None = None) -> Result | cdp_doorbell.WH03PreparedRegistration:
     """Prepare or consume a short-lived, manually presented local marker."""
@@ -2541,12 +2794,8 @@ def register_local_chat(config_path: Path | None, repository_root: Path, *,
 
     def register() -> Result:
         nonlocal prepared
-        _require(config_path is not None, "LOCAL_AUTHORITY_MISSING")
-        _, _, sid = chrome_acquisition._enrollment_operator()
-        runtime = _read_runtime_config(config_path, repository_root)
-        _require(os.name != "nt" or sid == runtime.principal, "CHROME_OWNER_UNPROVEN")
-        _require("chat_preload" in runtime.raw, "LOCAL_CHAT_REGISTRATION_CONFIG_REQUIRED")
-        chrome = _compose_supervisor_chrome(runtime, lambda: False)
+        chrome = _registration_chrome(config_path, repository_root)
+        runtime = chrome.runtime
         binding = runtime.registration.binding
         if registration_id is not None:
             _require(type(registration_id) is str
@@ -2555,7 +2804,7 @@ def register_local_chat(config_path: Path | None, repository_root: Path, *,
         with runtime.journal.locked(runtime.registration) as (txn, data):
             origin = data.get("local_origin")
             _require(origin is None or origin["phase"] != "ENROLLED", "LOCAL_CHAT_ALREADY_REGISTERED")
-            before = chrome._route_snapshot(txn, origin)
+            before = chrome._route_snapshot(txn.owner, origin)
             commitment = None
             if registration_id is not None:
                 _require(origin is not None and origin["registration_id"] == registration_id,
@@ -2564,7 +2813,7 @@ def register_local_chat(config_path: Path | None, repository_root: Path, *,
                 gate = cdp_doorbell._wh03_commitment_gate(commitment)
                 _require(gate == "READY", gate)
             code = chrome.sender.local_chat(binding, marker_digest=commitment.marker_digest if commitment else None)
-            _require(chrome._route_snapshot(txn, origin) == before, "CHROME_OBSERVATION_CHANGED")
+            _require(chrome._route_snapshot(txn.owner, origin) == before, "CHROME_OBSERVATION_CHANGED")
             if commitment is not None:
                 _require(code == "LOCAL_USER_MARKER_OBSERVED", code)
                 gate = cdp_doorbell._wh03_commitment_gate(commitment)
@@ -2593,6 +2842,32 @@ def register_local_chat(config_path: Path | None, repository_root: Path, *,
 
     result = _registered_result(register)
     return prepared if prepared is not None and result.code == "LOCAL_CHAT_MARKER_PREPARED" else result
+
+
+def probe_local_ui_account(config_path: Path | None, repository_root: Path) -> Result:
+    """Show commitments in the local owner terminal, without enabling delivery."""
+    def probe() -> Result:
+        chrome = _registration_chrome(config_path, repository_root)
+        runtime = chrome.runtime
+        registration = runtime.registration
+        owner = runtime.principal
+        origin = runtime.journal.read_enrolled_origin(registration, owner)
+        before = chrome._route_snapshot(owner, origin)
+        evidence = chrome.sender.local_chat(
+            registration.binding, marker_digest=origin["marker_digest"], read_account=True)
+        _require(chrome._route_snapshot(owner, origin) == before, "CHROME_OBSERVATION_CHANGED")
+        _require(runtime.journal.read_enrolled_origin(registration, owner) == origin, "LOCAL_UI_ENROLLMENT_DRIFT")
+        if isinstance(evidence, str):
+            raise DependencyHold(evidence)
+        account, session = evidence.commitments()
+        return LocalUIEnrollmentResult(
+            "HOLD", "LOCAL_UI_ACCOUNT_SCOPE_OBSERVED", "LOCAL_OWNER_UI_SCOPE",
+            route_marker=registration.marker, registration_id=origin["registration_id"],
+            marker_digest=origin["marker_digest"], account_sha256=account, session_sha256=session)
+
+    result = _registered_result(probe)
+    # The observer has no authenticated ChatGPT or GitHub receipt.
+    return result if isinstance(result, LocalUIEnrollmentResult) else replace(result, evidence_type="LOCAL_OWNER_UI_SCOPE")
 
 
 def _compose_registered(config_path: Path, repository_root: Path, *, native_source_only: bool,

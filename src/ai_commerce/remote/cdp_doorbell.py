@@ -33,6 +33,9 @@ from .wake_adapter import WakeReceipt
 from ._private_state import PrivateJsonState, PrivateStateError
 
 _EVENT = re.compile(r"ef02-completion-v1:[0-9a-f]{64}\Z")
+_LOCAL_UI_EVENT = re.compile(r"(?:ef02-completion|github-issue-created)-v1:[0-9a-f]{64}\Z")
+_UI_TURN_REF = re.compile(r"[0-9a-zA-Z._-]{1,64}\Z")
+_DOCUMENT_CLOCK = "() => performance.timeOrigin"
 _COMPOSER = ('#prompt-textarea[contenteditable="true"], '
              'main form [contenteditable="true"][role="textbox"][aria-multiline="true"]')
 # The observed Vietnamese ChatGPT send button has an aria-label beginning
@@ -47,8 +50,73 @@ _STOP = '[data-testid="stop-button"]'
 _LOGIN = '[data-testid="login-button"], a[href^="/auth/login"]'
 _WORK = '[data-workspace-type="team"], [data-workspace-type="enterprise"], [data-workspace-type="business"], [data-testid="work-composer"]'
 
-# All page-side scripts return bounded status codes, never transcript contents,
-# cookies, account data or ChatGPT response text.
+# FLAT07 must verify that the live Chat A exposes this visible account surface.
+# Use an owner-opened, nonmodal app account menu with an explicit signed-in
+# address. The older observer's data-account-id is not visible identity evidence.
+_LOCAL_UI_ADDRESS = r"[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+"
+_LOCAL_UI_ACCOUNT_DOM = r"""
+const localUIHit = el => {
+ if (!el) return false;
+ for (let node = el; node; node = node.parentElement) {
+   if (node.matches('[hidden], [inert], [aria-hidden="true"]')) return false;
+   const style = getComputedStyle(node);
+   if (style.visibility !== 'visible' || style.display === 'none' ||
+       style.contentVisibility === 'hidden' || style.opacity === '0') return false;
+ }
+ const rect = el.getBoundingClientRect();
+ if (rect.width <= 0 || rect.height <= 0) return false;
+ const hit = document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+ return hit !== null && el.contains(hit);
+};
+const localUIAccount = () => {
+ if (location.href !== args.url || location.origin !== 'https://chatgpt.com' ||
+     visible('main').length !== 1 || visible(args.login).length ||
+     visible(args.work).length || visible('[aria-modal="true"], dialog[open]').length)
+   return null;
+ const editors = visible(composerSel);
+ if (editors.length !== 1 || editors[0].getAttribute('aria-disabled') === 'true' ||
+     document.activeElement !== editors[0] || !localUIHit(editors[0])) return null;
+ const triggers = document.querySelectorAll(
+   'button[aria-haspopup="menu"][aria-expanded="true"][aria-controls]');
+ if (triggers.length > 32) return null;
+ const accountMenus = [...triggers].filter(el =>
+   el.closest('header, nav, aside') &&
+   !el.closest('main, form, [data-message-author-role], [contenteditable]') &&
+   /^(account|profile)( menu)?$/i.test((el.getAttribute('aria-label') || '').trim()) &&
+   localUIHit(el));
+ if (accountMenus.length !== 1) return null;
+ const id = accountMenus[0].getAttribute('aria-controls');
+ if (!/^[A-Za-z0-9_:-]{1,128}$/.test(id)) return null;
+ const menus = document.querySelectorAll('[id="' + id + '"]');
+ if (menus.length !== 1) return null;
+ const menu = menus[0];
+ if (!menu.matches('[role="menu"]') ||
+     menu.closest('main, form, [data-message-author-role], [contenteditable]'))
+   return null;
+
+ // Read only rendered text leaves belonging to this menu. Count other visible
+ // addresses in it too, so an ambiguous multi-account surface stays closed.
+ const leaves = menu.querySelectorAll('*');
+ if (leaves.length > 128) return null;
+ const addresses = [];
+ let signedIn = null;
+ for (const leaf of leaves) {
+   if (leaf.children.length || leaf.closest('[role="menu"]') !== menu ||
+       !localUIHit(leaf)) continue;
+   const text = (leaf.innerText || '').trim();
+   if (text.length > 256) return null;
+   const refs = text.match(/__ADDRESS__/g) || [];
+   addresses.push(...refs);
+   const label = text.match(/^Signed in as:\s*(__ADDRESS__)$/i);
+   if (label && label[1] === refs[0]) signedIn = label[1];
+ }
+ return addresses.length === 1 && signedIn === addresses[0] ? signedIn : null;
+};
+const sameLocalUIAccount = () => !args.requireAccount ||
+  (typeof args.accountRef === 'string' && localUIAccount() === args.accountRef);
+""".replace("__ADDRESS__", _LOCAL_UI_ADDRESS)
+
+# The delivery scripts return bounded status and USER-turn references.
 _GUARD = """
 const visible = sel => [...document.querySelectorAll(sel)].filter(
  e => e.getClientRects().length > 0 && getComputedStyle(e).visibility === 'visible');
@@ -95,12 +163,19 @@ const equivalent = box => {
  return same(lines.join('\\n'));
 };
 const matches = () => {
+ if (args.documentClock) {
+   const roles = [...document.querySelectorAll('main [data-message-author-role="user"]')];
+   const bubbles = [...document.querySelectorAll('main [data-user-message-bubble]')];
+   const candidates = [...roles, ...bubbles.filter(e => !e.closest('[data-message-author-role="user"]'))];
+   return candidates.filter(e => e.textContent.replace(/\\r\\n/g,'\\n') === args.text || equivalent(e));
+ }
  const roles = visible('[data-message-author-role="user"]');
  const candidates = roles.length ? roles : visible('[data-user-message-bubble]');
  return candidates.filter(e => e.textContent.replace(/\\r\\n/g,'\\n') === args.text);
 };
+const sameDocument = () => !args.documentClock || performance.timeOrigin === args.documentClock;
 const inspect = (expectText = false) => {
- if (location.href.replace(/\\/$/,'') !== args.url) return 'TARGET_PAGE_CHANGED';
+ if (!sameDocument() || location.href.replace(/\\/$/,'') !== args.url) return 'TARGET_PAGE_CHANGED';
  if (visible('main').length !== 1 || visible(args.login).length ||
      visible(args.work).length) return 'SURFACE_UNPROVEN';
  const boxes = visible(composerSel);
@@ -113,12 +188,19 @@ const inspect = (expectText = false) => {
  const forms = [];
  for(let p=box.parentElement;p;p=p.parentElement) if(p.tagName==='FORM') forms.push(p);
  if(forms.length !== 1) return 'SURFACE_UNPROVEN';
+ if (args.documentClock && [...forms[0].querySelectorAll('input[type="file"]')].some(
+     input => input.files && input.files.length)) return 'DRAFT_PRESENT';
  const buttons = [...forms[0].querySelectorAll(sendSel)].filter(
   b => b.getClientRects().length && getComputedStyle(b).visibility === 'visible');
  if (buttons.length > 1) return 'SURFACE_UNPROVEN';
+ if (args.documentClock && !expectText && buttons.some(
+     b => !b.disabled && b.getAttribute('aria-disabled') !== 'true')) return 'DRAFT_PRESENT';
  return {box, buttons};
 };
 """
+_LOCAL_UI_ACCOUNT_READ = "(args) => { " + _GUARD + _LOCAL_UI_ACCOUNT_DOM + """
+ return localUIAccount();
+}"""
 _ARGS = {
     "composer": _COMPOSER, "send": _SEND, "stop": _STOP,
     "login": _LOGIN, "work": _WORK,
@@ -130,11 +212,14 @@ _CHECK = "(args) => { " + _GUARD + """
  if (matches().length) return 'OUTBOUND_ALREADY_PRESENT';
  return 'READY';
 }"""
-_INSERT = "(args) => { " + _GUARD + """
+_INSERT = "(args) => { " + _GUARD + _LOCAL_UI_ACCOUNT_DOM + """
  const result = inspect();
  if (typeof result === 'string' || matches().length) return false;
  const box=result.box;
- box.focus();
+ if (!sameLocalUIAccount()) return false;
+ // On the scoped route the owner has already shown that composer focus
+ // coexists with the account surface. Do not dismiss the menu by focusing it.
+ if (!args.requireAccount) box.focus();
  if (document.activeElement !== box || box.textContent !== '') return false;
  const select=window.getSelection(), range=document.createRange();
  if(!select) return false;
@@ -153,19 +238,46 @@ _READY = "(args) => { " + _GUARD + """
  return result.buttons.length === 1 && !result.buttons[0].disabled &&
    result.buttons[0].getAttribute('aria-disabled') !== 'true';
 }"""
-_CLICK = "(args) => { " + _GUARD + """
+_CLICK = "(args) => { " + _GUARD + _LOCAL_UI_ACCOUNT_DOM + """
  const result=inspect(true);
  if(typeof result === 'string' || matches().length ||
     result.buttons.length !== 1) return false;
  const button=result.buttons[0];
  if(button.disabled || button.getAttribute('aria-disabled') === 'true') return false;
+ if (args.documentClock) {
+   const nodes = document.querySelectorAll('[data-message-id], [data-turn-id]');
+   if (nodes.length > 4096) return false;
+   const refs = new Set();
+   for (const node of nodes) {
+     for (const attr of ['data-message-id', 'data-turn-id']) {
+       const ref = node.getAttribute(attr);
+       if (ref && /^[0-9a-zA-Z._-]{1,64}$/.test(ref)) refs.add(ref);
+     }
+   }
+   if (!sameLocalUIAccount() || (args.requireAccount && !localUIHit(button)))
+     return false;
+   button.click();
+   return [...refs];
+ }
  button.click(); return true;
 }"""
 _PROVE = "(args) => { " + _GUARD + """
- if (location.href.replace(/\\/$/,'') !== args.url ||
+ if (!sameDocument() || location.href.replace(/\\/$/,'') !== args.url ||
      visible('main').length !== 1 || visible(args.login).length ||
      visible(args.work).length) return false;
  const found=matches();
+ if (args.documentClock) {
+   if (found.length !== 1 || !visible('main [data-message-author-role="user"]').includes(found[0]))
+     return false;
+   const node = found[0].closest('[data-message-id], [data-turn-id]');
+   if (!node || found[0].closest('form,[contenteditable="true"],[data-message-author-role="assistant"]'))
+     return false;
+   const ref = node.getAttribute('data-message-id') || node.getAttribute('data-turn-id');
+   if (!ref || !/^[0-9a-zA-Z._-]{1,64}$/.test(ref) || args.priorRefs.includes(ref)) return false;
+   const owners = [...document.querySelectorAll('[data-message-id], [data-turn-id]')].filter(
+     el => el.getAttribute('data-message-id') === ref || el.getAttribute('data-turn-id') === ref);
+   return owners.length === 1 ? ref : false;
+ }
  return found.length===1 && found[0].getClientRects().length > 0;
 }"""
 
@@ -329,6 +441,18 @@ class _PlaywrightInventory:
         # Read only; separate contexts must not be confused as one account.
         with self._browser(endpoint) as browser:
             yield list(browser.contexts)
+
+    def read_enrolled_local_ui_account(self, page) -> LocalUIAccountEvidence | None:
+        """Observe explicit visible identity on the exact attached chat only."""
+        url = page.url
+        if type(url) is not str or _CHAT.fullmatch(url) is None:
+            return None
+        account = page.evaluate(_LOCAL_UI_ACCOUNT_READ, {**_ARGS, "url": url})
+        if (page.url != url or type(account) is not str or len(account) > 254
+                or re.fullmatch(_LOCAL_UI_ADDRESS, account) is None):
+            return None
+        # No supported visible session reference is known for this UI scope.
+        return LocalUIAccountEvidence(account)
 
     def preload(self, binding: ResolvedBinding, *, current_binding=None) -> str:
         """Auto-load exactly the private, enrolled chat; no Send or tab hijack.
@@ -950,6 +1074,40 @@ def diagnose_authenticated_wake(
     return cdp_turn.GateResult(phase, status, code)
 
 
+@dataclass(frozen=True, repr=False)
+class LocalUIAccountEvidence:
+    """Local UI observation of the account, with a session ref only if exposed."""
+
+    account_ref: str
+    session_ref: str | None = None
+
+    def commitments(self) -> tuple[str, str | None]:
+        def commitment(ref: str) -> str:
+            if type(ref) is not str or not 0 < len(ref) <= 1024:
+                raise ValueError("LOCAL_UI_ACCOUNT_EVIDENCE_UNAVAILABLE")
+            return hashlib.sha256(ref.encode("utf-8")).hexdigest()
+
+        return (commitment(self.account_ref),
+                None if self.session_ref is None else commitment(self.session_ref))
+
+
+def _read_local_ui_account(inventory, page) -> LocalUIAccountEvidence:
+    try:
+        evidence = inventory.read_enrolled_local_ui_account(page)
+        if type(evidence) is LocalUIAccountEvidence:
+            return evidence
+    except Exception:
+        pass
+    raise ValueError("LOCAL_UI_ACCOUNT_EVIDENCE_UNAVAILABLE")
+
+
+@dataclass(frozen=True, repr=False)
+class LocalUISendResult:
+    code: str
+    staged: bool = False
+    turn_ref: str | None = None
+
+
 class LocalChromeDoorbellAdapter:
     """UI-only exact-chat doorbell, explicitly opt-in, without semantic authority."""
 
@@ -1002,58 +1160,157 @@ class LocalChromeDoorbellAdapter:
         doorbell = _doorbell_text(event_id, self.repository,
                                   send_only=self.send_only,
                                   fixed_check_test=self.fixed_check_test)
+        outcome = self._send_ui(binding, doorbell)
+        status = "UNKNOWN" if outcome.staged else "UNSUPPORTED"
+        return receipt(status, outcome.code)
+
+    def send_registered_ui(self, *, binding: ResolvedBinding, event_id: str,
+                           marker_digest: str, account_sha256: str, session_sha256: str | None,
+                           revalidate: Callable[[], None],
+                           before_stage: Callable[[], None]) -> LocalUISendResult:
+        """Deliver a scoped local UI turn on the supervisor's journal reservation.
+
+        The native inventory reader observes stable refs on the attached page.
+        None means evidence is unavailable. A session ref is required whenever
+        the enrolled reader supports one.
+        """
+        if (type(binding) is not ResolvedBinding or type(binding.chat_url) is not str
+                or not _CHAT.fullmatch(binding.chat_url)
+                or binding.cdp_endpoint != "http://127.0.0.1:9444"
+                or type(event_id) is not str or not _LOCAL_UI_EVENT.fullmatch(event_id)
+                or not _is_windows()):
+            return LocalUISendResult("NATIVE_DESKTOP_UNPROVEN")
+        if not self.allow_submit or not self.send_only or self.fixed_check_test:
+            return LocalUISendResult("CDP_PROBE_DISABLED")
+        reader = getattr(self.inventory, "read_enrolled_local_ui_account", None)
+        if not callable(reader):
+            return LocalUISendResult("LOCAL_UI_ACCOUNT_EVIDENCE_UNAVAILABLE")
+
+        def check_page(page) -> str:
+            # The supported native reader must freshly observe the account on
+            # this exact page. The config only commits to the intended values.
+            if page.evaluate(_WH03_COMMITTED_SIGNAL_DOM, {"digest": marker_digest}) != "TEST_SIGNAL_MATCH_UNATTESTED":
+                raise ValueError("LOCAL_UI_MARKER_UNPROVEN")
+            evidence = _read_local_ui_account(self.inventory, page)
+            account, session = evidence.commitments()
+            if account != account_sha256:
+                raise ValueError("LOCAL_UI_ACCOUNT_CHANGED")
+            if session != session_sha256:
+                raise ValueError("LOCAL_UI_SESSION_CHANGED")
+            return evidence.account_ref
+
+        return self._send_ui(binding, _doorbell_text(event_id, self.repository, send_only=True),
+                             check_page=check_page, revalidate=revalidate, before_stage=before_stage)
+
+    def _send_ui(self, binding: ResolvedBinding, doorbell: str, *,
+                 check_page=None, revalidate=None, before_stage=None) -> LocalUISendResult:
         args = {**_ARGS, "url": binding.chat_url, "text": doorbell}
-        clicked = False
-        staging_started = False
+        scoped = check_page is not None
+        # Timer polling keeps the scoped checks usable on an unfocused tab.
+        polling = {"polling": 100} if scoped else {}
+        stage = "CHECK"
         try:
-            with self.inventory.pages(binding.cdp_endpoint) as pages:
-                matching = [page for page in pages
-                            if isinstance(page.url, str) and
-                            page.url.rstrip("/") == binding.chat_url]
+            inventory = self.inventory._browser if scoped else self.inventory.pages
+            with inventory(binding.cdp_endpoint) as attached:
+                if scoped:
+                    if len(attached.contexts) != 1:
+                        return LocalUISendResult("EXACT_CHAT_CONTEXT_AMBIGUOUS")
+                    context = attached.contexts[0]
+
+                def candidates():
+                    pages = list(context.pages if scoped else attached)
+                    if scoped and len(pages) > 32:
+                        raise ValueError("EXACT_CHAT_INVENTORY_UNBOUNDED")
+                    return [candidate for candidate in pages if isinstance(candidate.url, str)
+                            and candidate.url.rstrip("/") == binding.chat_url]
+
+                matching = candidates()
                 if len(matching) != 1:
-                    return receipt("UNSUPPORTED", "EXACT_CHAT_TAB_NOT_FOUND" if not matching
-                                   else "AMBIGUOUS_CHAT_TARGETS")
+                    return LocalUISendResult("EXACT_CHAT_TAB_NOT_FOUND" if not matching
+                                             else "AMBIGUOUS_CHAT_TARGETS")
                 page = matching[0]
                 page.set_default_timeout(3000)
+                if scoped:
+                    clock = page.evaluate(_DOCUMENT_CLOCK)
+                    if type(clock) not in (int, float) or not 0 < clock < 2**53:
+                        return LocalUISendResult("TARGET_PAGE_CHANGED")
+                    args["documentClock"] = clock
+                    args["requireAccount"] = True
+
+                def stable_page():
+                    if page.url.rstrip("/") != binding.chat_url:
+                        raise ValueError("TARGET_PAGE_CHANGED")
+                    if scoped:
+                        current_contexts = list(attached.contexts)
+                        current_tabs = candidates()
+                        if (page.url != binding.chat_url or len(current_contexts) != 1
+                                or current_contexts[0] is not context or len(current_tabs) != 1
+                                or current_tabs[0] is not page or page.evaluate(_DOCUMENT_CLOCK) != clock):
+                            raise ValueError("TARGET_PAGE_CHANGED")
+
+                def guard():
+                    if scoped:
+                        revalidate()
+                        stable_page()
+                        args["accountRef"] = check_page(page)
+                    stable_page()
+
                 result = page.evaluate(_CHECK, args)
                 if result != "READY":
                     code = result if result in {
                         "TARGET_PAGE_CHANGED", "SURFACE_UNPROVEN", "GENERATION_ACTIVE",
                         "DRAFT_PRESENT", "OUTBOUND_ALREADY_PRESENT",
                     } else "SURFACE_UNPROVEN"
-                    return receipt("UNSUPPORTED", code)
-                if page.url.rstrip("/") != binding.chat_url:
-                    return receipt("UNSUPPORTED", "TARGET_PAGE_CHANGED")
-                staging_started = True
+                    return LocalUISendResult(code)
+                guard()
+                if scoped:
+                    before_stage()
+                    guard()
+                stage = "INSERT"
                 if page.evaluate(_INSERT, args) is not True:
-                    return receipt("UNKNOWN", "INSERT_BLOCKED")
+                    return LocalUISendResult("INSERT_BLOCKED", staged=True)
                 try:
-                    page.wait_for_function(_READY, arg=args, timeout=3000)
+                    page.wait_for_function(_READY, arg=args, timeout=3000, **polling)
                 except Exception:
-                    return receipt("UNKNOWN", "INSERT_BLOCKED")
+                    return LocalUISendResult("INSERT_BLOCKED", staged=True)
                 if page.url.rstrip("/") != binding.chat_url or page.evaluate(_READY, args) is not True:
-                    return receipt("UNKNOWN", "SEND_BLOCKED")
-                # D2 already persisted a write-ahead UNKNOWN intent. The
-                # subsequent click is an irreversibly ambiguous boundary.
-                clicked = True
-                if page.evaluate(_CLICK, args) is not True:
-                    return receipt("UNKNOWN", "SEND_BLOCKED")
+                    return LocalUISendResult("SEND_BLOCKED", staged=True)
+                if scoped:
+                    guard()
+                stage = "CLICK"
+                click = page.evaluate(_CLICK, args)
+                if scoped:
+                    refs = click
+                    if (type(refs) is not list or len(refs) > 8192
+                            or any(type(ref) is not str or not _UI_TURN_REF.fullmatch(ref) for ref in refs)):
+                        return LocalUISendResult("SEND_BLOCKED", staged=True)
+                    args["priorRefs"] = refs
+                elif click is not True:
+                    return LocalUISendResult("SEND_BLOCKED", staged=True)
                 try:
-                    page.wait_for_function(_PROVE, arg=args, timeout=5000)
+                    page.wait_for_function(_PROVE, arg=args, timeout=5000, **polling)
                 except Exception:
-                    return receipt("UNKNOWN", "SUBMISSION_UNPROVEN")
-                if page.url.rstrip("/") != binding.chat_url or page.evaluate(_PROVE, args) is not True:
-                    return receipt("UNKNOWN", "SUBMISSION_UNPROVEN")
-                # Only visible user-turn proof on the exact UI, not server ACK.
-                return receipt("UNKNOWN", "UI_USER_TURN_OBSERVED")
+                    return LocalUISendResult("SUBMISSION_UNPROVEN", staged=True)
+                guard()
+                proof = page.evaluate(_PROVE, args)
+                if scoped:
+                    if type(proof) is not str or not _UI_TURN_REF.fullmatch(proof) or proof in refs:
+                        return LocalUISendResult("SUBMISSION_UNPROVEN", staged=True)
+                    stable_page()
+                    return LocalUISendResult("UI_USER_TURN_OBSERVED", staged=True, turn_ref=proof)
+                if proof is not True:
+                    return LocalUISendResult("SUBMISSION_UNPROVEN", staged=True)
+                return LocalUISendResult("UI_USER_TURN_OBSERVED", staged=True)
         except ImportError:
-            return receipt("UNSUPPORTED", "CDP_UNAVAILABLE")
-        except Exception:
-            # Treat a partially staged/clicked or transport-lost attempt as
-            # uncertain: never auto-retry or assert ChatGPT confirmed delivery.
-            return receipt("UNKNOWN" if staging_started or clicked else "UNSUPPORTED",
-                           "SUBMISSION_UNPROVEN" if clicked else (
-                               "INSERT_BLOCKED" if staging_started else "CDP_UNAVAILABLE"))
+            if not scoped or stage == "CHECK":
+                return LocalUISendResult("CDP_UNAVAILABLE")
+        except Exception as exc:
+            if scoped and isinstance(exc, ValueError) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,95}", str(exc)):
+                return LocalUISendResult(str(exc), staged=stage != "CHECK")
+            if stage == "CHECK":
+                return LocalUISendResult("CDP_UNAVAILABLE")
+        return LocalUISendResult("SUBMISSION_UNPROVEN" if stage == "CLICK" else "INSERT_BLOCKED",
+                                 staged=True)
 
 
 class LocalChromeObserverAdapter:
