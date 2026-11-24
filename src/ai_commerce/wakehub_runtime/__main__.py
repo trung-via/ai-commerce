@@ -1,18 +1,30 @@
-"""One bounded interactive-session iteration; no installation or external writes."""
+"""WakeHub interactive-session entrypoints."""
 import argparse
 import json
 import os
 from pathlib import Path
+import sys
 
-from .runner import Result, RuntimeHold, _CODE_ROOT, diagnostic, run_native_source_only, run_read_only
+from .runner import (
+    Result, RuntimeHold, _CODE_ROOT, diagnostic, run_native_source_only, run_read_only, run_supervisor,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Source-only WakeHub R2 ingress and R3B1 typed dependency gates for Chrome 9444. "
-                    "No Chrome launch, tab preload, UI Send, "
+                    "No tab preload, UI Send, "
                     "login, scheduler, HostOps or GitHub writes.")
     sub = parser.add_subparsers(dest="command", required=True)
+    supervisor = sub.add_parser(
+        "supervise", help="Run serial ticks for the interactive owner on Windows.",
+        description="Observe Chrome 9444 by default. An owner-controlled private runtime config may set "
+                    "chrome_lifecycle to demand-start for the verified demand task, or paused to withhold starts.")
+    supervisor.add_argument("--max-ticks", type=int, help="Stop after this many ticks. Omit to run until stopped.")
+    supervisor.add_argument("--idle-seconds", type=int, default=30, help="Minimum delay between ticks (default 30).")
+    supervisor.add_argument("--max-backoff-seconds", type=int, default=300,
+                            help="Maximum delay after consecutive holds (default 300).")
+    supervisor.add_argument("--dry-run", action="store_true", help="Report wiring without acquiring the receiver.")
     run = sub.add_parser("run", help="Verify one registered event and read-only readiness; exits HOLD.")
     mode = run.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true",
@@ -25,10 +37,21 @@ def main(argv: list[str] | None = None) -> int:
                           "Default remains R2 read-only; missing enrolled authority yields HOLD_DEPENDENCY.")
     run.add_argument("--journal", type=Path,
                      help="Diagnostic-only private file in an existing operator-owned directory, outside checkout.")
-    run.add_argument("--repository-root", type=Path, help="Checkout excluded from private journal storage.")
-    run.add_argument("--config", type=Path,
-                     help="Existing private WakeHubRuntimeR1.v1 local config; never an Issue payload.")
+    for command in (run, supervisor):
+        command.add_argument("--repository-root", type=Path, help="Checkout excluded from private journal storage.")
+        command.add_argument("--config", type=Path,
+                             help="Existing private WakeHubRuntimeR1.v1 local config; never an Issue payload.")
     args = parser.parse_args(argv)
+    if args.command == "supervise":
+        configured = os.environ.get("AI_COMMERCE_WAKEHUB_CONFIG")
+        config = args.config if args.config is not None else Path(configured) if configured else None
+        result = run_supervisor(config, args.repository_root or _CODE_ROOT, dry_run=args.dry_run,
+                                max_ticks=args.max_ticks, idle_seconds=args.idle_seconds,
+                                max_backoff_seconds=args.max_backoff_seconds,
+                                on_health=lambda code: print(json.dumps({"chrome_health": code}),
+                                                             file=sys.stderr, flush=True))
+        print(json.dumps(result.to_dict(), sort_keys=True))
+        return 0 if result.code == "SUPERVISOR_STOPPED" else 2
     if args.diagnostic:
         if args.native_source_only:
             run.error("--native-source-only cannot be combined with --diagnostic")

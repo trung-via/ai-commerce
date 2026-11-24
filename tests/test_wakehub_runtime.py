@@ -886,9 +886,10 @@ def ingress(composition, monkeypatch):
     grants = {"version": 1, "grants": [{**body, "signature": signature}]}
     local = private / "local"
     owned = local / "AI-Commerce"
-    profile = owned / "chrome-profile"
+    profile = owned / r.chrome_acquisition._CLEAN_9444_PROFILE
     (profile / "Default").mkdir(parents=True)
-    executable = private / "chrome.exe"
+    executable = local / "Google" / "Chrome" / "Application" / "chrome.exe"
+    executable.parent.mkdir(parents=True)
     executable.touch()
     chrome_config = owned / "chrome.json"
     config_path = private / "runtime-config.json"
@@ -1134,6 +1135,7 @@ def native_ingress(ingress, monkeypatch):
     monkeypatch.setattr(acq, "_probe_cdp", probe)
     monkeypatch.setattr(acq, "run", forbidden)
     monkeypatch.setattr(acq, "_start_or_reuse_9444", forbidden)
+    monkeypatch.setattr(acq, "ensure_clean_9444", forbidden)
     monkeypatch.setattr(r.NativeChrome9444, "send", forbidden)
     monkeypatch.setattr(r.LocalChromeDoorbellAdapter, "send_wake", forbidden)
     monkeypatch.setattr(r.cdp_doorbell, "_PlaywrightInventory", lambda: browser)
@@ -1141,15 +1143,15 @@ def native_ingress(ingress, monkeypatch):
             "page": page, "browser": browser, "native_calls": native_calls}
 
 
-def assert_read_only_pending(i):
+def assert_read_only_pending(i, code="EVENT_PENDING", *, version=2):
     path = r.Path(i["config"]["journal"])
     event = r.Event(i["event"]["event_id"], "a" * 40, 1, digest(i["event"]), "GITHUB_AUTHENTICATED")
     saved = record(path, event, i["registration"])
-    assert saved["history"] == ["PENDING"] and saved["code"] == "EVENT_PENDING"
+    assert saved["history"] == ["PENDING"] and saved["code"] == code
     assert saved["evidence"] == {}
     with sqlite3.connect(path) as db:
         assert db.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 1
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert db.execute("PRAGMA user_version").fetchone()[0] == version
     return saved
 
 
@@ -2426,3 +2428,647 @@ def test_r3b2_fixed_turn_authority_rejects_subclasses_and_unavailable_post_gate(
         status="HOLD", send_allowed=True, retry_allowed=True))
     assert r.NativeTurnAuthority().post_reservation_code(
         outcome=r.cdp_turn.SendOutcome.CLICK_AMBIGUOUS) == "ATTEMPT_UNPROVEN_NO_REPLAY"
+
+
+class FixtureStop:
+    def __init__(self):
+        self.stopped = False
+        self.delays = []
+
+    def is_set(self):
+        return self.stopped
+
+    def wait(self, timeout):
+        self.delays.append(timeout)
+        return self.stopped
+
+
+@pytest.fixture
+def supervisor(native_ingress, monkeypatch):
+    """Run the real demand-task APIs with a synthetic Windows transport."""
+    i = native_ingress
+    acq = r.chrome_acquisition
+    state = SimpleNamespace(
+        active=False, slots=0, pending=False, task_pending=False, session=7, logon=1,
+        task="DEMAND_READY", journal="FRESH", read_code="ALREADY_ENROLLED", d5="ABSENT", launch_busy=False,
+        start=None, on_read=None,
+    )
+    stops, ticks = [], []
+    requests = []
+    listening = i["inventory"]["listeners"][:]
+    running = i["inventory"]["processes"][:]
+    local = r.Path(os.environ["LOCALAPPDATA"])
+    shell = local / "synthetic-pwsh.exe"
+    filetime = acq._creation_ticks("2026-11-18T00:00:00Z")
+
+    def owner():
+        return local, state.session, i["process"]["OwnerSid"]
+
+    def set_owned(owned):
+        i["inventory"].update(listeners=listening[:] if owned else [], processes=running[:] if owned else [])
+
+    def new_logon(session):
+        state.session = session
+        state.logon += 1
+        i["process"]["SessionId"] = session
+
+    def set_policy(policy="demand-start"):
+        i["config"]["chrome_lifecycle"] = policy
+        i["save"](i["config_path"], i["config"])
+
+    def start_owned():
+        # Reuse the PID with a different creation timestamp each time.
+        i["process"]["CreationDate"] = f"2026-11-19T00:00:{len(requests):02d}.0000000Z"
+        set_owned(True)
+        return "START_REQUESTED"
+
+    def task_transport(args, *, env, input=None, **kwargs):
+        assert args[0] == str(shell)
+        assert env["AI_COMMERCE_TASK_SID"] == owner()[2]
+        assert "AI_COMMERCE_GITHUB_READ_TOKEN" not in env and "AI_COMMERCE_WAKE_HMAC_KEY_HEX" not in env
+        if input == acq._CLEAN_9444_TASK_RECONCILE_SCRIPT.encode("utf-8"):
+            assert "AI_COMMERCE_TASK_INSTALL" not in env
+            if state.on_read is not None:
+                state.on_read()
+            code = json.dumps({"task": state.task, "journal": state.journal, "d5": state.d5})
+        elif args[-1] == acq._CLEAN_9444_TASK_READ_SCRIPT:
+            assert env["AI_COMMERCE_TASK_INSTALL"] == "0" and env["AI_COMMERCE_TASK_START_SESSION"] == ""
+            code = state.read_code
+        else:
+            assert args[-1] == acq._CLEAN_9444_TASK_SCRIPT
+            assert env["AI_COMMERCE_TASK_INSTALL"] == "0"
+            assert env["AI_COMMERCE_TASK_START_SESSION"] == str(owner()[1])
+            requests.append((owner(), env["AI_COMMERCE_TASK_ARGUMENTS"]))
+            assert state.start is not None, "Unexpected demand start"
+            code = state.start()
+        return SimpleNamespace(returncode=0, stdout=code.encode("ascii"))
+
+    @contextmanager
+    def slot():
+        if state.active:
+            raise r.RuntimeHold("SUPERVISOR_ACTIVE")
+        state.active = True
+        state.slots += 1
+        try:
+            yield
+        finally:
+            state.active = False
+
+    def make_stop():
+        stop = FixtureStop()
+        stops.append(stop)
+        return stop
+
+    @contextmanager
+    def launch_slot():
+        if state.launch_busy:
+            raise acq._Clean9444Hold("SUPERVISOR_ACTIVE")
+        yield
+
+    canonical = r.Runner.run_once
+
+    def run_once(runner):
+        result = canonical(runner)
+        ticks.append((result, runner))
+        return result
+
+    def run(max_ticks=1, **kwargs):
+        return r.run_supervisor(i["config_path"], i["root"], max_ticks=max_ticks,
+                                idle_seconds=2, max_backoff_seconds=5, **kwargs)
+
+    def operator(*, attended=True):
+        assert not attended
+        return owner()
+
+    monkeypatch.setattr(acq, "_enrollment_operator", operator)
+    monkeypatch.setattr(r, "_supervised_desktop", lambda session, sid: digest([session, sid, state.logon]))
+    monkeypatch.setattr(acq, "_native_known_folder", lambda _: local / "absent-program-files")
+    monkeypatch.setattr(acq, "_verify_google_chrome", lambda _: None)
+    monkeypatch.setattr(acq, "_historical_legacy_workdir", lambda: None)
+    monkeypatch.setattr(acq, "_powershell", lambda: shell)
+    monkeypatch.setattr(acq, "_trusted_powershells", lambda: (shell,))
+    monkeypatch.setattr(acq, "_clean_supervisor_slot", launch_slot)
+    monkeypatch.setattr(acq, "_clean_pending", lambda name: state.task_pending)
+    monkeypatch.setattr(acq, "_clean_launch_pending", lambda: state.pending)
+    monkeypatch.setattr(acq.subprocess, "run", task_transport)
+    monkeypatch.setattr(r, "time_ns", lambda: (filetime - 116444736000000000) * 100)
+    monkeypatch.setattr(r, "_supervisor_slot", slot)
+    monkeypatch.setattr(r, "StopEvent", make_stop)
+    monkeypatch.setattr(r.Runner, "run_once", run_once)
+    return SimpleNamespace(i=i, run=run, set_owned=set_owned, new_logon=new_logon, set_policy=set_policy,
+                           start_owned=start_owned, requests=requests, owner=owner, ticks=ticks, stops=stops,
+                           slot=state, path=r.Path(i["config"]["journal"]))
+
+
+def chrome_record(supervisor):
+    with sqlite3.connect(supervisor.path) as db:
+        return json.loads(db.execute("SELECT record FROM chrome_lifecycle").fetchone()[0])
+
+
+def test_flat02_supervisor_acquires_once_then_reuses_owned_9444(supervisor, capsys):
+    s = supervisor
+    s.set_owned(False)
+    s.set_policy()
+
+    def acquire():
+        assert chrome_record(s)["launch"] == "UNKNOWN"
+        assert s.i["calls"] == []
+        return s.start_owned()
+
+    s.slot.start = acquire
+    assert main(["supervise", "--config", str(s.i["config_path"]), "--repository-root", str(s.i["root"]),
+                 "--max-ticks", "2"]) == 2
+    result = s.ticks[-1][0]
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == result.to_dict()
+    assert json.loads(captured.err) == {"chrome_health": "CHROME_OWNED"}
+    assert len(s.requests) == 1 and s.i["browser"].reads == 2
+    assert [tick for tick, _ in s.ticks] == [result, result]
+    assert result.status == "HOLD" and result.code == "EXACT_CHAT_CANDIDATE_ACCOUNT_MARKER_UNATTESTED"
+    assert all(runner.orchestrator._completed == {} for _, runner in s.ticks)
+    assert chrome_record(s)["launch"] is None and chrome_record(s)["process"]
+    assert_read_only_pending(s.i, version=3)
+
+
+@pytest.mark.parametrize("event_state", ["PENDING", "UNKNOWN_EFFECT", "UI_TURN_OBSERVED", "NO_EVENT"])
+def test_flat02_new_browser_generation_keeps_existing_event(supervisor, monkeypatch, event_state):
+    s = supervisor
+    s.set_owned(False)
+    s.set_policy()
+    s.slot.start = s.start_owned
+
+    if event_state == "NO_EVENT":
+        monkeypatch.setattr(r.GitHubEventSource, "next_event", lambda _: None)
+    assert s.run().chrome_health == "CHROME_OWNED"
+    first = chrome_record(s)
+    assert first["launch"] is None and s.requests[0][0][1] == 7
+    with sqlite3.connect(s.path) as db:
+        if event_state in ("UNKNOWN_EFFECT", "UI_TURN_OBSERVED"):
+            saved = json.loads(db.execute("SELECT record FROM events").fetchone()[0])
+            saved.update(status=event_state, history=["PENDING", "RESERVED", event_state])
+            if event_state == "UNKNOWN_EFFECT":
+                saved["code"] = "ATTEMPT_UNPROVEN_NO_REPLAY"
+            else:
+                saved["code"] = "UI_USER_TURN_OBSERVED"
+                saved["evidence"] = {"marker": s.i["registration"].marker, "user_turn_ref": "prior-fixture-turn"}
+            db.execute("UPDATE events SET record=?", (json.dumps(saved),))
+        before = db.execute("SELECT * FROM events").fetchall()
+    s.set_owned(False)
+    s.new_logon(8)
+    health = []
+    result = s.run(max_ticks=2, on_health=health.append)
+    assert result.chrome_health == "CHROME_OWNED" and health == ["CHROME_OWNED"]
+    if event_state == "UNKNOWN_EFFECT":
+        assert result.status == event_state and result.replayed
+        assert result.code == "ATTEMPT_UNPROVEN_NO_REPLAY"
+    elif event_state == "UI_TURN_OBSERVED":
+        assert result.status == event_state and result.replayed
+        assert result.code == "UI_USER_TURN_OBSERVED"
+    elif event_state == "NO_EVENT":
+        assert result.code == "NO_EVENT"
+    else:
+        assert result.code == "EXACT_CHAT_CANDIDATE_ACCOUNT_MARKER_UNATTESTED"
+    assert [owner[1] for owner, _ in s.requests] == [7, 8]
+    assert s.requests[0][1] == s.requests[1][1]
+    current = chrome_record(s)
+    assert current["scope"] == first["scope"] and current["process"] != first["process"]
+    assert current["launch"] is None
+    with sqlite3.connect(s.path) as db:
+        assert db.execute("SELECT * FROM events").fetchall() == before
+
+
+def test_flat02_supervisor_backs_off_and_reauthenticates_same_pending_event(supervisor, monkeypatch):
+    s = supervisor
+    s.set_owned(False)
+    s.set_policy()
+    acq = r.chrome_acquisition
+    original_read = r._read_owned_json
+    original_next = r.GitHubEventSource.next_event
+    original_probe = acq._probe_cdp
+    budgets = []
+
+    def starting_once(*args, **kwargs):
+        monkeypatch.setattr(r, "_read_owned_json", original_read)
+        raise r.RuntimeHold("LOCAL_AUTHORITY_MISSING")
+
+    def next_event(source):
+        budgets.append(source.reader.read_budget)
+        if len(budgets) == 1:
+            raise r.GitHubReadBlocked("GITHUB_READ_UNAVAILABLE")
+        return original_next(source)
+
+    def probe_once(environment):
+        monkeypatch.setattr(acq, "_probe_cdp", original_probe)
+        raise acq.AcquisitionBlocked("CDP_PROTOCOL_UNAVAILABLE")
+
+    def acquire():
+        if len(s.requests) == 1:
+            return "START_NOT_ATTEMPTED"
+        return s.start_owned()
+
+    monkeypatch.setattr(r, "_read_owned_json", starting_once)
+    monkeypatch.setattr(r.GitHubEventSource, "next_event", next_event)
+    s.slot.start = acquire
+    monkeypatch.setattr(acq, "_probe_cdp", probe_once)
+    result = s.run(max_ticks=5)
+    assert result.code == "EXACT_CHAT_CANDIDATE_ACCOUNT_MARKER_UNATTESTED"
+    assert [tick.code for tick, _ in s.ticks] == ["GITHUB_READ_UNAVAILABLE", "CDP_PROTOCOL_UNAVAILABLE",
+                                                result.code, result.code]
+    assert s.ticks[0][0].chrome_health == "START_NOT_ATTEMPTED"
+    assert len(s.requests) == 2 and s.stops[0].delays == [2, 4, 5, 5]
+    assert len({id(budget) for budget in budgets}) == 4 and len(s.i["calls"]) == 18
+    assert s.i["browser"].reads == 2
+    assert_read_only_pending(s.i, version=3)
+
+
+@pytest.mark.parametrize("new_session", [7, 8])
+def test_flat02_request_stays_unresolved_after_logon_change(supervisor, new_session):
+    s = supervisor
+    s.set_owned(False)
+    s.set_policy()
+
+    def acquire():
+        s.new_logon(new_session)
+        return s.start_owned()
+
+    s.slot.start = acquire
+    result = s.run()
+    assert result.chrome_health == "CHROME_OWNED_LAUNCH_UNRESOLVED"
+    assert result.code == "EXACT_CHAT_CANDIDATE_ACCOUNT_MARKER_UNATTESTED"
+    request = chrome_record(s)["request"]
+    s.set_owned(False)
+    assert s.run().code == r._LAUNCH_UNKNOWN
+    assert len(s.requests) == 1 and s.i["browser"].reads == 1
+    assert chrome_record(s)["launch"] == "REQUESTED" and chrome_record(s)["request"] == request
+    assert_read_only_pending(s.i, version=3)
+
+
+@pytest.mark.parametrize("fault,code", [
+    ("missing_authority", "INTERACTIVE_9444_START_GRANT_REQUIRED"),
+    ("paused", "PAUSED_BY_HUMAN"),
+    ("target", "CHROME_ACQUISITION_TARGET_MISMATCH"),
+    ("task_missing", "CHROME_DEMAND_TASK_UNPROVEN"),
+    ("task_mismatch", "CHROME_DEMAND_TASK_UNPROVEN"),
+    ("task_busy", "CHROME_DEMAND_TASK_BUSY"),
+    ("task_launch_mutex", "SUPERVISOR_ACTIVE"),
+    ("task_disabled", "CHROME_DEMAND_TASK_DISABLED"),
+    ("task_pending", "CHROME_DEMAND_TASK_UNRESOLVED"),
+    ("task_migration", "CHROME_DEMAND_TASK_UNPROVEN"),
+    ("task_duplicate", "CHROME_DEMAND_TASK_UNPROVEN"),
+    ("locked", "WINDOWS_INTERACTIVE_REQUIRED"),
+    ("session_conflict", "CHROME_INTERACTIVE_SESSION_CONFLICT"),
+    ("profile_lock", "PROFILE_LOCK_HOLD"),
+    ("ownership", "BROWSER_OWNERSHIP_UNPROVEN"),
+    ("foreign_port", "WINDOWS_PROBE_INVALID"),
+    ("foreign_profile", "BROWSER_OWNERSHIP_UNPROVEN"),
+    ("no_listener", "PROFILE_ALREADY_ACTIVE_NO_CDP"),
+    ("context", "EXACT_CHAT_CONTEXT_AMBIGUOUS"),
+    ("account", "EXACT_CHAT_CANDIDATE_ACCOUNT_MARKER_UNATTESTED"),
+])
+def test_flat02_supervisor_holds_without_acquisition(supervisor, monkeypatch, fault, code):
+    s = supervisor
+    acq = r.chrome_acquisition
+    if fault in ("missing_authority", "paused", "target") or fault.startswith("task_"):
+        s.set_owned(False)
+    if fault != "missing_authority":
+        s.set_policy("paused" if fault == "paused" else "demand-start")
+    if fault == "target":
+        monkeypatch.setattr(acq, "_clean_target", lambda *args: (
+            replace(s.i["environment"], user_data_dir=s.i["environment"].user_data_dir / "Other"), ()))
+    if fault == "task_mismatch":
+        s.slot.read_code = "AUTOSTART_CONFLICT"
+    if fault == "task_missing":
+        s.slot.task = "ABSENT"
+    if fault == "task_busy":
+        s.slot.task = "DEMAND_NOT_READY"
+    if fault == "task_launch_mutex":
+        s.slot.launch_busy = True
+    if fault == "task_disabled":
+        s.slot.task = "DEMAND_DISABLED"
+    if fault == "task_pending":
+        s.slot.task_pending = True
+    if fault == "task_migration":
+        s.slot.journal = "ROLLBACK_ONLY"
+    if fault == "task_duplicate":
+        s.slot.task = "MULTIPLE_CANDIDATES"
+    if fault == "locked":
+        def locked(**kwargs):
+            raise acq._EnrollmentHold("WINDOWS_INTERACTIVE_REQUIRED")
+        monkeypatch.setattr(acq, "_enrollment_operator", locked)
+    if fault == "session_conflict":
+        def conflict(*args):
+            raise r.RuntimeHold("CHROME_INTERACTIVE_SESSION_CONFLICT")
+        monkeypatch.setattr(r, "_supervised_desktop", conflict)
+    if fault == "profile_lock":
+        s.set_owned(False)
+        env = s.i["environment"]
+        (env.user_data_dir / env.profile_directory / acq._MARKERS[0]).touch()
+    if fault == "ownership":
+        s.i["process"]["SessionId"] = 8
+    if fault == "foreign_port":
+        s.i["inventory"]["listeners"][0]["LocalPort"] = 9333
+    if fault == "foreign_profile":
+        command = s.i["environment"].command()
+        command[2] = "--profile-directory=Other"
+        s.i["process"]["CommandLine"] = json.dumps(command)
+    if fault == "no_listener":
+        s.i["inventory"]["listeners"].clear()
+    if fault == "context":
+        s.i["browser"].items *= 2
+    if fault == "account":
+        s.i["page"].account = "different-fixture-account"
+    result = s.run()
+    assert result.code == code
+    assert result.status == ("HOLD_DEPENDENCY" if fault == "missing_authority" else "HOLD")
+    assert s.requests == []
+    assert_read_only_pending(s.i, version=3)
+
+
+def test_flat02_caller_boolean_cannot_supply_consent(supervisor):
+    s = supervisor
+    s.set_owned(False)
+    s.set_policy(True)
+    assert s.run().code == "LOCAL_CONFIG_INVALID"
+    assert s.requests == [] and not s.path.exists()
+
+
+@pytest.mark.parametrize("receipt", [None, "UNKNOWN_EFFECT", "WINDOWS_PROBE_UNAVAILABLE", "STARTED"])
+def test_flat02_ambiguous_launch_is_durable_and_never_repeated(supervisor, receipt):
+    s = supervisor
+    s.set_owned(False)
+    s.set_policy()
+
+    def acquire():
+        if receipt is None:
+            raise subprocess.TimeoutExpired("synthetic-demand-task", 15)
+        return receipt
+
+    s.slot.start = acquire
+    result = s.run()
+    assert result.status == "UNKNOWN_EFFECT" and result.code == r._LAUNCH_UNKNOWN
+    assert_read_only_pending(s.i, version=3)
+    original = chrome_record(s)
+    s.new_logon(8)
+    assert s.run().code == r._LAUNCH_UNKNOWN
+    s.set_owned(True)
+    reopened = s.run(max_ticks=2)
+    assert reopened.chrome_health == "CHROME_OWNED_LAUNCH_UNRESOLVED"
+    assert reopened.code == "EXACT_CHAT_CANDIDATE_ACCOUNT_MARKER_UNATTESTED"
+    current = chrome_record(s)
+    assert current["launch"] == "UNKNOWN" and current["request"] == original["request"]
+    s.set_owned(False)
+    assert s.run().code == r._LAUNCH_UNKNOWN
+    assert len(s.requests) == 1 and s.i["browser"].reads == 2
+    assert_read_only_pending(s.i, version=3)
+
+
+@pytest.mark.parametrize("pending", [False, True])
+def test_flat02_start_report_requires_independent_completion(supervisor, pending):
+    s = supervisor
+    s.set_owned(False)
+    s.set_policy()
+
+    def acquire():
+        s.slot.pending = pending
+        s.slot.task = "DEMAND_NOT_READY"
+        return "START_REQUESTED"
+
+    s.slot.start = acquire
+    result = s.run(max_ticks=3)
+    assert result.code == (r._LAUNCH_UNKNOWN if pending else "CHROME_ACQUISITION_NOT_READY")
+    assert chrome_record(s)["launch"] == "REQUESTED"
+    assert len(s.requests) == 1 and s.stops[0].delays == [2, 4] and s.i["browser"].reads == 0
+
+    s.start_owned()
+    # A valid current browser can be used while the task is still in flight.
+    assert s.run().chrome_health == "CHROME_OWNED_LAUNCH_UNRESOLVED"
+    s.slot.pending = False
+    s.slot.task = "DEMAND_READY"
+    assert s.run().chrome_health == "CHROME_OWNED"
+    assert chrome_record(s)["launch"] is None and len(s.requests) == 1
+
+
+def test_flat02_reused_pid_requires_a_new_creation_time_in_the_same_logon(supervisor):
+    s = supervisor
+    s.set_policy()
+    s.set_owned(False)
+    s.slot.start = lambda: "START_REQUESTED"
+    assert s.run().chrome_health == "CHROME_ACQUISITION_NOT_READY"
+
+    s.set_owned(True)
+    assert s.run().chrome_health == "CHROME_OWNED_LAUNCH_UNRESOLVED"
+    first_process = chrome_record(s)["process"]
+    s.start_owned()
+    assert s.run().chrome_health == "CHROME_OWNED"
+    assert chrome_record(s)["process"] != first_process
+    assert chrome_record(s)["launch"] is None and len(s.requests) == 1
+
+
+def test_flat02_restart_during_launch_observes_native_pending_without_replaying(supervisor):
+    s = supervisor
+    s.set_owned(False)
+    s.set_policy()
+
+    def interrupt():
+        s.slot.pending = True
+        s.start_owned()
+        raise Crash()
+
+    s.slot.start = interrupt
+    with pytest.raises(Crash):
+        s.run()
+    assert chrome_record(s)["launch"] == "UNKNOWN" and not s.slot.active
+    s.set_owned(False)
+    s.new_logon(8)
+
+    def forbidden(*args):
+        pytest.fail("An interrupted acquisition must not request a new grant")
+
+    s.slot.start = forbidden
+    assert s.run().code == r._LAUNCH_UNKNOWN
+    s.set_owned(True)
+    assert s.run().chrome_health == "CHROME_OWNED_LAUNCH_UNRESOLVED"
+    assert s.i["browser"].reads == 1 and chrome_record(s)["launch"] == "UNKNOWN"
+    assert len(s.requests) == 1
+
+
+@pytest.mark.parametrize("legacy_code", [r._LAUNCH_UNKNOWN, r._ACQUISITION_REPORTED])
+def test_flat02_migrates_legacy_launch_record_without_blocking_other_event_readiness(
+        supervisor, monkeypatch, legacy_code):
+    s = supervisor
+    runner = r.compose_read_only(s.i["config_path"], s.i["root"])
+
+    def read_only_tick():
+        with monkeypatch.context() as patch:
+            patch.setattr(r.chrome_acquisition, "_enrollment_operator", s.owner)
+            return runner.run_once()
+
+    assert read_only_tick().code == "EXACT_CHAT_CANDIDATE_ACCOUNT_MARKER_UNATTESTED"
+    registration = s.i["registration"]
+    event = r.Event(s.i["event"]["event_id"], "a" * 40, 1, digest(s.i["event"]), "GITHUB_AUTHENTICATED")
+    historic = replace(event, event_id="ef02-completion-v1:" + "d" * 64)
+    with runner.journal.locked(registration) as (txn, data):
+        original = {"event": asdict(historic), "status": "PENDING", "code": legacy_code,
+                    "history": ["PENDING"], "evidence": {}}
+        data["events"][historic.key(registration)] = original
+        txn.write(data)
+    with sqlite3.connect(s.path) as db:
+        before = db.execute("SELECT * FROM events ORDER BY event_key").fetchall()
+        assert db.execute("PRAGMA user_version").fetchone() == (2,)
+    s.set_owned(False)
+    assert s.run().code == r._LAUNCH_UNKNOWN
+    s.set_owned(True)
+    result = s.run()
+    assert result.chrome_health == "CHROME_OWNED_LAUNCH_UNRESOLVED"
+    assert result.code == "EXACT_CHAT_CANDIDATE_ACCOUNT_MARKER_UNATTESTED"
+    assert read_only_tick().code == result.code
+    with sqlite3.connect(s.path) as db:
+        assert db.execute("SELECT * FROM events ORDER BY event_key").fetchall() == before
+        assert db.execute("PRAGMA user_version").fetchone() == (3,)
+
+
+@pytest.mark.parametrize("launch", [None, "REPORTED", "UNKNOWN"])
+def test_flat02_migrates_v3_scope_only_with_an_exact_observed_preimage(supervisor, launch):
+    s = supervisor
+    assert s.run().chrome_health == "CHROME_OWNED"
+    current = chrome_record(s)
+    local, session, sid = s.owner()
+    env = s.i["environment"]
+    process = s.i["process"]
+    legacy = {"scope": digest([str(local), session, sid, str(env.config_path), env.command()]),
+              "process": digest([process["ProcessId"], r.chrome_acquisition._creation_ticks(process["CreationDate"])]),
+              "launch": launch}
+    with sqlite3.connect(s.path) as db:
+        db.execute("UPDATE chrome_lifecycle SET record=?", (json.dumps(legacy),))
+        events = db.execute("SELECT * FROM events").fetchall()
+    s.new_logon(8)
+    assert s.run().code == "CHROME_LEGACY_SCOPE_UNPROVEN"
+    assert chrome_record(s) == legacy
+    s.new_logon(session)
+    assert s.run().chrome_health == ("CHROME_OWNED" if launch is None else "CHROME_OWNED_LAUNCH_UNRESOLVED")
+    migrated = chrome_record(s)
+    assert migrated["scope"] == current["scope"] and migrated["launch"] == launch
+    s.new_logon(9)
+    assert s.run().chrome_health == ("CHROME_OWNED" if launch is None else "CHROME_OWNED_LAUNCH_UNRESOLVED")
+    assert s.requests == []
+    with sqlite3.connect(s.path) as db:
+        assert db.execute("SELECT * FROM events").fetchall() == events
+
+
+@pytest.mark.parametrize("drift", ["sid", "profile"])
+def test_flat02_rejects_stable_owner_drift_even_when_absent(supervisor, monkeypatch, drift):
+    s = supervisor
+    assert s.run().chrome_health == "CHROME_OWNED"
+    current = chrome_record(s)
+    s.set_owned(False)
+    s.new_logon(8)
+    s.set_policy()
+    if drift == "sid":
+        s.i["process"]["OwnerSid"] = "S-1-5-21-444-555-666-1001"
+    else:
+        env = s.i["environment"]
+        (env.user_data_dir / "Other").mkdir()
+        s.i["chrome"]["profile_directory"] = "Other"
+        s.i["save"](env.config_path, s.i["chrome"])
+        acq = r.chrome_acquisition
+        monkeypatch.setattr(acq, "_read_9444_config",
+                            lambda config, local, root, sid: acq.load_environment(config, root, local_app_data=local))
+    assert s.run().code == "CHROME_OWNER_SCOPE_CHANGED"
+    assert chrome_record(s) == current and s.requests == []
+
+
+def test_flat02_session_drift_between_observations_holds(supervisor, monkeypatch):
+    s = supervisor
+    s.set_owned(False)
+    s.set_policy()
+    acq = r.chrome_acquisition
+    query = acq._query_windows
+
+    def switch_after_query(port):
+        result = query(port)
+        s.new_logon(8)
+        return result
+
+    monkeypatch.setattr(acq, "_query_windows", switch_after_query)
+    assert s.run().code == "CHROME_OBSERVATION_CHANGED"
+    assert s.requests == [] and chrome_record(s)["scope"] is None
+
+
+def test_flat02_busy_task_and_private_pause_are_rechecked_before_effect(supervisor):
+    s = supervisor
+    s.set_owned(False)
+    s.set_policy()
+    reads = []
+
+    def change_task():
+        reads.append(None)
+        if len(reads) == 2:
+            assert chrome_record(s)["launch"] == "UNKNOWN"
+            s.slot.task = "DEMAND_NOT_READY"
+
+    s.slot.on_read = change_task
+    assert s.run().code == "CHROME_DEMAND_TASK_BUSY"
+    assert s.requests == [] and chrome_record(s)["launch"] is None
+
+    s.slot.task = "DEMAND_READY"
+    s.slot.on_read = lambda: s.set_policy("paused")
+    assert s.run().chrome_health == "LOCAL_AUTHORITY_DRIFT"
+    assert s.requests == [] and chrome_record(s)["launch"] is None
+    assert s.run().code == "PAUSED_BY_HUMAN"
+
+    s.slot.on_read = None
+    s.set_policy()
+    s.slot.start = s.start_owned
+    assert s.run().chrome_health == "CHROME_OWNED"
+    assert len(s.requests) == 1
+
+
+def test_flat02_supervisor_stops_before_acquisition_releases_slot_and_rejects_overlap(supervisor):
+    s = supervisor
+    s.set_owned(False)
+    s.set_policy()
+
+    def stop_during_authority():
+        s.slot.on_read = None
+        reads = list(s.i["calls"])
+        assert s.run().code == "SUPERVISOR_ACTIVE"
+        assert s.i["calls"] == reads
+        s.stops[0].stopped = True
+
+    s.slot.on_read = stop_during_authority
+    assert s.run(max_ticks=None).code == "SUPERVISOR_STOPPED"
+    assert len(s.ticks) == 1 and s.stops[0].delays == [] and not s.slot.active and s.requests == []
+    with sqlite3.connect(s.path) as db:
+        assert db.execute("SELECT COUNT(*) FROM events").fetchone() == (0,)
+    assert s.run(dry_run=True).code == "DRY_RUN_NO_EFFECTS" and s.slot.slots == 1
+    with pytest.raises(SystemExit) as error:
+        main(["supervise", "--native-source-only"])
+    assert error.value.code == 2
+
+
+def test_flat02_supervised_ticks_reconcile_ambiguous_fixture_send_without_repeating_it(
+        composition, monkeypatch):
+    make, event, registration, _, path, _ = composition
+    attempts, lookups = [], []
+
+    def send(*args):
+        attempts.append(args)
+        raise TimeoutError("fixture Send timeout")
+
+    def tick():
+        runner = make(brain=None)
+        monkeypatch.setattr(runner.sender, "send", send)
+        monkeypatch.setattr(runner.sender, "reconcile", lambda *args: lookups.append(args))
+        return runner.run_once()
+
+    @contextmanager
+    def slot():
+        yield
+
+    monkeypatch.setattr(r, "_supervisor_slot", slot)
+    stop = FixtureStop()
+    result = r.supervise(tick, stop=stop, max_ticks=3, idle_seconds=2, max_backoff_seconds=5)
+    assert result.evidence_type == "SYNTHETIC_FIXTURE" and result.status == "UNKNOWN_EFFECT"
+    assert attempts == [(event, registration)] and lookups == [(event, registration)] * 2
+    assert record(path, event, registration)["history"] == ["PENDING", "RESERVED", "UNKNOWN_EFFECT"]
+    assert stop.delays == [2, 4]
