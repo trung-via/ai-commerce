@@ -1397,9 +1397,11 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
         ["tests", "-q"], ["tests"], [".", "-q"], ["."])
     # A tests/ registry command does not collect component-local tests under src/.
     required_tests = covered_tests | affected_tests
+    outside_scope = []
+    if fallback_proven_scope and scope_args[0] == "tests":
+        outside_scope = sorted(t for t in required_tests if not t.startswith("tests/"))
     fallback_proven_scope = (fallback_proven_scope and not unsupported_paths and
-        all(t in candidate_files for t in required_tests) and
-        (scope_args[0] == "." or all(t.startswith("tests/") for t in required_tests)))
+        all(t in candidate_files for t in required_tests) and not outside_scope)
     if human_full_suite_authorized:
         reasons.append("AUTHENTICATED_HUMAN_EXPLICIT_FULL_SUITE")
         # A full test run cannot establish an AC with no reviewed owner.
@@ -1409,6 +1411,7 @@ def select_plan(*, repo: Path, base_sha: str, base_files: Mapping[str, str],
             reasons.append("HUMAN_FULL_AC_MAPPING_UNPROVEN")
             fallback_proven_scope = False
     if reasons:
+        reasons.extend("REQUIRED_TEST_OUTSIDE_FALLBACK_SCOPE:" + t for t in outside_scope)
         # An approved full profile is a conservative proof for all applicable ACs.
         # Caller must supply the broader approved scope; no command is synthesized.
         groups = (TestGroup("registered-fallback", (), tuple(sorted(set(required_acs) | coverage)), ()),)
