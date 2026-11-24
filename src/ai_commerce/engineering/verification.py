@@ -352,8 +352,13 @@ def _junit_capture_env(repo: Path):
         if _JUNIT_PLUGIN_NAME not in plugins:
             plugins.append(_JUNIT_PLUGIN_NAME)
         env["PYTEST_PLUGINS"] = ",".join(plugins)
-        existing_pp = env.get("PYTHONPATH", "")
-        env["PYTHONPATH"] = f"{scratch}{os.pathsep}{existing_pp}" if existing_pp else str(scratch)
+        # The trusted parent may inherit PYTHONPATH from the base checkout.
+        pythonpath = [str(scratch), str(root / "src")]
+        if inherited := env.get("PYTHONPATH"):
+            pythonpath.append(inherited)
+        env["PYTHONPATH"] = os.pathsep.join(pythonpath)
+        env.pop("PYTHONHOME", None)
+        env["PYTHONNOUSERSITE"] = "1"
         env[_JUNIT_ENV_VAR] = str(junit_path)
         yield env, junit_path, scratch
 
@@ -374,10 +379,13 @@ def _read_captured_junit(junit_path: Path, scratch: Path) -> tuple[bytes | None,
 
 
 def _run_pytest_with_junit(argv: list[str], *, repo: Path, timeout: float):
-    """Execute pytest via verification.subprocess.run with bounded JUnit capture."""
+    """Launch pytest with the active interpreter and preserve the reviewed argv."""
+    if argv[1:3] != ["-m", "pytest"] or argv[0] not in ("python", "py", sys.executable):
+        raise ValueError("MT01_PYTEST_INTERPRETER_UNSUPPORTED")
     with _junit_capture_env(repo) as (env, junit_path, scratch):
+        # Windows can launch a different interpreter for bare "python" than shutil.which reports.
         result = subprocess.run(
-            argv, cwd=repo, capture_output=True, text=True,
+            argv, executable=sys.executable, cwd=repo, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=timeout,
             check=False, env=env,
         )
@@ -385,6 +393,24 @@ def _run_pytest_with_junit(argv: list[str], *, repo: Path, timeout: float):
         err = result.stderr.encode() if isinstance(result.stderr, str) else (result.stderr or b"")
         junit_bytes, junit_error = _read_captured_junit(junit_path, scratch)
         return result, out, err, junit_bytes, junit_error
+
+
+def _collection_failure_excerpt(output: bytes) -> str:
+    """Retain startup diagnostics and the error summary with bounded output."""
+    limit = 4096
+    if len(output) > limit:
+        head = output[:limit // 2].rsplit(b"\n", 1)[0]
+        tail = output[-(limit // 2):].partition(b"\n")[2]
+        output = head + b"\n[OUTPUT_TRUNCATED]\n" + tail
+    excerpt = output.decode("utf-8", "replace")
+    excerpt = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", excerpt)
+    lines = []
+    for line in excerpt.splitlines():
+        line = "".join(char for char in line if char == "\t" or char.isprintable())
+        if len(line) > 512:
+            line = "[OVERLONG_LINE_REDACTED]"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _parse_safe_junit(junit: bytes | None) -> ET.Element | None:
@@ -887,10 +913,13 @@ def execute_plan(*, repo: Path, output_dir: Path, base_sha: str, base_files: dic
             return subprocess.CompletedProcess(fallback_argv, 1,
                 "FAILED MT01_PYTEST_NODEID_TOO_LONG: changed test definition; no tests executed\n", ""), plan
         if response.returncode != 0:
-            preflight.update(result="UNPROVEN", reason="CHANGED_TEST_COLLECTION_UNPROVEN")
+            preflight.update(result="UNPROVEN", reason="CHANGED_TEST_COLLECTION_UNPROVEN",
+                             actual_exit_code=response.returncode)
             plan["test_id_preflight"] = preflight
+            diagnostic = dict(preflight, stdout=_collection_failure_excerpt(pre_out),
+                              stderr=_collection_failure_excerpt(pre_err))
             save("mt01_nodeid_preflight", "mt01.nodeid-preflight.json",
-                 (canonical(preflight) + "\n").encode())
+                 (canonical(diagnostic) + "\n").encode())
             finish()
             return subprocess.CompletedProcess(fallback_argv, 3, "",
                 "CHANGED_TEST_COLLECTION_UNPROVEN"), plan
