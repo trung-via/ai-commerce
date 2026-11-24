@@ -54,6 +54,7 @@ _CLEAN_AUTOSTART = "install_clean_9444_autostart"
 _CLEAN_DEMAND_MIGRATION = "migrate_clean_9444_demand_task"
 _CLEAN_TASK_RESET = "reset_clean_9444_tasks"
 _CLEAN_TASK_WRITES = (_CLEAN_AUTOSTART, _CLEAN_DEMAND_MIGRATION, _CLEAN_TASK_RESET)
+_SUPERVISOR_DEPLOY = "deploy_wakehub_supervisor"
 _CLEAN_RUNTIME_PROBE = "clean_9444_runtime_probe"
 _CLEAN_1270_FORENSIC_READ = "clean_9444_1270_forensic_read"
 _A10_READINESS = "a10_codex_native_readiness"
@@ -228,9 +229,11 @@ def parse_event(event, mode):
         else:
             deny("READ_OPERATION_DENIED")
     else:
-        if operation in _CLEAN_TASK_WRITES:
+        if operation in (*_CLEAN_TASK_WRITES, _SUPERVISOR_DEPLOY):
             if params:
                 deny("INVALID_PARAMETERS")
+            if operation == _SUPERVISOR_DEPLOY and number > 2**53 - 1:
+                deny("ISSUE_OWNER_OR_STATE_DENIED")
         elif operation == "git_sync_main":
             if set(params) != {"expected_local_sha", "target_sha"} or any(
                 type(params.get(key)) is not str or
@@ -489,7 +492,7 @@ def _protected_clean_workflow_sha(*, write=False, allow_blank_workflow_sha=False
     return sha
 
 
-def _persistent_clean_source(acquisition, sha):
+def _persistent_clean_source(acquisition, sha, *, pin_runtime=False):
     """Verify public checkout custody via Git pin, clean tree, bytes and non-reparse paths.
 
     Unlike private Chrome profile/handoff state, the public repository checkout
@@ -546,6 +549,7 @@ def _persistent_clean_source(acquisition, sha):
 
     src_root = root / "src"
     egg_info = src_root / "ai_commerce.egg-info"
+    runtime_files = []
     try:
         for folder, dirs, files in os.walk(src_root, onerror=walk_error):
             parent = Path(folder)
@@ -568,9 +572,13 @@ def _persistent_clean_source(acquisition, sha):
                 pinned = workflow / path.relative_to(root)
                 if not acquisition._no_links(pinned):
                     deny("SOURCE_PATH_UNTRUSTED")
-                if not pinned.is_file() or not _clean_source_bytes_match(
-                        path, path.read_bytes(), pinned.read_bytes()):
+                if not pinned.is_file():
                     deny("SOURCE_BYTES_MISMATCH")
+                raw = path.read_bytes()
+                if not _clean_source_bytes_match(path, raw, pinned.read_bytes()):
+                    deny("SOURCE_BYTES_MISMATCH")
+                if pin_runtime and path.suffix == ".py" and src_root / "ai_commerce" in path.parents:
+                    runtime_files.append([path.relative_to(src_root).as_posix(), hashlib.sha256(raw).hexdigest()])
                 tracked.remove(path)
     except Denied:
         raise
@@ -578,6 +586,8 @@ def _persistent_clean_source(acquisition, sha):
         deny("SOURCE_PATH_UNTRUSTED")
     if tracked:
         deny("SOURCE_UNTRACKED_FILE")
+    if pin_runtime:
+        return hashlib.sha256(json.dumps(sorted(runtime_files), separators=(",", ":")).encode("ascii")).hexdigest()
     return source
 
 
@@ -929,6 +939,199 @@ def _probe_protected_clean_runtime(event=None, *, forensic=False):
         code = _clean_probe_exception_code(exc)
         result["code"] = code if code in _CLEAN_RUNTIME_PROBE_CODES else "UNKNOWN"
     return result
+
+
+_SUPERVISOR_OBSERVED = frozenset({
+    "SUPERVISOR_STARTED_HEALTH_OBSERVED", "SUPERVISOR_REUSED_HEALTH_OBSERVED",
+})
+_SUPERVISOR_HOLDS = frozenset({
+    "PROTECTED_HOSTOPS_ONLY", "SOURCE_CUSTODY_UNVERIFIED", "WINDOWS_OWNER_CONTEXT_UNVERIFIED",
+    "LOCAL_CONFIG_REQUIRED", "LOCAL_CONFIG_INVALID", "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED",
+    "LOCAL_CONFIG_CHANGED", "SUPERVISOR_RUNTIME_UNAVAILABLE", "SUPERVISOR_ACTIVE_UNVERIFIED",
+    "SUPERVISOR_START_UNKNOWN",
+})
+
+# Launch the canonical CLI using the exact source bytes read and hashed here.
+# The parent independently compares this hash with its protected checkout.
+_SUPERVISOR_BOOTSTRAP = """\
+import hashlib, importlib.machinery, json, runpy, sys
+from pathlib import Path
+
+root, dependencies, config, sha, expected, config_digest, desktop, nonce = sys.argv[1:]
+source = Path(root) / 'src'
+files = {path.relative_to(source).as_posix(): path.read_bytes()
+         for path in (source / 'ai_commerce').rglob('*.py')}
+manifest = [[name, hashlib.sha256(raw).hexdigest()] for name, raw in sorted(files.items())]
+observed = hashlib.sha256(json.dumps(manifest, separators=(',', ':')).encode('ascii')).hexdigest()
+if observed != expected or any(name == 'ai_commerce' or name.startswith('ai_commerce.') for name in sys.modules):
+    raise SystemExit(2)
+loader = importlib.machinery.SourceFileLoader
+default_code = loader.get_code
+def get_code(self, fullname):
+    if fullname == 'ai_commerce' or fullname.startswith('ai_commerce.'):
+        name = Path(self.path).relative_to(source).as_posix()
+        return self.source_to_code(files[name], self.path)
+    return default_code(self, fullname)
+loader.get_code = get_code
+sys.path[:0] = [str(source), dependencies]
+sys.argv = ['wakehub_runtime', 'supervise', '--observe-only', '--config', config, '--repository-root', root]
+runpy.run_module('ai_commerce.wakehub_runtime', run_name='__main__', alter_sys=True,
+                 init_globals={'_PROTECTED_DEPLOYMENT': (sha, observed, config_digest, desktop, nonce)})
+"""
+
+
+def _supervisor_receipt(code, issue_number, sha=None):
+    if type(code) is not str or code not in _SUPERVISOR_OBSERVED | _SUPERVISOR_HOLDS:
+        code = "SUPERVISOR_RUNTIME_UNAVAILABLE"
+    if type(sha) is not str or re.fullmatch(r"[a-f0-9]{40}", sha) is None:
+        code = "PROTECTED_HOSTOPS_ONLY"
+        sha = None
+    result = {
+        "status": "OBSERVED" if code in _SUPERVISOR_OBSERVED else "HOLD", "code": code,
+        "operation": _SUPERVISOR_DEPLOY, "issue_number": issue_number,
+        "approval_channel": "OWNER_GITHUB_COMMENT", "remote_shell_enabled": False,
+        "arbitrary_shell_enabled": False, "exact_chat_verified": False, "wake_sent": False,
+    }
+    if sha is not None:
+        result["source_sha"] = sha
+    if not result.keys() <= PERSONAL_PUBLIC_FIELDS:
+        deny("PUBLIC_TRANSPORT_GAP")
+    return result
+
+
+def _read_supervisor_health(runtime, expected, executable, owner, *, child=None, nonce=None):
+    raw = runtime._supervisor_deployment_value("Health")
+    if raw is None or not runtime._supervisor_active():
+        return False
+    try:
+        value = json.loads(raw, object_pairs_hook=_object_unique)
+        if (type(value) is not dict or set(value) != expected.keys() | {
+                "nonce", "pid", "created", "observed_ns", "health"}
+                or any(value[key] != pin for key, pin in expected.items())
+                or type(value["nonce"]) is not str or not re.fullmatch(r"[a-f0-9]{32}", value["nonce"])
+                or type(value["pid"]) is not int or not 0 < value["pid"] < 2**32
+                or type(value["created"]) is not int or value["created"] <= 0
+                or type(value["observed_ns"]) is not int
+                or not 0 <= runtime.monotonic_ns() - value["observed_ns"] <= runtime._SUPERVISOR_HEALTH_MAX_AGE_NS
+                or value["health"] not in runtime._OBSERVED_CHROME_HEALTH):
+            return False
+        if child is not None and (value["nonce"] != nonce or value["pid"] != child.pid or child.poll() is not None):
+            return False
+        return (runtime._supervisor_process(value["pid"], executable, owner) == value["created"]
+                and runtime._supervisor_active() and runtime._supervisor_deployment_value("Health") == raw)
+    except (Denied, OSError, ValueError, TypeError, RecursionError):
+        return False
+
+
+def _deploy_protected_supervisor(event):
+    request = parse_event(event, "write")
+    if request["operation"] != _SUPERVISOR_DEPLOY:
+        deny("WRITE_SCOPE_DENIED")
+    issue_number = request["issue_number"]
+    sha = None
+    failure = "PROTECTED_HOSTOPS_ONLY"
+    _supervisor_receipt(failure, issue_number)  # Check projection before native access.
+    try:
+        _require_protected_clean_runner("issue_comment")
+        sha = _protected_clean_workflow_sha(write=True)
+        failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
+        from ai_commerce.remote import chrome_acquisition as acquisition
+        from ai_commerce.wakehub_runtime import runner as runtime
+
+        failure = "SOURCE_CUSTODY_UNVERIFIED"
+        workflow_runtime = Path(os.environ["GITHUB_WORKSPACE"]) / "src/ai_commerce/wakehub_runtime/runner.py"
+        if Path(runtime.__file__).absolute() != workflow_runtime:
+            deny(failure)
+        source = _persistent_clean_source(acquisition, sha, pin_runtime=True)
+        root = ROOTS["workspace"]
+        failure = "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
+        owner = acquisition._native_operator()
+        desktop = runtime._desktop_logon(owner[1], owner[2])
+        failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
+        if runtime._supervisor_deployment_value("StartPending") is not None:
+            return _supervisor_receipt("SUPERVISOR_START_UNKNOWN", issue_number, sha)
+        configured = os.environ.get("AI_COMMERCE_WAKEHUB_CONFIG")
+        failure = "LOCAL_CONFIG_REQUIRED"
+        if not configured:
+            deny(failure)
+        config = Path(configured)
+        failure = "LOCAL_CONFIG_INVALID"
+        if not config.is_absolute() or config.drive.startswith("\\\\") or not acquisition._no_links(config):
+            deny(failure)
+        if not config.exists():
+            failure = "LOCAL_CONFIG_REQUIRED"
+            deny(failure)
+        try:
+            _, config_pin = runtime._observe_only_config(config, root, owner, lambda: False)
+        except runtime.RuntimeHold as exc:
+            if str(exc) == "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED":
+                failure = str(exc)
+            raise
+        expected = {"source_sha": sha, "source_digest": source, "config_digest": config_pin, "desktop": desktop}
+        failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
+        # Launch the real image so the spawn PID and observed process identity
+        # coincide even when HostOps itself runs via a venv redirector.
+        executable = Path(sys._base_executable)
+        if not executable.is_absolute() or not executable.is_file() or not acquisition._no_links(executable):
+            deny(failure)
+
+        def recheck():
+            nonlocal failure
+            failure = "SOURCE_CUSTODY_UNVERIFIED"
+            if _persistent_clean_source(acquisition, sha, pin_runtime=True) != source:
+                deny(failure)
+            failure = "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
+            if acquisition._native_operator() != owner or runtime._desktop_logon(owner[1], owner[2]) != desktop:
+                deny(failure)
+            failure = "LOCAL_CONFIG_CHANGED"
+            if runtime._observe_only_config(config, root, owner, lambda: False)[1] != config_pin:
+                deny(failure)
+
+        if runtime._supervisor_active():
+            failure = "SUPERVISOR_ACTIVE_UNVERIFIED"
+            if not _read_supervisor_health(runtime, expected, executable, owner):
+                deny(failure)
+            recheck()
+            failure = "SUPERVISOR_ACTIVE_UNVERIFIED"
+            if not _read_supervisor_health(runtime, expected, executable, owner):
+                deny(failure)
+            return _supervisor_receipt("SUPERVISOR_REUSED_HEALTH_OBSERVED", issue_number, sha)
+
+        recheck()
+        failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
+        dependencies = Path(sys.prefix) / "Lib" / "site-packages"
+        if not dependencies.is_dir() or not acquisition._no_links(dependencies):
+            deny(failure)
+        if runtime._supervisor_active():
+            return _supervisor_receipt("SUPERVISOR_ACTIVE_UNVERIFIED", issue_number, sha)
+        nonce = secrets.token_hex(16)
+        # Fence uncertain starts across workflow invocations. Only the exact live
+        # child with verified health can clear this particular reservation.
+        failure = "SUPERVISOR_START_UNKNOWN"
+        runtime._store_supervisor_deployment_value("StartPending", nonce)
+        child = subprocess.Popen(
+            [str(executable), "-I", "-B", "-S", "-c", _SUPERVISOR_BOOTSTRAP,
+             str(root), str(dependencies), str(config), sha, source, config_pin, desktop, nonce],
+            cwd=root, env=acquisition._child_environment(), creationflags=subprocess.DETACHED_PROCESS,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        deadline = time.monotonic() + 45
+        while child.poll() is None and time.monotonic() < deadline:
+            if _read_supervisor_health(runtime, expected, executable, owner, child=child, nonce=nonce):
+                try:
+                    recheck()
+                finally:
+                    failure = "SUPERVISOR_START_UNKNOWN"
+                if (runtime._supervisor_deployment_value("StartPending") == nonce
+                        and _read_supervisor_health(runtime, expected, executable, owner, child=child, nonce=nonce)):
+                    runtime._store_supervisor_deployment_value("StartPending", None)
+                    return _supervisor_receipt("SUPERVISOR_STARTED_HEALTH_OBSERVED", issue_number, sha)
+                break
+            time.sleep(0.25)
+    except Exception:
+        # Exception text can include private config, paths and native diagnostics.
+        pass
+    return _supervisor_receipt(failure, issue_number, sha)
 
 
 def _install_protected_clean_autostart(event):
@@ -5283,6 +5486,10 @@ def perform(request):
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
         return _clean_autostart_receipt("PROTECTED_HOSTOPS_ONLY", operation=op)
+    if op == _SUPERVISOR_DEPLOY:
+        if type(params) is not dict or params:
+            deny("INVALID_PARAMETERS")
+        deny("PROTECTED_HOSTOPS_ONLY")
     if op == "cdp_9444_config_registry":
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
@@ -5421,6 +5628,8 @@ def main():
             result = _probe_protected_clean_runtime(event)
         elif request["operation"] == _CLEAN_1270_FORENSIC_READ:
             result = _probe_protected_clean_runtime(event, forensic=True)
+        elif request["operation"] == _SUPERVISOR_DEPLOY:
+            result = _deploy_protected_supervisor(event)
         else:
             if request["operation"] == _CLEAN_AUTOSTART:
                 outcome = _install_protected_clean_autostart(event)

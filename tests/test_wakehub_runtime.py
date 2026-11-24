@@ -2575,6 +2575,100 @@ def chrome_record(supervisor):
         return json.loads(db.execute("SELECT record FROM chrome_lifecycle").fetchone()[0])
 
 
+@pytest.fixture
+def observe_only(supervisor, monkeypatch):
+    s = supervisor
+    monkeypatch.setattr(r, "_private_identity", lambda path: s.owner()[2])
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("observe-only reached a journal, source or browser effect")
+
+    monkeypatch.setattr(r.Journal, "locked", forbidden)
+    monkeypatch.setattr(r, "_compose_target", forbidden)
+    monkeypatch.setattr(r._SupervisorChrome, "run_once", forbidden)
+    monkeypatch.setattr(r.LocalChromeDoorbellAdapter, "send_wake", forbidden)
+    monkeypatch.setattr(r.chrome_acquisition, "_clean_task", forbidden)
+    return s
+
+
+@pytest.mark.parametrize("owned", [False, True])
+def test_observe_only_cli_reads_actual_health_without_journal_or_source(observe_only, capsys, owned):
+    s = observe_only
+    s.set_owned(owned)
+    assert main(["supervise", "--observe-only", "--config", str(s.i["config_path"]),
+                 "--repository-root", str(s.i["root"]), "--max-ticks", "1"]) == 2
+    health = "CHROME_OWNED" if owned else "CHROME_ABSENT"
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["chrome_health"] == health
+    assert json.loads(captured.err) == {"chrome_health": health}
+    assert s.i["browser"].reads == 0 and s.requests == [] and s.ticks == []
+    assert not s.path.exists()
+
+
+@pytest.mark.parametrize("change", ["demand-start", "preload", "delivery", "missing", "observe"])
+def test_observe_only_holds_on_config_drift_without_effects(observe_only, change):
+    s = observe_only
+    health = []
+
+    def drift(code):
+        health.append(code)
+        config = s.i["config"]
+        if change == "missing":
+            s.i["config_path"].unlink()
+            return
+        if change == "preload":
+            config["chat_preload"] = True
+        elif change == "delivery":
+            config["chat_preload"] = False
+            config["ui_delivery"] = {"schema": "WakeHubLocalUIDelivery.v2",
+                                     "route_marker": s.i["registration"].marker,
+                                     "registration_id": "a" * 32, "marker_digest": "b" * 64,
+                                     "grants": [{"source_key": "c" * 64, "expires_ms": 2200000000000}]}
+        elif change == "observe":
+            config["caller_id"] = "different-caller"
+        else:
+            config["chrome_lifecycle"] = change
+        s.i["save"](s.i["config_path"], config)
+
+    result = s.run(max_ticks=2, observe_only=True, on_health=drift)
+    expected = {"missing": "LOCAL_AUTHORITY_MISSING", "observe": "LOCAL_CONFIG_CHANGED"}
+    assert result.code == expected.get(change, "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED")
+    assert health == ["CHROME_OWNED"]
+    assert s.requests == [] and s.ticks == [] and not s.path.exists()
+
+
+def test_observe_only_emits_private_source_bound_health_under_slot(observe_only, monkeypatch):
+    s = observe_only
+    config = s.i["config_path"]
+    root = s.i["root"]
+    _, config_pin = r._observe_only_config(config, root, s.owner(), lambda: False)
+    desktop = r._supervised_desktop(s.owner()[1], s.owner()[2])
+    deployment = ("a" * 40, "b" * 64, config_pin, desktop, "c" * 32)
+    writes = []
+    state = {"Health": None}
+
+    def store(name, value):
+        assert s.slot.active
+        assert name == "Health"
+        state[name] = value
+        writes.append(json.loads(value) if value is not None else None)
+
+    monkeypatch.setattr(r, "_store_supervisor_deployment_value", store)
+    monkeypatch.setattr(r, "_supervisor_deployment_value", state.get)
+    monkeypatch.setattr(r, "_supervisor_process", lambda pid, exe, owner: 123456)
+    monkeypatch.setattr(r, "monotonic_ns", lambda: 123_000_000)
+    result = s.run(observe_only=True, _deployment=deployment)
+    assert result.chrome_health == "CHROME_OWNED"
+    assert writes == [{"source_sha": deployment[0], "source_digest": deployment[1],
+                       "config_digest": config_pin, "desktop": desktop, "nonce": deployment[4],
+                       "pid": os.getpid(), "created": 123456, "observed_ns": 123_000_000,
+                       "health": "CHROME_OWNED"}, None]
+    writes.clear()
+    s.slot.pending = True
+    assert s.run(observe_only=True, _deployment=deployment).code == "CHROME_LAUNCH_RECONCILE_REQUIRED"
+    assert writes == [] and s.slot.pending and not s.path.exists()
+
+
 def test_flat02_supervisor_acquires_once_then_reuses_owned_9444(supervisor, capsys):
     s = supervisor
     s.set_owned(False)

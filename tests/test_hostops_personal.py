@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 from io import BytesIO
+from itertools import count
 import json
 from pathlib import Path, PureWindowsPath
 import re
@@ -3239,6 +3240,27 @@ class PersonalCdp9444ConfigRegistryTests(unittest.TestCase):
         cases.append({"name": "legacy_projection_isolation", "body": encode(legacy),
                       "request": encode({"schema": hostops.SCHEMA, "operation": "inventory", "parameters": {}}),
                       "expected": {"status": "OBSERVED", "operation": "inventory"}})
+        supervisor_request = encode({"schema": hostops.SCHEMA, "operation": "deploy_wakehub_supervisor",
+                                     "parameters": {}})
+        for code, status in (
+            ("SUPERVISOR_STARTED_HEALTH_OBSERVED", "OBSERVED"),
+            ("SUPERVISOR_REUSED_HEALTH_OBSERVED", "OBSERVED"),
+            ("SUPERVISOR_START_UNKNOWN", "HOLD"),
+            ("LOCAL_CONFIG_REQUIRED", "HOLD"),
+            ("PRIVATE_CONFIG_PATH", "HOLD"),
+        ):
+            native = hostops._supervisor_receipt(code, 17, "f" * 40)
+            expected = {
+                "status": status, "code": "SUPERVISOR_RUNTIME_UNAVAILABLE" if code.startswith("PRIVATE") else code,
+                "operation": "deploy_wakehub_supervisor", "issue_number": 17, "source_sha": "f" * 40,
+                "approval_channel": "OWNER_GITHUB_COMMENT", "remote_shell_enabled": False,
+                "arbitrary_shell_enabled": False, "exact_chat_verified": False, "wake_sent": False,
+            }
+            self.assertEqual(native, expected)
+            local_evidence = {"chrome_health": "PRIVATE", "effect_state": "PRIVATE", "pid": 123,
+                              "config": {"private_token": "PRIVATE"}, "source_digest": "PRIVATE"}
+            cases.append({"name": code, "body": encode({**native, **local_evidence}),
+                          "request": supervisor_request, "expected": expected})
         harness = r"""
 const fs = require('fs'), path = require('path'), vm = require('vm');
 const cases = JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
@@ -3292,6 +3314,160 @@ const assert = require('assert');
         standing_read.assert_called_once_with()
         topology_read.assert_called_once_with()
         self.native.assert_not_called()
+
+
+class ProtectedWakeHubSupervisorTests(unittest.TestCase):
+    def setUp(self):
+        from ai_commerce.wakehub_runtime import runner
+
+        self.runtime = runner
+        self.stack = self.enterContext(ExitStack())
+        self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        self.config = self.root / "existing-config.json"
+        self.config.touch()
+        self.executable = self.root / "python.exe"
+        self.executable.touch()
+        (self.root / "Lib" / "site-packages").mkdir(parents=True)
+        self.op = "deploy_wakehub_supervisor"
+        self.sha, self.source, self.config_pin, self.desktop = "a" * 40, "b" * 64, "c" * 64, "d" * 64
+        self.env = {
+            "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "issue_comment", "GITHUB_REPOSITORY": hostops.REPO,
+            "GITHUB_REPOSITORY_OWNER": hostops.OWNER, "GITHUB_ACTOR": hostops.OWNER,
+            "GITHUB_TRIGGERING_ACTOR": hostops.OWNER, "GITHUB_REF": "refs/heads/main", "GITHUB_RUN_ATTEMPT": "1",
+            "GITHUB_WORKFLOW_REF": hostops.REPO + "/.github/workflows/issue-ingress.yml@refs/heads/main",
+            "RUNNER_ENVIRONMENT": "self-hosted", "RUNNER_NAME": "AI-COMMERCE-HOSTOPS-01", "GITHUB_SHA": self.sha,
+            "GITHUB_WORKSPACE": str(MODULE.parents[3]), "GITHUB_EVENT_PATH": str(self.root / "event.json"),
+            "AI_COMMERCE_WAKEHUB_CONFIG": str(self.config),
+        }
+        self.approval = event("write", self.op, {})
+        self.owner = (self.root, 7, "S-1-5-21-101-202-303-1001")
+        self.values = {}
+        self.child = SimpleNamespace(pid=123, poll=Mock(return_value=None))
+        clock = count()
+        self.mock(hostops, "time", new=SimpleNamespace(monotonic=lambda: next(clock), sleep=Mock()))
+        self.mock(hostops, "os", new=SimpleNamespace(name="nt", environ=self.env))
+        self.mock(hostops.sys, "_base_executable", new=str(self.executable))
+        self.mock(hostops.sys, "prefix", new=str(self.root))
+        self.mock(hostops, "ROOTS", new={"workspace": self.root})
+        self.mock(hostops, "_persistent_clean_source", return_value=self.source)
+        self.mock(acquisition, "_native_operator", return_value=self.owner)
+        self.mock(runner, "_desktop_logon", return_value=self.desktop)
+        self.config_read = self.mock(runner, "_observe_only_config", return_value=(None, self.config_pin))
+        self.active = self.mock(runner, "_supervisor_active", return_value=False)
+        self.mock(runner, "_supervisor_deployment_value", side_effect=self.values.get)
+        self.mock(runner, "_store_supervisor_deployment_value", side_effect=self.values.__setitem__)
+        self.live_process = self.mock(runner, "_supervisor_process", return_value=456)
+        self.mock(runner, "monotonic_ns", return_value=100_000_000_000)
+        self.mock(hostops.subprocess, "DETACHED_PROCESS", new=0x8, create=True)
+        self.spawn = self.mock(hostops.subprocess, "Popen", return_value=self.child)
+
+    def mock(self, obj, name, **kwargs):
+        return self.stack.enter_context(patch.object(obj, name, **kwargs))
+
+    def dispatch(self):
+        Path(self.env["GITHUB_EVENT_PATH"]).write_text(json.dumps(self.approval), encoding="utf-8")
+        output = self.root / "result.json"
+        argv = ["personal", "--mode", "write", "--output", str(output)]
+        with patch.object(hostops.sys, "argv", argv):
+            exit_code = hostops.main()
+        receipt = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(exit_code, 0 if receipt["status"] == "OBSERVED" else 2)
+        self.assertLessEqual(receipt.keys(), hostops.PERSONAL_PUBLIC_FIELDS)
+        for private in ("PRIVATE", str(self.config), self.source, self.config_pin, self.desktop):
+            self.assertNotIn(private, json.dumps(receipt))
+        return receipt
+
+    def publish_health(self, **overrides):
+        self.active.return_value = True
+        self.values["Health"] = json.dumps({
+            "source_sha": self.sha, "source_digest": self.source, "config_digest": self.config_pin,
+            "desktop": self.desktop, "nonce": "e" * 32, "pid": 123, "created": 456,
+            "observed_ns": 99_000_000_000, "health": "CHROME_ABSENT", **overrides,
+        })
+
+    def test_authorization_and_parameters_are_fixed(self):
+        with self.assertRaisesRegex(hostops.Denied, "READ_OPERATION_DENIED"):
+            hostops.parse_event(event("read", self.op, {}), "read")
+        with self.assertRaisesRegex(hostops.Denied, "INVALID_PARAMETERS"):
+            hostops.parse_event(event("write", self.op, {"config": "PRIVATE"}), "write")
+        with self.assertRaisesRegex(hostops.Denied, "PROTECTED_HOSTOPS_ONLY"):
+            hostops.perform(hostops.parse_event(self.approval, "write"))
+        self.approval["comment"]["body"] = "APPROVE WRITE #18"
+        self.assertEqual(self.dispatch()["code"], "EXACT_WRITE_APPROVAL_REQUIRED")
+        self.approval = event("write", self.op, {})
+        self.env["AI_COMMERCE_GIT_GUARD_TEST"] = "1"
+        self.assertEqual(self.dispatch()["code"], "PROTECTED_HOSTOPS_ONLY")
+        del self.env["AI_COMMERCE_GIT_GUARD_TEST"]
+        self.env["GITHUB_RUN_ATTEMPT"] = "2"
+        self.assertEqual(self.dispatch()["code"], "PROTECTED_HOSTOPS_ONLY")
+        self.config_read.assert_not_called()
+        self.spawn.assert_not_called()
+        self.assertEqual(self.values, {})
+
+    def test_missing_changed_or_unavailable_config_holds_before_launch(self):
+        self.env.pop("AI_COMMERCE_WAKEHUB_CONFIG")
+        self.assertEqual(self.dispatch()["code"], "LOCAL_CONFIG_REQUIRED")
+        self.env["AI_COMMERCE_WAKEHUB_CONFIG"] = str(self.config)
+        self.config_read.side_effect = self.runtime.RuntimeHold("LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED")
+        self.assertEqual(self.dispatch()["code"], "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED")
+        self.config_read.side_effect = [(None, self.config_pin), (None, "f" * 64)]
+        self.assertEqual(self.dispatch()["code"], "LOCAL_CONFIG_CHANGED")
+        self.config_read.side_effect = None
+        self.active.side_effect = OSError("PRIVATE probe unavailable")
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_RUNTIME_UNAVAILABLE")
+        self.spawn.assert_not_called()
+        self.assertEqual(self.values, {})
+
+    def test_reuse_needs_matching_live_source_owner_and_fresh_health(self):
+        self.publish_health()
+        receipt = self.dispatch()
+        self.assertEqual((receipt["status"], receipt["code"], receipt["source_sha"]),
+                         ("OBSERVED", "SUPERVISOR_REUSED_HEALTH_OBSERVED", self.sha))
+        self.live_process.assert_called_with(123, self.executable, self.owner)
+        for bad in ({"desktop": "f" * 64}, {"source_sha": "f" * 40}, {"source_digest": "f" * 64},
+                    {"observed_ns": 0}, {"created": 789}, {"health": "PRIVATE"}):
+            with self.subTest(bad=bad):
+                self.publish_health(**bad)
+                self.assertEqual(self.dispatch()["code"], "SUPERVISOR_ACTIVE_UNVERIFIED")
+        self.values.pop("Health")
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_ACTIVE_UNVERIFIED")
+        self.spawn.assert_not_called()
+
+    def test_start_requires_same_child_and_rechecked_health(self):
+        def launch(argv, **kwargs):
+            self.assertEqual(argv[-4:-1], [self.source, self.config_pin, self.desktop])
+            self.assertEqual(self.values["StartPending"], argv[-1])
+            self.assertEqual(kwargs["cwd"], self.root)
+            self.publish_health(nonce=argv[-1], health="CHROME_OWNED")
+            return self.child
+
+        self.spawn.side_effect = launch
+        receipt = self.dispatch()
+        self.assertEqual((receipt["status"], receipt["code"], receipt["source_sha"]),
+                         ("OBSERVED", "SUPERVISOR_STARTED_HEALTH_OBSERVED", self.sha))
+        self.assertIsNone(self.values["StartPending"])
+        self.spawn.assert_called_once()
+
+    def test_missing_or_ambiguous_child_health_keeps_unknown_and_never_retries(self):
+        for publish in (False, True):
+            with self.subTest(ambiguous=publish):
+                self.values.clear()
+                self.active.return_value = False
+                self.spawn.reset_mock()
+
+                def launch(argv, **kwargs):
+                    if publish:
+                        self.publish_health(nonce=argv[-1], pid=999)
+                    return self.child
+
+                self.spawn.side_effect = launch
+                self.assertEqual(self.dispatch()["code"], "SUPERVISOR_START_UNKNOWN")
+                pending = self.values["StartPending"]
+                self.assertRegex(pending, r"^[a-f0-9]{32}$")
+                self.active.return_value = False
+                self.assertEqual(self.dispatch()["code"], "SUPERVISOR_START_UNKNOWN")
+                self.assertEqual(self.values["StartPending"], pending)
+                self.spawn.assert_called_once()
 
 
 class PersonalClean9444AutostartTests(unittest.TestCase):
@@ -4345,6 +4521,23 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
             ("ls-files", "-v", "-z", "--", "src"): "\0".join(tracked_entries) + "\0",
         }
         return root, workflow, source, peer, git
+
+    def test_supervisor_source_pin_hashes_exact_bytes_of_verified_checkout(self):
+        runtime = "src/ai_commerce/wakehub_runtime/runner.py"
+        raw = b"reviewed_runtime = True\r\n"
+        root, workflow, source, peer, git = self._clean_source_case(
+            "supervisor_pin", {runtime: (raw, raw.replace(b"\r\n", b"\n"))})
+        paths = (source, root / runtime)
+        manifest = sorted([path.relative_to(root / "src").as_posix(), hashlib.sha256(path.read_bytes()).hexdigest()]
+                          for path in paths)
+        expected = hashlib.sha256(json.dumps(manifest, separators=(",", ":")).encode("ascii")).hexdigest()
+        with patch.dict(hostops.ROOTS, workspace=root), patch.dict(self.env, GITHUB_WORKSPACE=str(workflow)), \
+                patch.object(hostops, "__file__", workflow / "src/ai_commerce/hostops_v3/personal.py"), \
+                patch.object(self.acq, "__file__", peer), patch.object(hostops, "_git", side_effect=lambda *a: git[a]):
+            self.assertEqual(self.real_source(self.acq, self.sha, pin_runtime=True), expected)
+            (root / runtime).write_bytes(b"reviewed_runtime = False\r\n")
+            with self.assertRaisesRegex(hostops.Denied, "SOURCE_BYTES_MISMATCH"):
+                self.real_source(self.acq, self.sha, pin_runtime=True)
 
     def test_persistent_source_allows_crlf_equivalence_for_recognized_text_suffixes_and_reaches_runtime(self):
         # Exact-byte fast path passes for both text and binary tracked files without normalization.

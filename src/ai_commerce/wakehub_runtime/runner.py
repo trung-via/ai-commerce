@@ -1,7 +1,7 @@
 """WakeHub source admission, local route readiness and its private SQLite journal."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 import json
@@ -11,9 +11,10 @@ from pathlib import Path
 import re
 from secrets import token_hex
 import sqlite3
+import sys
 from threading import Event as StopEvent
 import time
-from time import monotonic, time_ns
+from time import monotonic, monotonic_ns, time_ns
 from types import SimpleNamespace
 from typing import Callable, Literal, Protocol
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -636,16 +637,19 @@ def _owned_chrome_process(inventory: tuple, desktop: str) -> tuple[str, int]:
 
 
 def _supervised_desktop(session: int, sid: str) -> str:
+    _require(os.name == "nt" and not any(
+        os.environ.get(key) for key in ("CI", "GITHUB_ACTIONS", "GITHUB_RUN_ID", "GITHUB_EVENT_PATH")
+    ) and not any(key.startswith("AI_COMMERCE_GIT_GUARD_") for key in os.environ),
+             "LOCAL_OPERATOR_ONLY")
+    return _desktop_logon(session, sid)
+
+
+def _desktop_logon(session: int, sid: str) -> str:
     """Pin the live, unlocked Windows logon, even if its session ID is reused."""
     import ctypes
     from ctypes import wintypes as w
 
     from ai_commerce.wakehub.native_authority import _desktop_identity
-
-    _require(os.name == "nt" and not any(
-        os.environ.get(key) for key in ("CI", "GITHUB_ACTIONS", "GITHUB_RUN_ID", "GITHUB_EVENT_PATH")
-    ) and not any(key.startswith("AI_COMMERCE_GIT_GUARD_") for key in os.environ),
-             "LOCAL_OPERATOR_ONLY")
 
     class Session(ctypes.Structure):
         _fields_ = [("id", w.DWORD), ("station", w.LPWSTR), ("state", ctypes.c_int)]
@@ -3027,6 +3031,92 @@ def _registered_result(run: Callable[[], Result]) -> Result:
         return Result("HOLD", "LOCAL_AUTHORITY_INVALID", "GITHUB_AUTHENTICATED")
 
 
+_SUPERVISOR_MUTEX = r"Global\AI-Commerce-WakeHub-9444-Receiver-v1"
+_SUPERVISOR_DEPLOYMENT_KEY = r"Software\AI-Commerce\WakeHubSupervisor"
+_SUPERVISOR_HEALTH_MAX_AGE_NS = 60_000_000_000
+_OBSERVED_CHROME_HEALTH = frozenset({"CHROME_OWNED", "CHROME_ABSENT"})
+
+
+def _supervisor_active() -> bool:
+    """Read the existing receiver slot without acquiring it or starting anything."""
+    import ctypes as c
+    from ctypes import wintypes as w
+
+    kernel = c.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenMutexW.argtypes = [w.DWORD, w.BOOL, w.LPCWSTR]
+    kernel.OpenMutexW.restype = w.HANDLE
+    kernel.CloseHandle.argtypes = [w.HANDLE]
+    handle = kernel.OpenMutexW(0x100000, False, _SUPERVISOR_MUTEX)
+    if handle:
+        kernel.CloseHandle(handle)
+        return True
+    _require(c.get_last_error() == 2, "SUPERVISOR_SLOT_UNAVAILABLE")  # Missing, not inaccessible.
+    return False
+
+
+def _supervisor_process(pid: int, executable: Path, owner: tuple[Path, int, str]) -> int:
+    """Verify the live image, non-elevated token and session, and return creation time."""
+    import ctypes as c
+    from ctypes import wintypes as w
+
+    from ai_commerce.hostops_v3.security import windows_identity
+
+    kernel = c.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = [w.DWORD, w.BOOL, w.DWORD]
+    kernel.OpenProcess.restype = w.HANDLE
+    kernel.CloseHandle.argtypes = [w.HANDLE]
+    kernel.WaitForSingleObject.argtypes = [w.HANDLE, w.DWORD]
+    kernel.WaitForSingleObject.restype = w.DWORD
+    kernel.GetProcessTimes.argtypes = [w.HANDLE, *([c.POINTER(w.FILETIME)] * 4)]
+    kernel.GetProcessTimes.restype = w.BOOL
+    kernel.QueryFullProcessImageNameW.argtypes = [w.HANDLE, w.DWORD, w.LPWSTR, c.POINTER(w.DWORD)]
+    kernel.QueryFullProcessImageNameW.restype = w.BOOL
+    kernel.ProcessIdToSessionId.argtypes = [w.DWORD, c.POINTER(w.DWORD)]
+    kernel.ProcessIdToSessionId.restype = w.BOOL
+
+    code = "SUPERVISOR_PROCESS_UNVERIFIED"
+    handle = kernel.OpenProcess(0x101000, False, pid)  # SYNCHRONIZE | QUERY_LIMITED_INFORMATION
+    _require(bool(handle), code)
+    try:
+        image = c.create_unicode_buffer(32768)
+        size, session = w.DWORD(len(image)), w.DWORD()
+        times = [w.FILETIME() for _ in range(4)]
+        _require(kernel.QueryFullProcessImageNameW(handle, 0, image, c.byref(size))
+                 and Path(image.value) == executable
+                 and kernel.GetProcessTimes(handle, *(c.byref(t) for t in times))
+                 and kernel.ProcessIdToSessionId(pid, c.byref(session)) and session.value == owner[1]
+                 and windows_identity(handle) == (owner[2], False)
+                 and kernel.WaitForSingleObject(handle, 0) == 258, code)
+        return (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def _supervisor_deployment_value(name: str) -> str | None:
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _SUPERVISOR_DEPLOYMENT_KEY) as key:
+            value, kind = winreg.QueryValueEx(key, name)
+    except FileNotFoundError:
+        return None
+    _require(kind == winreg.REG_SZ and 0 < len(value) <= 2048, "SUPERVISOR_EVIDENCE_INVALID")
+    return value
+
+
+def _store_supervisor_deployment_value(name: str, value: str | None) -> None:
+    import winreg
+
+    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _SUPERVISOR_DEPLOYMENT_KEY,
+                            access=winreg.KEY_SET_VALUE) as key:
+        if value is None:
+            winreg.DeleteValue(key, name)
+        else:
+            winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
+        if name == "StartPending":
+            winreg.FlushKey(key)
+
+
 @contextmanager
 def _supervisor_slot():
     """One receiver across Windows sessions, released automatically on exit."""
@@ -3042,7 +3132,7 @@ def _supervisor_slot():
     kernel.CloseHandle.restype = wintypes.BOOL
     ctypes.set_last_error(0)
     # The existing clean-launch mutex remains owned by the acquisition command.
-    handle = kernel.CreateMutexExW(None, r"Global\AI-Commerce-WakeHub-9444-Receiver-v1", 0, 0x100000)
+    handle = kernel.CreateMutexExW(None, _SUPERVISOR_MUTEX, 0, 0x100000)
     error = ctypes.get_last_error()
     _require(bool(handle), "SUPERVISOR_SLOT_UNAVAILABLE")
     try:
@@ -3060,7 +3150,8 @@ class SupervisorStop(Protocol):
 def supervise(tick: Callable[[], Result], *, stop: SupervisorStop, max_ticks: int | None = None,
               idle_seconds: int = 30, max_backoff_seconds: int = 300,
               on_health: Callable[[str], None] | None = None,
-              _wait_after_tick: Callable[[], float] | None = None) -> Result:
+              _wait_after_tick: Callable[[], float] | None = None,
+              _on_slot_exit: Callable[[], None] | None = None) -> Result:
     """Run serial ticks under a receiver slot, interruptible between ticks."""
     stopped = Result("HOLD", "SUPERVISOR_STOPPED", "SOURCE_ONLY")
     if (type(idle_seconds) is not int or type(max_backoff_seconds) is not int
@@ -3070,7 +3161,9 @@ def supervise(tick: Callable[[], Result], *, stop: SupervisorStop, max_ticks: in
     if stop.is_set():
         return stopped
     try:
-        with _supervisor_slot():
+        with _supervisor_slot(), ExitStack() as cleanup:
+            if _on_slot_exit is not None:
+                cleanup.callback(_on_slot_exit)
             delay = idle_seconds
             count = 0
             health = None
@@ -3131,9 +3224,81 @@ def _normal_source_wait(result: Result, chrome: Result) -> bool:
         or result.code.startswith("EXACT_CHAT_"))
 
 
+def _observe_only_config(config_path: Path, repository_root: Path, owner: tuple[Path, int, str],
+                         stop: Callable[[], bool]) -> tuple[_SupervisorChrome, str]:
+    runtime = _read_runtime_config(config_path, repository_root)
+    _require(runtime.principal == owner[2] and Path(os.environ.get("LOCALAPPDATA", "")) == owner[0],
+             "LOCAL_CONFIG_INVALID")
+    _require(runtime.chrome_lifecycle == "observe" and not runtime.raw.get("chat_preload", False)
+             and "ui_delivery" not in runtime.raw, "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED")
+    for entry in runtime.targets:
+        kind, path = _target_key(entry)
+        _require(kind != "invalid", "LOCAL_CONFIG_INVALID")
+        _config_path(str(path), repository_root)
+    chrome = _compose_supervisor_chrome(runtime, stop)
+    pin = digest([str(config_path), runtime.raw, chrome.config])
+    return chrome, pin
+
+
+def _observe_only_supervisor(config_path: Path | None, repository_root: Path, *,
+                             stop: SupervisorStop, max_ticks: int | None, idle_seconds: int,
+                             max_backoff_seconds: int, on_health: Callable[[str], None] | None,
+                             deployment: tuple[str, str, str, str, str] | None) -> Result:
+    sha, source, config_pin, desktop_pin, nonce = deployment or (None, None, None, None, None)
+    last_health = None
+
+    def observe() -> Result:
+        nonlocal config_pin, desktop_pin, last_health
+        _require(config_path is not None, "LOCAL_CONFIG_REQUIRED")
+        owner = chrome_acquisition._enrollment_operator(attended=False)
+        desktop = _supervised_desktop(owner[1], owner[2])
+        _require(desktop_pin is None or desktop_pin == desktop, "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+        desktop_pin = desktop
+        chrome, pin = _observe_only_config(config_path, repository_root, owner, stop.is_set)
+        _require(config_pin is None or config_pin == pin, "LOCAL_CONFIG_CHANGED")
+        config_pin = pin
+        # Only native health reads. No journal open, source admission or route/lifecycle effects.
+        state, provenance, pending = chrome.sender.lifecycle_snapshot()
+        _require(not pending, _LAUNCH_UNKNOWN)
+        _require(state in ("OWNED", "ABSENT") and provenance[5] == desktop,
+                 "CHROME_OBSERVATION_CHANGED")
+        _require(_observe_only_config(config_path, repository_root, owner, stop.is_set)[1] == pin,
+                 "LOCAL_CONFIG_CHANGED")
+        _require(chrome_acquisition._enrollment_operator(attended=False) == owner
+                 and _supervised_desktop(owner[1], owner[2]) == desktop and not stop.is_set(),
+                 "CHROME_OBSERVATION_CHANGED")
+        health = "CHROME_OWNED" if state == "OWNED" else "CHROME_ABSENT"
+        if deployment is not None:
+            pid = os.getpid()
+            created = _supervisor_process(pid, Path(sys.executable), owner)
+            last_health = json.dumps({
+                "source_sha": sha, "source_digest": source, "config_digest": pin,
+                "nonce": nonce, "pid": pid, "created": created, "desktop": desktop,
+                "observed_ns": monotonic_ns(), "health": health,
+            }, separators=(",", ":"))
+            _store_supervisor_deployment_value("Health", last_health)
+        return SupervisorTickResult("HOLD", health, "SOURCE_ONLY", False, chrome_health=health)
+
+    def tick() -> Result:
+        result = _registered_result(observe)
+        _require(isinstance(result, SupervisorTickResult), result.code)
+        return result
+
+    def clear_health() -> None:
+        if last_health is not None:
+            with suppress(OSError, RuntimeHold):
+                if _supervisor_deployment_value("Health") == last_health:
+                    _store_supervisor_deployment_value("Health", None)
+
+    return supervise(tick, stop=stop, max_ticks=max_ticks, idle_seconds=idle_seconds,
+                     max_backoff_seconds=max_backoff_seconds, on_health=on_health,
+                     _wait_after_tick=lambda: idle_seconds, _on_slot_exit=clear_health)
+
+
 def run_supervisor(config_path: Path | None, repository_root: Path, *, dry_run: bool = False,
                    max_ticks: int | None = None, idle_seconds: int = 30,
-                   max_backoff_seconds: int = 300, on_health: Callable[[str], None] | None = None) -> Result:
+                   max_backoff_seconds: int = 300, on_health: Callable[[str], None] | None = None,
+                   observe_only: bool = False, _deployment: tuple[str, str, str, str, str] | None = None) -> Result:
     """One Chrome health tick and at most one due source per iteration.
 
     max_ticks counts iterations, including health-only ticks while sources wait.
@@ -3141,6 +3306,10 @@ def run_supervisor(config_path: Path | None, repository_root: Path, *, dry_run: 
     if dry_run:
         return Result("HOLD", "DRY_RUN_NO_EFFECTS", "SOURCE_ONLY")
     stop = StopEvent()
+    if observe_only:
+        return _observe_only_supervisor(config_path, repository_root, stop=stop, max_ticks=max_ticks,
+                                        idle_seconds=idle_seconds, max_backoff_seconds=max_backoff_seconds,
+                                        on_health=on_health, deployment=_deployment)
     retries: dict[tuple[str, Path | str], _Retry] = {}
     chrome_retry = _Retry()
     next_source_at = float("-inf")
