@@ -12,7 +12,8 @@ from .runner import (
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Source-only WakeHub R2 ingress and R3B1 typed dependency gates for Chrome 9444. "
+        description="Source-only WakeHub intake for exact EF02 runs and GitHub Issue creations. "
+                    "Chrome 9444 readiness and typed dependency gates. "
                     "No tab preload, UI Send, "
                     "login, scheduler, HostOps or GitHub writes.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -20,10 +21,12 @@ def main(argv: list[str] | None = None) -> int:
         "supervise", help="Run serial ticks for the interactive owner on Windows.",
         description="Observe Chrome 9444 by default. An owner-controlled private runtime config may set "
                     "chrome_lifecycle to demand-start for the verified demand task, or paused to withhold starts.")
-    supervisor.add_argument("--max-ticks", type=int, help="Stop after this many ticks. Omit to run until stopped.")
-    supervisor.add_argument("--idle-seconds", type=int, default=30, help="Minimum delay between ticks (default 30).")
+    supervisor.add_argument("--max-ticks", type=int,
+                            help="Count all ticks, including Chrome health ticks with no eligible source.")
+    supervisor.add_argument("--idle-seconds", type=int, default=30,
+                            help="Normal Chrome health and source polling interval (default 30).")
     supervisor.add_argument("--max-backoff-seconds", type=int, default=300,
-                            help="Maximum delay after consecutive holds (default 300).")
+                            help="Maximum retry delay per source and for Chrome demand-start (default 300).")
     supervisor.add_argument("--dry-run", action="store_true", help="Report wiring without acquiring the receiver.")
     run = sub.add_parser("run", help="Verify one registered event and read-only readiness; exits HOLD.")
     mode = run.add_mutually_exclusive_group()
@@ -32,11 +35,13 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--diagnostic", action="store_true",
                       help="Run labeled offline synthetic adapters and real journal; no host proof.")
     run.add_argument("--native-source-only", action="store_true",
-                     help="Check signed resolve/deliver grants and R3B1 authenticated origin, "
+                     help="For EF02, check signed resolve/deliver grants and R3B1 authenticated origin, "
                           "USER-turn and Brain dependency gates; no UI Send. "
                           "Default remains R2 read-only; missing enrolled authority yields HOLD_DEPENDENCY.")
     run.add_argument("--journal", type=Path,
                      help="Diagnostic-only private file in an existing operator-owned directory, outside checkout.")
+    run.add_argument("--target-index", type=int,
+                     help="Select a zero-based entry in the private registered_targets list (default 0).")
     for command in (run, supervisor):
         command.add_argument("--repository-root", type=Path, help="Checkout excluded from private journal storage.")
         command.add_argument("--config", type=Path,
@@ -53,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result.to_dict(), sort_keys=True))
         return 0 if result.code == "SUPERVISOR_STOPPED" else 2
     if args.diagnostic:
+        if args.target_index is not None:
+            run.error("--target-index cannot be combined with --diagnostic")
         if args.native_source_only:
             run.error("--native-source-only cannot be combined with --diagnostic")
         if args.config is not None:
@@ -71,7 +78,8 @@ def main(argv: list[str] | None = None) -> int:
         configured = os.environ.get("AI_COMMERCE_WAKEHUB_CONFIG")
         config = args.config if args.config is not None else Path(configured) if configured else None
         run_mode = run_native_source_only if args.native_source_only else run_read_only
-        result = run_mode(config, args.repository_root or _CODE_ROOT, dry_run=args.dry_run)
+        result = run_mode(config, args.repository_root or _CODE_ROOT, dry_run=args.dry_run,
+                          target_index=0 if args.target_index is None else args.target_index)
     print(json.dumps(result.to_dict(), sort_keys=True))
     return 0 if (result.status == "ACK" and result.code == "CONSUMER_RECEIPT_RECORDED"
                  and result.evidence_type in ("GITHUB_AUTHENTICATED", "SYNTHETIC_FIXTURE")) else 2
