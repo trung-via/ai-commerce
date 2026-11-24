@@ -19,6 +19,7 @@ from threading import Event as StopEvent
 from time import time_ns
 from types import SimpleNamespace
 from typing import Callable, Literal, Protocol
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from ai_commerce.production_orchestration.contracts import (
     CONSUMER_ROUTES, OrchestrationError, ProductionStageCompleted, ProductionStageReceipt,
@@ -31,14 +32,14 @@ from ai_commerce.remote._private_state import (
 )
 from ai_commerce.remote.cdp_doorbell import LocalChromeDoorbellAdapter
 from ai_commerce.remote.conversation_binding import (
-    BindingError, ResolvedBinding, _CHAT, _ROUTE, _decode_unique, resolve_binding,
+    BindingError, ResolvedBinding, _CHAT, _REPOSITORY, _ROUTE, _decode_unique, resolve_binding,
 )
 from ai_commerce.remote.local_completion_handoff import HandoffBlocked, _private_identity
 from ai_commerce.remote.local_wake_trigger import GitHubExactRunReader, PinnedRun, TriggerBlocked
-from ai_commerce.remote.github_artifact_authority import GitHubRestArtifactAuthority
+from ai_commerce.remote.github_artifact_authority import GitHubRestArtifactAuthority, _API, _HEADERS, _MAX_JSON
 from ai_commerce.remote.github_read_retry import GitHubReadBlocked, GitHubReadBudget
 from ai_commerce.remote.local_run_registration import (
-    RegistrationBlocked, RegistrationIntent, _record_valid,
+    REPOSITORY, RegistrationBlocked, RegistrationIntent, _record_valid, _timestamp,
 )
 from ai_commerce.remote.signed_origin_consent import SignedOriginConsentAuthority, registry_sha256
 from ai_commerce.remote.trusted_origin import LocalCallerAttestation
@@ -54,6 +55,12 @@ _CODE_ROOT = Path(__file__).resolve().parents[3]
 _DELIVERY_STATES = {"UI_TURN_OBSERVED", "USER_TURN_AUTHENTICATED"}
 _LAUNCH_UNKNOWN = "CHROME_LAUNCH_RECONCILE_REQUIRED"
 _ACQUISITION_REPORTED = "CHROME_ACQUISITION_REPORTED"
+_EF02 = "ef02-completion"
+_ISSUE = "github-issue-created"
+_ISSUE_EVIDENCE = "GITHUB_ISSUE_AUTHENTICATED"
+_ISSUE_ACCEPTED = "ISSUE_CREATED_SOURCE_ACCEPTED"
+_ISSUE_ROUTE_DEPENDENCY = "ISSUE_CREATED_ROUTE_AUTHORITY_UNAVAILABLE"
+_MAX_TARGETS = 16
 _CHROME_READY = {"CHROME_OWNED", "CHROME_OWNED_LAUNCH_UNRESOLVED"}
 # These returns from the fixed task script precede RunEx.
 _DEMAND_NOT_ATTEMPTED = frozenset({
@@ -120,7 +127,7 @@ class Registration:
 
 @dataclass(frozen=True)
 class Event:
-    """Detached selectors returned only by a trusted, provenance-checking source."""
+    """Legacy EF02 delivery selectors. Preserve the wire and journal fields."""
     event_id: str
     source_sha: str
     attempt: int
@@ -141,8 +148,105 @@ class Event:
                        "route_generation": registration.binding.generation, "attempt": self.attempt})
 
 
+def _github_id(value: object) -> bool:
+    return type(value) is int and 0 < value <= 2**63 - 1
+
+
+@dataclass(frozen=True)
+class SourceIdentity:
+    kind: Literal["ef02-completion", "github-issue-created"]
+    repository: str
+    object_id: int  # GitHub run ID or global Issue ID
+    attempt: int | None = None
+    repository_id: int | None = None
+
+    def __post_init__(self) -> None:
+        _require(type(self.kind) is str and type(self.repository) is str and len(self.repository) <= 201
+                 and self.repository == self.repository.lower()
+                 and _REPOSITORY.fullmatch(self.repository) is not None
+                 and not {".", ".."}.intersection(self.repository.split("/"))
+                 and _github_id(self.object_id), "SOURCE_IDENTITY_INVALID")
+        _require((self.kind == _EF02 and self.repository == REPOSITORY and _github_id(self.attempt)
+                  and self.repository_id is None)
+                 or (self.kind == _ISSUE and self.attempt is None and _github_id(self.repository_id)),
+                 "SOURCE_IDENTITY_INVALID")
+
+    @property
+    def key(self) -> str:
+        # Use the immutable repository ID for Issues, even if its name changes.
+        return digest([self.kind, self.repository_id or self.repository, self.object_id, self.attempt])
+
+
+@dataclass(frozen=True)
+class IssueCreated:
+    issue_number: int
+    creator_id: int
+    created_at: str
+
+    def __post_init__(self) -> None:
+        _require(all(_github_id(v) for v in (self.issue_number, self.creator_id)),
+                 "ISSUE_CREATION_INVALID")
+        try:
+            _timestamp(self.created_at)
+        except RegistrationBlocked:
+            raise RuntimeHold("ISSUE_CREATION_INVALID") from None
+
+
+@dataclass(frozen=True, repr=False)
+class IssueRegistration:
+    """Local source admission for one exact creation and route revision."""
+    identity: SourceIdentity
+    creation: IssueCreated
+    local_source_sha: str
+    route_marker: str
+
+    def __post_init__(self) -> None:
+        _require(type(self.identity) is SourceIdentity and self.identity.kind == _ISSUE
+                 and type(self.creation) is IssueCreated
+                 and type(self.local_source_sha) is str
+                 and re.fullmatch(r"[0-9a-f]{40}", self.local_source_sha) is not None
+                 and type(self.route_marker) is str
+                 and re.fullmatch(r"wakehub-r1:[0-9a-f]{64}", self.route_marker) is not None,
+                 "ISSUE_REGISTRATION_INVALID")
+
+    def check_route(self, registration: Registration) -> None:
+        _require(registration.evidence_type == "GITHUB_AUTHENTICATED"
+                 and self.local_source_sha == registration.source_sha
+                 and self.route_marker == registration.marker, "ISSUE_REGISTRATION_ROUTE_DRIFT")
+
+    @classmethod
+    def from_dict(cls, data: dict) -> IssueRegistration:
+        _require(type(data) is dict and set(data) == {"identity", "creation", "local_source_sha", "route_marker"}
+                 and type(data["identity"]) is dict and type(data["creation"]) is dict,
+                 "ISSUE_REGISTRATION_INVALID")
+        return cls(SourceIdentity(**data["identity"]), IssueCreated(**data["creation"]),
+                   data["local_source_sha"], data["route_marker"])
+
+
+@dataclass(frozen=True, repr=False)
+class SourceEvent:
+    """Authenticated source identity, separate from the payload commitment."""
+    identity: SourceIdentity
+    payload_sha256: str
+    payload: Event | IssueRegistration
+
+    def __post_init__(self) -> None:
+        _require(type(self.identity) is SourceIdentity and type(self.payload_sha256) is str
+                 and re.fullmatch(r"[0-9a-f]{64}", self.payload_sha256) is not None,
+                 "SOURCE_EVENT_INVALID")
+        if self.identity.kind == _EF02:
+            _require(type(self.payload) is Event and self.payload.evidence_type == "GITHUB_AUTHENTICATED"
+                     and self.payload.attempt == self.identity.attempt
+                     and self.payload.payload_sha256 == self.payload_sha256, "SOURCE_EVENT_INVALID")
+        else:
+            _require(type(self.payload) is IssueRegistration and self.payload.identity == self.identity
+                     and self.payload_sha256 == digest({"identity": asdict(self.identity),
+                                                        "creation": asdict(self.payload.creation)}),
+                     "SOURCE_EVENT_INVALID")
+
+
 class EventSource(Protocol):
-    def next_event(self) -> Event | None: ...
+    def next_event(self) -> Event | SourceEvent | None: ...
 
 
 class GitHubEventSource:
@@ -180,6 +284,71 @@ class GitHubEventSource:
         self.verified_event = deepcopy(event)
         return Event(event["event_id"], event["source_sha"], event["run_attempt"],
                      digest(event), "GITHUB_AUTHENTICATED")
+
+    def envelope(self, event: Event) -> SourceEvent:
+        verified = self.verified_event
+        _require(verified is not None and
+                 (verified["event_id"], verified["source_sha"], digest(verified)) ==
+                 (event.event_id, event.source_sha, event.payload_sha256), "SOURCE_PROOF_MISSING")
+        return SourceEvent(SourceIdentity(_EF02, verified["repository"], verified["run_id"],
+                                          verified["run_attempt"]), event.payload_sha256, event)
+
+
+class _ExactAPIRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        # Exact Issue and repository API reads must retain authenticated custody.
+        return None
+
+
+class GitHubIssueCreatedSource:
+    """Verify an owner-pinned creation via exact authenticated GitHub GETs."""
+
+    def __init__(self, target: IssueRegistration, *, token: str, read_budget: GitHubReadBudget):
+        self.target, self._token, self.read_budget = target, token, read_budget
+        self.verified_event: SourceEvent | None = None
+
+    @staticmethod
+    def _read_json(url: str, token: str, *, timeout: float) -> dict:
+        # Use the existing GitHub REST headers, limits and JSON decoder. Unlike
+        # archive GETs, these requests have no legitimate signed CDN redirect.
+        opener = build_opener(ProxyHandler({}), _ExactAPIRedirect())
+        request = Request(url, headers={**_HEADERS, "Authorization": "Bearer " + token}, method="GET")
+        with opener.open(request, timeout=timeout) as response:
+            raw = response.read(_MAX_JSON + 1)
+        _require(len(raw) <= _MAX_JSON, "GITHUB_RESPONSE_TOO_LARGE")
+        value = _decode_unique(raw.decode("utf-8"))
+        _require(type(value) is dict, "GITHUB_RESPONSE_INVALID")
+        return value
+
+    def _get(self, url: str) -> dict:
+        return self.read_budget.read(
+            lambda u, t: self._read_json(u, t, timeout=self.read_budget.timeout()), url, self._token)
+
+    def _creation(self, root: str, url: str) -> IssueCreated:
+        issue = self._get(url)
+        user, issue_url, repo_url = (issue.get(k) for k in ("user", "url", "repository_url"))
+        _require("pull_request" not in issue and type(issue_url) is str and issue_url.lower() == url
+                 and type(repo_url) is str and repo_url.lower() == root
+                 and _github_id(issue.get("id")) and issue["id"] == self.target.identity.object_id
+                 and type(user) is dict and user.get("type") in ("User", "Bot"), "ISSUE_IDENTITY_UNPROVEN")
+        return IssueCreated(issue.get("number"), user.get("id"), issue.get("created_at"))
+
+    def next_event(self) -> SourceEvent:
+        self.verified_event = None
+        target = self.target
+        root = f"{_API}/repos/{target.identity.repository}"
+        url = f"{root}/issues/{target.creation.issue_number}"
+        candidate = self._creation(root, url)
+        repo = self._get(root)
+        name = repo.get("full_name")
+        _require(type(name) is str and name.lower() == target.identity.repository
+                 and _github_id(repo.get("id")) and repo["id"] == target.identity.repository_id,
+                 "ISSUE_REPOSITORY_UNPROVEN")
+        verified = self._creation(root, url)
+        _require(candidate == verified == target.creation, "ISSUE_CREATION_UNPROVEN")
+        payload_sha = digest({"identity": asdict(target.identity), "creation": asdict(verified)})
+        self.verified_event = SourceEvent(target.identity, payload_sha, target)
+        return self.verified_event
 
 
 @dataclass(frozen=True, repr=False)
@@ -257,7 +426,7 @@ class DoorbellRequest:
 
     @classmethod
     def for_event(cls, event: Event, registration: Registration) -> DoorbellRequest:
-        _require(event.source_sha == registration.source_sha
+        _require(type(event) is Event and event.source_sha == registration.source_sha
                  and event.evidence_type == registration.evidence_type, "DOORBELL_REQUEST_DRIFT")
         return cls(event.event_id, event.key(registration), registration.binding, registration.marker,
                    cdp_doorbell._doorbell_text(event.event_id, "trung-via/ai-commerce",
@@ -889,6 +1058,8 @@ _TABLES = {
 }
 _CHROME_TABLE = ("CREATE TABLE chrome_lifecycle (singleton INTEGER PRIMARY KEY CHECK(singleton=1), "
                  "record TEXT NOT NULL)")
+_SOURCE_TABLE = ("CREATE TABLE source_identities (source_key TEXT PRIMARY KEY, "
+                 "event_key TEXT NOT NULL UNIQUE REFERENCES events(event_key), identity TEXT NOT NULL)")
 _APP_ID = 0x57485231
 
 
@@ -942,13 +1113,50 @@ def _ready_demand_task(owner: tuple, target, candidates: tuple) -> str:
     return digest([str(gui), arguments])
 
 
+def _issue_record_event(raw: dict, registration: Registration) -> SourceEvent:
+    _require(set(raw) == {"kind", "payload_sha256", "registration"} and raw["kind"] == _ISSUE,
+             "JOURNAL_INVALID")
+    issue = IssueRegistration.from_dict(raw["registration"])
+    issue.check_route(registration)
+    return SourceEvent(issue.identity, raw["payload_sha256"], issue)
+
+
+def _event_columns(raw: dict, registration: Registration) -> tuple:
+    if raw.get("kind") == _ISSUE:
+        try:
+            issue = _issue_record_event(raw, registration).payload
+        except (TypeError, RuntimeHold):
+            raise RuntimeHold("JOURNAL_INVALID") from None
+        # Zero is a storage sentinel. Issues have no run attempt or GitHub SHA.
+        return "github-issue-created-v1:" + issue.identity.key, issue.local_source_sha, 0
+    return raw.get("event_id"), raw.get("source_sha"), raw.get("attempt")
+
+
 def _validate_records(data: dict, registration: Registration) -> None:
     _require(type(data["events"]) is dict and len(data["events"]) <= 128, "JOURNAL_INVALID")
+    sources = data["source_identities"]
+    _require(len(sources) <= len(data["events"]), "JOURNAL_INVALID")
+    by_event = {}
+    for source_key, (event_key, raw_identity) in sources.items():
+        try:
+            identity = SourceIdentity(**raw_identity)
+        except (TypeError, RuntimeHold):
+            raise RuntimeHold("JOURNAL_INVALID") from None
+        _require(source_key == identity.key and event_key in data["events"] and event_key not in by_event,
+                 "JOURNAL_INVALID")
+        by_event[event_key] = identity
     seen, seen_turns, seen_native_turns = set(), set(), set()
     for key, record in data["events"].items():
         _require(type(record) is dict and set(record) == {"event", "status", "code", "history", "evidence"}
                  and type(record["event"]) is dict, "JOURNAL_INVALID")
         try:
+            if record["event"].get("kind") == _ISSUE:
+                issue = _issue_record_event(record["event"], registration)
+                _require(key == issue.identity.key and by_event.get(key) == issue.identity
+                         and record["status"] == "PENDING" and record["history"] == ["PENDING"]
+                         and record["code"] == _ISSUE_ACCEPTED and record["evidence"] == {},
+                         "JOURNAL_INVALID")
+                continue
             saved = Event(**record["event"])
         except (TypeError, RuntimeHold):
             raise RuntimeHold("JOURNAL_INVALID") from None
@@ -959,6 +1167,10 @@ def _validate_records(data: dict, registration: Registration) -> None:
                  and re.fullmatch(r"[A-Z][A-Z0-9_]{0,95}", record["code"]) is not None
                  and type(record["evidence"]) is dict, "JOURNAL_INVALID")
         seen.add(saved.event_id)
+        if key in by_event:
+            identity = by_event[key]
+            _require(identity.kind == _EF02 and identity.attempt == saved.attempt
+                     and saved.evidence_type == "GITHUB_AUTHENTICATED", "JOURNAL_INVALID")
         _require(all(b in _NEXT.get(a, set()) for a, b in
                      zip(record["history"], record["history"][1:])), "JOURNAL_INVALID")
         proof = record["evidence"]
@@ -1013,9 +1225,10 @@ def _validate_records(data: dict, registration: Registration) -> None:
 
 
 class _SQLiteTransaction:
-    def __init__(self, connection, journal, registration, owner):
+    def __init__(self, connection, journal, registration, owner, source_table):
         self.connection, self.journal = connection, journal
         self.registration, self.owner = registration, owner
+        self.source_table = source_table
 
     def write(self, data: dict) -> None:
         _validate_records(data, self.registration)
@@ -1024,14 +1237,20 @@ class _SQLiteTransaction:
         try:
             db.execute("BEGIN IMMEDIATE")
             for key, record in data["events"].items():
-                event = record["event"]
                 db.execute("INSERT INTO events VALUES (?, ?, ?, ?, ?, ?) "
                            "ON CONFLICT(event_key) DO UPDATE SET record=excluded.record",
-                           (key, event["event_id"], event["source_sha"], event["attempt"],
+                           (key, *_event_columns(record["event"], self.registration),
                             self.registration.binding.generation, json.dumps(record, sort_keys=True)))
+            sources = data["source_identities"]
+            if sources and not self.source_table:
+                db.execute(_SOURCE_TABLE)
+            for key, (event_key, identity) in sources.items():
+                db.execute("INSERT INTO source_identities VALUES (?, ?, ?) ON CONFLICT(source_key) DO NOTHING",
+                           (key, event_key, json.dumps(identity, sort_keys=True)))
             # Includes the rollback sidecar created by SQLite, before commit.
             self.journal._owner(self.owner)
             db.commit()  # FULL/EXTRA synchronous; no effect may precede this commit.
+            self.source_table = self.source_table or bool(sources)
         except BaseException:
             db.rollback()
             raise
@@ -1116,15 +1335,18 @@ class Journal:
                                      isolation_level=None)
                 db.execute("PRAGMA trusted_schema=OFF")
                 _require(db.execute("PRAGMA quick_check").fetchall() == [("ok",)], "JOURNAL_CORRUPT")
-                version = 2
+                version, source_table = 2, False
                 if not new:
                     version, = db.execute("PRAGMA user_version").fetchone()
                     tables = dict(_TABLES, chrome_lifecycle=_CHROME_TABLE) if version == 3 else _TABLES
+                    stored_tables = db.execute("SELECT type, name, sql FROM sqlite_master "
+                                               "WHERE name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()
+                    source_table = ("table", "source_identities", _SOURCE_TABLE) in stored_tables
+                    if source_table:
+                        tables = dict(tables, source_identities=_SOURCE_TABLE)
                     _require(version in (2, 3)
                              and db.execute("PRAGMA application_id").fetchone() == (_APP_ID,)
-                             and db.execute("SELECT type, name, sql FROM sqlite_master "
-                                            "WHERE name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()
-                             == [("table", name, sql) for name, sql in sorted(tables.items())],
+                             and stored_tables == [("table", name, sql) for name, sql in sorted(tables.items())],
                              "JOURNAL_SCHEMA_INCOMPATIBLE")
                     rows = db.execute("SELECT owner, registration FROM identity WHERE singleton=1").fetchall()
                     _require(len(rows) == 1 and rows[0][0] == owner, "JOURNAL_OWNER_DRIFT")
@@ -1147,13 +1369,15 @@ class Journal:
                     db.commit()
                     if os.name != "nt":
                         os.fsync(files.directory_fd)
-                data = {"events": {}}
+                data = {"events": {}, "source_identities": {}}
+                if source_table:
+                    for source_key, event_key, identity in db.execute("SELECT * FROM source_identities"):
+                        data["source_identities"][source_key] = (event_key, _decode_unique(identity))
                 for key, event_id, sha, attempt, generation, raw in db.execute("SELECT * FROM events"):
                     record = _decode_unique(raw)
                     _require(type(record) is dict and type(record.get("event")) is dict, "JOURNAL_INVALID")
-                    event = record["event"]
                     _require((event_id, sha, attempt, generation) ==
-                             (event.get("event_id"), event.get("source_sha"), event.get("attempt"),
+                             (*_event_columns(record["event"], registration),
                               registration.binding.generation), "JOURNAL_INVALID")
                     data["events"][key] = record
                 _validate_records(data, registration)
@@ -1162,7 +1386,7 @@ class Journal:
                     _require(len(rows) == 1 and rows[0][0] == 1, "CHROME_JOURNAL_INVALID")
                     data["chrome"] = _decode_unique(rows[0][1])
                     _validate_chrome(data["chrome"])
-                yield _SQLiteTransaction(db, self, registration, owner), data
+                yield _SQLiteTransaction(db, self, registration, owner, source_table), data
                 self._owner(owner)
         except sqlite3.DatabaseError as exc:
             code = "JOURNAL_BUSY" if isinstance(exc, sqlite3.OperationalError) and \
@@ -1182,8 +1406,8 @@ class Runner:
     """Process one validated event under the journal lock."""
 
     def __init__(self, *, source: EventSource, registration: Registration, journal: Journal,
-                 sender: Sender, orchestrator: ProductionPipelineOrchestrator,
-                 grant_verifier: Callable[[Event, Registration], bool],
+                 sender: Sender | None, orchestrator: ProductionPipelineOrchestrator,
+                 grant_verifier: Callable[[Event, Registration], bool] | _RegisteredIssueAuthority,
                  brain: BrainAdapter | None = None, read_only: bool = False,
                  supervisor_stop: Callable[[], bool] | None = None):
         _require(type(orchestrator) is ProductionPipelineOrchestrator, "PRODUCTION_ORCHESTRATOR_REQUIRED")
@@ -1216,32 +1440,70 @@ class Runner:
 
     def _run_event(self, chrome: Result | None = None) -> Result:
         evidence = self.registration.evidence_type
+        if type(self.source) is GitHubIssueCreatedSource:
+            evidence = _ISSUE_EVIDENCE
         try:
-            event = self.source.next_event()
-            if event is None:
+            selected = self.source.next_event()
+            if selected is None:
                 if self.journal.path.exists():
                     with self.journal.locked(self.registration) as (txn, data):
                         self._recover_reservations(txn, data)
                 return Result("HOLD", "NO_EVENT", evidence)
-            _require(type(event) is Event, "EVENT_REQUIRED")
+            envelope = None
+            issue = type(selected) is SourceEvent
+            if issue:
+                _require(selected.identity.kind == _ISSUE
+                         and type(self.source) is GitHubIssueCreatedSource
+                         and type(self.grant_verifier) is _RegisteredIssueAuthority
+                         and self.grant_verifier.source is self.source, "AUTHENTICATED_SOURCE_REQUIRED")
+                envelope = selected
+                key = envelope.identity.key
+                encoded = {"kind": _ISSUE, "payload_sha256": envelope.payload_sha256,
+                           "registration": asdict(envelope.payload)}
+                code = _ISSUE_ACCEPTED
+            else:
+                _require(type(selected) is Event and type(self.source) is not GitHubIssueCreatedSource,
+                         "EVENT_REQUIRED")
+                if type(self.source) is GitHubEventSource:
+                    envelope = self.source.envelope(selected)
+                key = selected.key(self.registration)
+                encoded = asdict(selected)
+                code = "EVENT_PENDING"
             with self.journal.locked(self.registration) as (txn, data):
-                key = event.key(self.registration)
+                if issue:
+                    self.grant_verifier.authorize(selected, self.registration)
                 records = data["events"]
+                sources = data["source_identities"]
+                previous = None
+                if envelope is not None:
+                    identity = envelope.identity
+                    previous = sources.get(identity.key)
+                    _require(previous in (None, (key, asdict(identity))), "EVENT_IDENTITY_DRIFT")
+                    _require(previous is not None or not any(k == key for k, _ in sources.values()),
+                             "EVENT_IDENTITY_DRIFT")
                 if key in records:
                     record = records[key]
-                    _require(record["event"] == asdict(event), "EVENT_IDENTITY_DRIFT")
+                    _require(record["event"] == encoded, "EVENT_IDENTITY_DRIFT")
+                    replayed = True
                 else:
-                    _require(not any(r["event"]["event_id"] == event.event_id for r in records.values()),
+                    _require(issue or not any(
+                        r["event"].get("event_id") == selected.event_id for r in records.values()),
                              "EVENT_IDENTITY_DRIFT")
                     _require(len(records) < 128, "JOURNAL_FULL")
-                    record = {"event": asdict(event), "status": "PENDING", "code": "EVENT_PENDING",
+                    record = {"event": encoded, "status": "PENDING", "code": code,
                               "history": ["PENDING"], "evidence": {}}
                     records[key] = record
+                    replayed = False
+                if envelope is not None and previous is None:
+                    sources[identity.key] = (key, asdict(identity))
+                if not replayed or (envelope is not None and previous is None):
                     txn.write(data)
                 self._recover_reservations(txn, data)
+                if issue:
+                    return Result("HOLD_DEPENDENCY", _ISSUE_ROUTE_DEPENDENCY, evidence, replayed)
                 if record["status"] != "PENDING":
-                    return self._resume(txn, data, record, event)
-                return self._process_pending(txn, data, record, event, chrome)
+                    return self._resume(txn, data, record, selected)
+                return self._process_pending(txn, data, record, selected, chrome)
         except DependencyHold as exc:
             return Result("HOLD_DEPENDENCY", _safe_code(exc, "NATIVE_DEPENDENCY_UNAVAILABLE"), evidence)
         except RuntimeHold as exc:
@@ -1268,6 +1530,10 @@ class Runner:
         native_owner = NativeChrome9444 if self._observe_only else NativeSender
         if type(self.sender) is not native_owner:
             raise DependencyHold("UNSUPPORTED_NATIVE_OWNER")
+        if self._supervisor_stop is not None and type(self.source) is GitHubIssueCreatedSource:
+            _require(type(self.grant_verifier) is _RegisteredIssueAuthority
+                     and self.grant_verifier.source is self.source, "AUTHENTICATED_SOURCE_REQUIRED")
+            return
         _require(type(self.source) is GitHubEventSource, "AUTHENTICATED_SOURCE_REQUIRED")
         if self._native or self._supervisor_stop is not None:
             if (type(self.grant_verifier) is not _RegisteredWakeAuthority
@@ -1291,6 +1557,15 @@ class Runner:
         if record["code"] == _LAUNCH_UNKNOWN and chrome is None:
             return Result("UNKNOWN_EFFECT", _LAUNCH_UNKNOWN, evidence, replayed=True)
         self._check_composition()
+        if self._native:
+            # Old EF02 rows omitted the run ID. Re-read their exact registered
+            # events to index them before any new Send that could alias them.
+            indexed = {key for key, _ in data["source_identities"].values()}
+            if any(key not in indexed and old["status"] != "PENDING"
+                   and old["event"].get("evidence_type") == evidence
+                   and old["event"].get("attempt") == event.attempt
+                   for key, old in data["events"].items()):
+                raise DependencyHold("LEGACY_EF02_SOURCE_IDENTITY_UNAVAILABLE")
         try:
             authorization = self.grant_verifier.authorize(event, registration) if self._native else None
             granted = (authorization is not None if self._native else
@@ -1355,6 +1630,8 @@ class Runner:
 
     def _supervise_chrome(self) -> Result:
         evidence = self.registration.evidence_type
+        if self.sender is None:
+            return Result("HOLD", "CHROME_OWNER_UNPROVEN", evidence)
         try:
             self._check_composition()
             if self._supervisor_stop():
@@ -1435,7 +1712,7 @@ class Runner:
         policy = self.grant_verifier.chrome_lifecycle
         if policy == "paused":
             return "PAUSED_BY_HUMAN"
-        if policy != "demand-start":
+        if policy != "demand-start" or type(self.grant_verifier) is _RegisteredIssueAuthority:
             raise DependencyHold("INTERACTIVE_9444_START_GRANT_REQUIRED")
         if self._supervisor_stop():
             return "SUPERVISOR_STOPPED"
@@ -1757,6 +2034,36 @@ def _read_owned_json(path: Path, repository_root: Path, *, limit: int = 131072) 
         return value
 
 
+def _revalidate_owned(snapshots: tuple[tuple[Path, str], ...], repository_root: Path,
+                      config_path: Path, principal: str) -> None:
+    for path, snapshot_json in snapshots:
+        _require(_read_owned_json(path, repository_root) == json.loads(snapshot_json),
+                 "LOCAL_AUTHORITY_DRIFT")
+    _require(_private_identity(config_path) == principal, "JOURNAL_OWNER_DRIFT")
+
+
+@dataclass(frozen=True, repr=False)
+class _RegisteredIssueAuthority:
+    source: GitHubIssueCreatedSource
+    registration: Registration
+    repository_root: Path
+    config_path: Path
+    target_path: Path
+    snapshots: tuple[tuple[Path, str], ...]
+    principal: str
+    chrome_lifecycle: str
+
+    def revalidate_local(self) -> None:
+        _revalidate_owned(self.snapshots, self.repository_root, self.config_path, self.principal)
+        _require(_private_identity(self.target_path) == self.principal, "ISSUE_REGISTRATION_OWNER_DRIFT")
+
+    def authorize(self, event: SourceEvent, current: Registration) -> None:
+        _require(current == self.registration and event == self.source.verified_event
+                 and event.payload == self.source.target, "ISSUE_SOURCE_PROOF_MISSING")
+        self.source.target.check_route(current)
+        self.revalidate_local()
+
+
 @dataclass(frozen=True, repr=False)
 class _RegisteredWakeAuthority:
     """Existing signed-origin composition, not a caller readiness callback.
@@ -1778,10 +2085,7 @@ class _RegisteredWakeAuthority:
     chrome_lifecycle: str
 
     def revalidate_local(self) -> None:
-        for path, snapshot_json in self.snapshots:
-            _require(_read_owned_json(path, self.repository_root) == json.loads(snapshot_json),
-                     "LOCAL_AUTHORITY_DRIFT")
-        _require(_private_identity(self.config_path) == self.principal, "JOURNAL_OWNER_DRIFT")
+        _revalidate_owned(self.snapshots, self.repository_root, self.config_path, self.principal)
 
     def authorize(self, event: Event, current: Registration) -> SignedWakeAuthorization | None:
         _require(current == self.registration, "REGISTRATION_DRIFT")
@@ -1815,36 +2119,71 @@ class _RegisteredWakeAuthority:
         return self.authorize(event, current) is not None
 
 
-def compose_read_only(config_path: Path, repository_root: Path) -> Runner:
-    """One R1 ingress plus R2 read-only Chrome/exact-chat readiness.
+def compose_read_only(config_path: Path, repository_root: Path, *, target_index: int = 0) -> Runner:
+    """Select one exact registered target for read-only processing.
 
-    All paths/selectors come from an existing private local operator file. No
-    Issue/event may provide credentials, URLs, profile selection or authority.
-    A resolve-claim grant is required; it does not authorize Send. P0 has no real
-    receipt pins, so neither native Brain nor consumer success is possible.
-    Retain the R1 private config and journal schemas without implicit migration.
+    R1 config can use registered_source or a bounded registered_targets list of
+    {kind, path} entries. EF02 paths point to existing run registration
+    records. Issue paths point to private IssueRegistration JSON owned by the
+    runtime config owner. Every target uses the journal's exact route revision.
     """
-    return _compose_registered(config_path, repository_root, native_source_only=False)
+    return _compose_registered(config_path, repository_root, native_source_only=False, target_index=target_index)
 
 
-def compose_native_source_only(config_path: Path, repository_root: Path) -> Runner:
-    """R3B1 dependency evaluation, not enrollment or permission to perform effects.
+def compose_native_source_only(config_path: Path, repository_root: Path, *, target_index: int = 0) -> Runner:
+    """Evaluate the selected source and its downstream dependencies.
 
-    Reuse the existing private R1 schema and signed-origin operator. Require both
-    resolve_claim_route and exact-event deliver_wake grants. There is no native
-    origin verifier, authenticated doorbell turn-ref or Brain receipt transport
-    to enroll in this revision; those remain explicit dependencies, never flags.
+    EF02 requires both resolve_claim_route and exact-event deliver_wake
+    grants. Issue-created admission stops at its typed route dependency.
     """
-    return _compose_registered(config_path, repository_root, native_source_only=True)
+    return _compose_registered(config_path, repository_root, native_source_only=True, target_index=target_index)
+
+
+def _config_path(value: object, repository_root: Path) -> Path:
+    _require(type(value) is str, "LOCAL_CONFIG_INVALID")
+    path = Path(value)
+    _private_path(path, repository_root)
+    return path
+
+
+def _chrome_environment(path: Path, repository_root: Path, registration: Registration):
+    chrome_config = _read_owned_json(path, repository_root, limit=8192)
+    local = os.environ.get("LOCALAPPDATA")
+    _require(bool(local), "PROFILE_AUTHORITY_MISSING")
+    environment = chrome_acquisition.load_environment(path, repository_root, local_app_data=Path(local))
+    _require(environment.endpoint == registration.binding.cdp_endpoint and environment.port == 9444,
+             "CDP_OWNER_MISMATCH")
+    return environment, chrome_config
+
+
+def _snapshots(*entries: tuple[Path, dict]) -> tuple[tuple[Path, str], ...]:
+    return tuple((path, json.dumps(snapshot, sort_keys=True)) for path, snapshot in entries)
 
 
 def _compose_registered(config_path: Path, repository_root: Path, *, native_source_only: bool,
-                        supervisor_stop: Callable[[], bool] | None = None) -> Runner:
+                        supervisor_stop: Callable[[], bool] | None = None, target_index: int = 0) -> Runner:
     config = _read_owned_json(config_path, repository_root)
-    required = {"schema", "registration", "marker", "registered_source",
-                "registry", "journal", "chrome_config", "grants", "caller_id"}
-    _require(config.keys() in (required, required | {"chrome_lifecycle"})
-             and config["schema"] == "WakeHubRuntimeR1.v1", "LOCAL_CONFIG_INVALID")
+    common = {"schema", "registration", "marker", "journal"}
+    ef02 = {"registry", "chrome_config", "grants", "caller_id"}
+    _require(type(target_index) is int and target_index >= 0, "REGISTERED_TARGET_INDEX_INVALID")
+    if "registered_targets" in config:
+        required = common | {"registered_targets"}
+        _require(required <= config.keys() <= required | ef02 | {"chrome_lifecycle"}, "LOCAL_CONFIG_INVALID")
+        targets = config["registered_targets"]
+        _require(type(targets) is list and 1 <= len(targets) <= _MAX_TARGETS, "REGISTERED_TARGETS_INVALID")
+        if supervisor_stop is not None:
+            target_index %= len(targets)
+        _require(target_index < len(targets), "REGISTERED_TARGET_INDEX_INVALID")
+        target_entry = targets[target_index]
+        _require(type(target_entry) is dict and set(target_entry) == {"kind", "path"}
+                 and target_entry["kind"] in (_EF02, _ISSUE), "REGISTERED_TARGET_INVALID")
+        kind, target_path = target_entry["kind"], target_entry["path"]
+    else:
+        required = common | ef02 | {"registered_source"}
+        _require(config.keys() in (required, required | {"chrome_lifecycle"}), "LOCAL_CONFIG_INVALID")
+        _require(target_index == 0 or supervisor_stop is not None, "REGISTERED_TARGET_INDEX_INVALID")
+        kind, target_path = _EF02, config["registered_source"]
+    _require(config["schema"] == "WakeHubRuntimeR1.v1", "LOCAL_CONFIG_INVALID")
     # The existing owner-controlled file is the only policy input. This opt-in
     # applies to the exact demand task, with the generic Chrome policy untouched.
     chrome_lifecycle = config.get("chrome_lifecycle", "observe")
@@ -1857,13 +2196,43 @@ def _compose_registered(config_path: Path, repository_root: Path, *, native_sour
                                 raw_registration["source_sha"], raw_registration["evidence_type"])
     _require(registration.evidence_type == "GITHUB_AUTHENTICATED"
              and config["marker"] == registration.marker, "REGISTRATION_MARKER_DRIFT")
+    paths = {"registered_source": _config_path(target_path, repository_root),
+             "journal": _config_path(config["journal"], repository_root)}
+    _require(len(set(paths.values()) | {config_path}) == 3, "LOCAL_CONFIG_INVALID")
+    token = os.environ.get("AI_COMMERCE_GITHUB_READ_TOKEN", "")
+
+    if kind == _ISSUE:
+        registered = _read_owned_json(paths["registered_source"], repository_root, limit=8192)
+        issue = IssueRegistration.from_dict(registered)
+        issue.check_route(registration)
+        _require(bool(token) and len(token) <= 4096 and not any(c in token for c in "\r\n\0"),
+                 "GITHUB_CREDENTIAL_INVALID")
+        owner = _private_identity(config_path)
+        _require(_private_identity(paths["registered_source"]) == owner, "ISSUE_REGISTRATION_OWNER_DRIFT")
+        snapshots = _snapshots((config_path, config), (paths["registered_source"], registered))
+        sender = None
+        if supervisor_stop is not None and "chrome_config" in config:
+            try:
+                chrome_path = _config_path(config["chrome_config"], repository_root)
+                _require(chrome_path not in (config_path, *paths.values()), "LOCAL_CONFIG_INVALID")
+                environment, _ = _chrome_environment(chrome_path, repository_root, registration)
+                sender = NativeChrome9444(repository_root, environment, supervised=True)
+            except (OSError, ValueError, PrivateStateError, HandoffBlocked):
+                # Source admission is independent of Chrome readiness.
+                pass
+        source = GitHubIssueCreatedSource(
+            issue, token=token, read_budget=GitHubReadBudget(max_reads=16, max_seconds=60, max_attempts=1))
+        issue_authority = _RegisteredIssueAuthority(source, registration, repository_root, config_path,
+                                                   paths["registered_source"], snapshots, owner, chrome_lifecycle)
+        return Runner(source=source, registration=registration, journal=Journal(paths["journal"], repository_root),
+                      sender=sender, orchestrator=ProductionPipelineOrchestrator(), grant_verifier=issue_authority,
+                      read_only=supervisor_stop is None, supervisor_stop=supervisor_stop)
+
+    _require(ef02 <= config.keys(), "LOCAL_CONFIG_INVALID")
     _require(type(config["caller_id"]) is str and _ROUTE.fullmatch(config["caller_id"]) is not None,
              "LOCAL_CONFIG_INVALID")
-    paths = {}
-    for name in ("registered_source", "registry", "journal", "chrome_config", "grants"):
-        _require(type(config[name]) is str, "LOCAL_CONFIG_INVALID")
-        paths[name] = Path(config[name])
-        _private_path(paths[name], repository_root)
+    for name in ("registry", "chrome_config", "grants"):
+        paths[name] = _config_path(config[name], repository_root)
     _require(len(set(paths.values()) | {config_path}) == 6, "LOCAL_CONFIG_INVALID")
     registered = _read_owned_json(paths["registered_source"], repository_root, limit=8192)
     _require(type(registered.get("intent")) is dict, "REGISTERED_SOURCE_INVALID")
@@ -1877,15 +2246,8 @@ def _compose_registered(config_path: Path, repository_root: Path, *, native_sour
              and grants["version"] == 1 and type(grants["grants"]) is list
              and 1 <= len(grants["grants"]) <= 128
              and all(type(g) is dict for g in grants["grants"]), "GRANTS_INVALID")
-    chrome_config = _read_owned_json(paths["chrome_config"], repository_root, limit=8192)
-    local = os.environ.get("LOCALAPPDATA")
-    _require(bool(local), "PROFILE_AUTHORITY_MISSING")
-    environment = chrome_acquisition.load_environment(paths["chrome_config"], repository_root,
-                                                       local_app_data=Path(local))
-    _require(environment.endpoint == registration.binding.cdp_endpoint and environment.port == 9444,
-             "CDP_OWNER_MISMATCH")
+    environment, chrome_config = _chrome_environment(paths["chrome_config"], repository_root, registration)
     # Existing operator-only environment contracts; never read from Issue JSON.
-    token = os.environ.get("AI_COMMERCE_GITHUB_READ_TOKEN", "")
     _require(bool(token) and len(token) <= 4096 and not any(c in token for c in "\r\n\0"),
              "GITHUB_CREDENTIAL_INVALID")
     key_hex = os.environ.get("AI_COMMERCE_WAKE_HMAC_KEY_HEX", "")
@@ -1902,10 +2264,9 @@ def _compose_registered(config_path: Path, repository_root: Path, *, native_sour
                                              token_provider=lambda: token, read_budget=budget)
     source = GitHubEventSource(reader, target, authority, expected_event_id=registered["event_id"])
 
-    snapshots = tuple((path, json.dumps(snapshot, sort_keys=True)) for path, snapshot in
-                      ((config_path, config), (paths["registered_source"], registered),
-                       (paths["registry"], registry), (paths["grants"], grants),
-                       (paths["chrome_config"], chrome_config)))
+    snapshots = _snapshots((config_path, config), (paths["registered_source"], registered),
+                           (paths["registry"], registry), (paths["grants"], grants),
+                           (paths["chrome_config"], chrome_config))
     verify_local_authority = _RegisteredWakeAuthority(
         source, registration, repository_root, config_path, paths["registry"], snapshots,
         json.dumps(registry, sort_keys=True), origin, caller, owner, native_source_only, chrome_lifecycle)
@@ -1920,12 +2281,17 @@ def _compose_registered(config_path: Path, repository_root: Path, *, native_sour
                   supervisor_stop=supervisor_stop)
 
 
-def run_read_only(config_path: Path | None, repository_root: Path, *, dry_run: bool = False) -> Result:
-    return _run_registered(config_path, repository_root, dry_run=dry_run, compose=compose_read_only)
+def run_read_only(config_path: Path | None, repository_root: Path, *, dry_run: bool = False,
+                  target_index: int = 0) -> Result:
+    return _run_registered(config_path, repository_root, dry_run=dry_run,
+                           compose=lambda p, r: compose_read_only(p, r, target_index=target_index))
 
 
-def run_native_source_only(config_path: Path | None, repository_root: Path, *, dry_run: bool = False) -> Result:
-    return _run_registered(config_path, repository_root, dry_run=dry_run, compose=compose_native_source_only)
+def run_native_source_only(config_path: Path | None, repository_root: Path, *, dry_run: bool = False,
+                           target_index: int = 0) -> Result:
+    return _run_registered(
+        config_path, repository_root, dry_run=dry_run,
+        compose=lambda p, r: compose_native_source_only(p, r, target_index=target_index))
 
 
 def _run_registered(config_path: Path | None, repository_root: Path, *, dry_run: bool,
@@ -2024,12 +2390,20 @@ def run_supervisor(config_path: Path | None, repository_root: Path, *, dry_run: 
     if dry_run:
         return Result("HOLD", "DRY_RUN_NO_EFFECTS", "SOURCE_ONLY")
     stop = StopEvent()
+    target_index = 0
 
-    def compose(path: Path, root: Path) -> Runner:
-        return _compose_registered(path, root, native_source_only=False, supervisor_stop=stop.is_set)
+    def tick() -> Result:
+        nonlocal target_index
+        index = target_index
+        # Advance even on a failed read, invalid target, or held dispatch. No
+        # scheduler cursor is part of the event identity or persisted policy.
+        target_index += 1
+        return _run_registered(
+            config_path, repository_root, dry_run=False,
+            compose=lambda p, r: _compose_registered(
+                p, r, native_source_only=False, supervisor_stop=stop.is_set, target_index=index))
 
-    return supervise(lambda: _run_registered(config_path, repository_root, dry_run=False, compose=compose),
-                     stop=stop, max_ticks=max_ticks, idle_seconds=idle_seconds,
+    return supervise(tick, stop=stop, max_ticks=max_ticks, idle_seconds=idle_seconds,
                      max_backoff_seconds=max_backoff_seconds, on_health=on_health)
 
 

@@ -17,6 +17,7 @@ import socket
 import sqlite3
 import subprocess
 from types import SimpleNamespace
+from urllib.error import HTTPError
 import zipfile
 
 import pytest
@@ -936,6 +937,7 @@ def ingress(composition, monkeypatch):
                 "digest": "sha256:" + hashlib.sha256(raw).hexdigest()}]}
     responses = {api + "/actions/runs/17": run,
                  api + "/actions/runs/17/artifacts?per_page=100": listing}
+    archives = {api + "/actions/artifacts/29/zip": raw}
 
     def read_json(url, token, **kwargs):
         assert token == "fixture-read-only-token"
@@ -943,15 +945,15 @@ def ingress(composition, monkeypatch):
         return json.loads(json.dumps(responses[url]))
 
     def read_bytes(url, token, **kwargs):
-        assert url == api + "/actions/artifacts/29/zip" and token == "fixture-read-only-token"
+        assert token == "fixture-read-only-token"
         calls.append(url)
-        return raw
+        return archives[url]
 
     monkeypatch.setattr(r.GitHubRestArtifactAuthority, "_read_json", staticmethod(read_json))
     monkeypatch.setattr(r.GitHubRestArtifactAuthority, "_read_bytes", staticmethod(read_bytes))
     return dict(config_path=config_path, config=config, root=root, event=event, registration=registration,
                 registered=registered, registry=registry, grants=grants, chrome=chrome, save=save,
-                calls=calls, run=run)
+                calls=calls, run=run, responses=responses, archives=archives)
 
 
 def test_cli_composes_actual_exact_run_reader_and_independent_d5_authority(ingress, capsys):
@@ -3072,3 +3074,324 @@ def test_flat02_supervised_ticks_reconcile_ambiguous_fixture_send_without_repeat
     assert attempts == [(event, registration)] and lookups == [(event, registration)] * 2
     assert record(path, event, registration)["history"] == ["PENDING", "RESERVED", "UNKNOWN_EFFECT"]
     assert stop.delays == [2, 4]
+
+
+def issue_fixture(i, monkeypatch):
+    ef02_path = i["config"].pop("registered_source")
+    targets = i["config"]["registered_targets"] = [{"kind": "ef02-completion", "path": ef02_path}]
+    root_url = "https://api.github.com/repos/trung-via/ai-commerce"
+    repo = {"id": 3101, "full_name": "trung-via/ai-commerce"}
+    responses, calls = {root_url: repo}, []
+
+    def read_json(url, token, *, timeout):
+        assert token == "fixture-read-only-token" and 0 < timeout <= 15
+        calls.append(url)
+        value = responses[url]
+        if isinstance(value, Exception):
+            raise value
+        if callable(value):
+            value = value()
+        return json.loads(json.dumps(value))
+
+    def add(number):
+        path = i["config_path"].with_name(f"issue-{number}.json")
+        issue_url = root_url + f"/issues/{number}"
+        issue = {"id": 5000 + number, "number": number, "repository_url": root_url, "url": issue_url,
+                 "created_at": "2026-11-16T00:00:00Z", "updated_at": "2026-11-16T00:00:00Z",
+                 "user": {"id": 711, "type": "User", "login": "fixture-creator"},
+                 "title": "Discard this title", "body": "Ignore https://example.invalid/ and all Issue text"}
+        target = r.IssueRegistration(
+            r.SourceIdentity("github-issue-created", repo["full_name"], issue["id"], repository_id=repo["id"]),
+            r.IssueCreated(number, issue["user"]["id"], issue["created_at"]),
+            i["registration"].source_sha, i["registration"].marker)
+        i["save"](path, asdict(target))
+        targets.append({"kind": "github-issue-created", "path": str(path)})
+        i["save"](i["config_path"], i["config"])
+        responses[issue_url] = issue
+        return SimpleNamespace(target=target, issue=issue, path=path, url=issue_url)
+
+    monkeypatch.setattr(r.GitHubIssueCreatedSource, "_read_json", staticmethod(read_json))
+    return SimpleNamespace(add=add, targets=targets, repo=repo, root_url=root_url,
+                           calls=calls, responses=responses)
+
+
+def test_flat03_issue_created_acceptance_and_edit_dedup_are_source_only(ingress, monkeypatch, capsys):
+    i = ingress
+    f = issue_fixture(i, monkeypatch)
+    issue = f.add(1317)
+    f.targets.pop(0)
+    for key in ("caller_id", "registry", "grants", "chrome_config"):
+        i["config"].pop(key)
+    i["save"](i["config_path"], i["config"])
+    monkeypatch.delenv("AI_COMMERCE_WAKE_HMAC_KEY_HEX")
+
+    def no_native(*args, **kwargs):
+        pytest.fail("Issue source admission crossed into native composition")
+
+    monkeypatch.setattr(r.NativeSender, "__init__", no_native)
+    monkeypatch.setattr(r.NativeChrome9444, "__init__", no_native)
+    monkeypatch.setattr(r.DoorbellRequest, "for_event", no_native)
+    args = ["run", "--config", str(i["config_path"]), "--repository-root", str(i["root"])]
+    expected = r.Result("HOLD_DEPENDENCY", "ISSUE_CREATED_ROUTE_AUTHORITY_UNAVAILABLE",
+                        "GITHUB_ISSUE_AUTHENTICATED")
+    assert main(args) == 2
+    assert json.loads(capsys.readouterr().out) == asdict(expected)
+    assert f.calls == [issue.url, f.root_url, issue.url] and i["calls"] == []
+
+    issue.issue.update(title="An edit", body="New body", updated_at="2026-11-19T00:00:00Z")
+    issue.issue["user"]["login"] = "renamed-creator"
+    assert main([*args, "--native-source-only", "--target-index", "0"]) == 2
+    assert json.loads(capsys.readouterr().out) == asdict(replace(expected, replayed=True))
+    with sqlite3.connect(i["config"]["journal"]) as db:
+        key, event_id, raw = db.execute("SELECT event_key, event_id, record FROM events").fetchone()
+        assert db.execute("SELECT source_key FROM source_identities").fetchall() == [(key,)]
+    assert key == issue.target.identity.key and event_id == "github-issue-created-v1:" + key
+    saved = json.loads(raw)
+    assert saved["event"]["payload_sha256"] == digest({"identity": asdict(issue.target.identity),
+                                                       "creation": asdict(issue.target.creation)})
+    assert saved["code"] == "ISSUE_CREATED_SOURCE_ACCEPTED" and saved["history"] == ["PENDING"]
+    assert saved["evidence"] == {} and "An edit" not in raw and "example.invalid" not in raw
+
+
+@pytest.mark.parametrize("fault,code", [
+    ("wrong-id", "ISSUE_IDENTITY_UNPROVEN"),
+    ("wrong-number", "ISSUE_CREATION_UNPROVEN"),
+    ("pr", "ISSUE_IDENTITY_UNPROVEN"),
+    ("foreign-repo", "ISSUE_IDENTITY_UNPROVEN"),
+    ("wrong-repo-id", "ISSUE_REPOSITORY_UNPROVEN"),
+    ("foreign-actor", "ISSUE_CREATION_UNPROVEN"),
+    ("changed-creation", "ISSUE_CREATION_UNPROVEN"),
+    ("no-creation", "ISSUE_CREATION_INVALID"),
+    ("mismatched-reread", "ISSUE_CREATION_UNPROVEN"),
+    ("missing", "GITHUB_READ_REJECTED"),
+    ("transient", "GITHUB_READ_RETRY_EXHAUSTED"),
+    ("budget", "READ_COUNT_EXHAUSTED"),
+    ("route", "ISSUE_REGISTRATION_ROUTE_DRIFT"),
+    ("kind", "REGISTERED_TARGET_INVALID"),
+    ("identity", "SOURCE_IDENTITY_INVALID"),
+])
+def test_flat03_issue_source_requires_exact_independent_proof(ingress, monkeypatch, fault, code):
+    i = ingress
+    f = issue_fixture(i, monkeypatch)
+    issue = f.add(1317)
+    if fault == "wrong-id":
+        issue.issue["id"] += 1
+    elif fault == "wrong-number":
+        issue.issue["number"] += 1
+    elif fault == "pr":
+        issue.issue["pull_request"] = {}
+    elif fault == "foreign-repo":
+        issue.issue["repository_url"] = f.root_url + "-unregistered"
+    elif fault == "wrong-repo-id":
+        f.repo["id"] += 1
+    elif fault == "foreign-actor":
+        issue.issue["user"]["id"] += 1
+    elif fault == "changed-creation":
+        issue.issue["created_at"] = "2026-11-17T00:00:00Z"
+    elif fault == "no-creation":
+        issue.issue.pop("created_at")
+    elif fault == "mismatched-reread":
+        values = iter([issue.issue, {**issue.issue, "user": {"id": 999, "type": "User"}}])
+        f.responses[issue.url] = lambda: next(values)
+    elif fault == "missing":
+        f.responses[issue.url] = HTTPError(issue.url, 404, "missing fixture", {}, None)
+    elif fault == "transient":
+        f.responses[issue.url] = TimeoutError()
+    elif fault == "route":
+        i["save"](issue.path, asdict(replace(issue.target, local_source_sha="b" * 40)))
+    elif fault == "kind":
+        f.targets[1]["kind"] = "push"
+        i["save"](i["config_path"], i["config"])
+    elif fault == "identity":
+        invalid = asdict(issue.target)
+        invalid["identity"]["object_id"] = True
+        i["save"](issue.path, invalid)
+    if fault == "budget":
+        runner = r.compose_read_only(i["config_path"], i["root"], target_index=1)
+        runner.source.read_budget = r.GitHubReadBudget(max_reads=2, max_attempts=1)
+        result = runner.run_once()
+        assert f.calls == [issue.url, f.root_url]
+    else:
+        result = r.run_read_only(i["config_path"], i["root"], target_index=1)
+    assert result.status == "HOLD" and result.code == code
+    assert not r.Path(i["config"]["journal"]).exists() and i["calls"] == []
+
+
+def test_flat03_issue_source_rechecks_private_target_after_api_reads(ingress, monkeypatch):
+    i = ingress
+    f = issue_fixture(i, monkeypatch)
+    issue = f.add(1317)
+
+    def change_registration():
+        if f.calls.count(issue.url) == 2:
+            i["save"](issue.path, asdict(replace(issue.target, local_source_sha="b" * 40)))
+        return issue.issue
+
+    f.responses[issue.url] = change_registration
+    result = r.run_read_only(i["config_path"], i["root"], target_index=1)
+    assert result.code == "LOCAL_AUTHORITY_DRIFT" and f.calls == [issue.url, f.root_url, issue.url]
+    with sqlite3.connect(i["config"]["journal"]) as db:
+        assert db.execute("SELECT COUNT(*) FROM events").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("after_commit", [False, True])
+def test_flat03_issue_intake_commit_and_restart_are_atomic(ingress, monkeypatch, after_commit):
+    i = ingress
+    f = issue_fixture(i, monkeypatch)
+    issue = f.add(1317)
+    run = lambda: r.run_read_only(i["config_path"], i["root"], target_index=1)
+    original = r._SQLiteTransaction.write
+
+    def crash(txn, data):
+        if after_commit:
+            original(txn, data)
+        raise Crash()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(r._SQLiteTransaction, "write", crash)
+        with pytest.raises(Crash):
+            run()
+    reopened = run()
+    assert reopened.code == "ISSUE_CREATED_ROUTE_AUTHORITY_UNAVAILABLE" and reopened.replayed == after_commit
+    assert run().replayed
+    with sqlite3.connect(i["config"]["journal"]) as db:
+        assert db.execute("SELECT event_key FROM events").fetchall() == [(issue.target.identity.key,)]
+        assert db.execute("SELECT event_key FROM source_identities").fetchall() == [(issue.target.identity.key,)]
+
+
+def test_flat03_one_supervisor_progresses_after_source_holds_and_reordering(supervisor, monkeypatch):
+    s, i = supervisor, supervisor.i
+    f = issue_fixture(i, monkeypatch)
+    stalled = f.add(1316)
+    healthy = f.add(1317)
+    ef02, unavailable, good = f.targets
+    f.targets[:] = [unavailable, {"kind": "invalid", "path": good["path"]}, good, ef02]
+    i["save"](i["config_path"], i["config"])
+    f.responses[stalled.url] = TimeoutError()
+    proof = s.run(max_ticks=4)
+    assert s.slot.slots == 1 and not s.requests
+    assert proof.code == "EXACT_CHAT_CANDIDATE_ACCOUNT_MARKER_UNATTESTED"
+    assert [tick.code for tick, _ in s.ticks] == [
+        "GITHUB_READ_RETRY_EXHAUSTED", "ISSUE_CREATED_ROUTE_AUTHORITY_UNAVAILABLE", proof.code]
+    assert f.calls == [stalled.url, healthy.url, f.root_url, healthy.url]
+    assert len(i["calls"]) == 6 and i["browser"].reads == 1
+    with sqlite3.connect(s.path) as db:
+        before = db.execute("SELECT * FROM events ORDER BY event_key").fetchall()
+        assert len(before) == 2 and healthy.target.identity.key in {row[0] for row in before}
+        assert db.execute("SELECT COUNT(*) FROM chrome_lifecycle").fetchone() == (1,)
+    f.targets[:] = [ef02, good]
+    i["save"](i["config_path"], i["config"])
+    assert s.run(max_ticks=2).replayed
+    with sqlite3.connect(s.path) as db:
+        assert db.execute("SELECT * FROM events ORDER BY event_key").fetchall() == before
+    assert i["browser"].reads == 2  # EF02 read-only readiness on its own ticks.
+
+
+def test_flat03_old_ef02_unknown_row_reopens_and_indexes_without_replay(ingress, monkeypatch):
+    i = ingress
+    f = issue_fixture(i, monkeypatch)
+    f.add(1317)
+    runner = r.compose_read_only(i["config_path"], i["root"])
+    event = r.Event(i["event"]["event_id"], "a" * 40, 1, digest(i["event"]), "GITHUB_AUTHENTICATED")
+    key = event.key(i["registration"])
+    legacy = {"event": asdict(event), "status": "UNKNOWN_EFFECT", "code": "INTERRUPTED_NO_REPLAY",
+              "history": ["PENDING", "RESERVED", "UNKNOWN_EFFECT"], "evidence": {}}
+    with runner.journal.locked(i["registration"]) as (txn, data):
+        data["events"][key] = legacy
+        txn.write(data)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("No replay or readiness for a prior UNKNOWN effect")
+
+    monkeypatch.setattr(r.NativeChrome9444, "preflight", forbidden)
+    monkeypatch.setattr(r.NativeChrome9444, "send", forbidden)
+    assert r.run_read_only(i["config_path"], i["root"], target_index=1).code == (
+        "ISSUE_CREATED_ROUTE_AUTHORITY_UNAVAILABLE")
+    assert r.run_read_only(i["config_path"], i["root"]) == r.Result(
+        "UNKNOWN_EFFECT", "INTERRUPTED_NO_REPLAY", "GITHUB_AUTHENTICATED", replayed=True)
+    with sqlite3.connect(i["config"]["journal"]) as db:
+        assert db.execute("SELECT record FROM events WHERE event_key=?", (key,)).fetchone() == (
+            json.dumps(legacy, sort_keys=True),)
+        assert db.execute("SELECT COUNT(*) FROM source_identities").fetchone() == (2,)
+
+
+def set_ef02_artifact(i, *, run_id, issue_number, batch_id, action_status):
+    _, report = github_candidate()
+    repository = "trung-via/ai-commerce"
+    report.update(batch_id=batch_id, github_workflow_run_id=str(run_id), github_issue_number=issue_number)
+    report["actions"][0]["status"] = action_status
+    event = build_completion_event(report, repository=repository, run_id=run_id,
+                                   run_attempt=1, issue_number=issue_number)
+    report["wake_event_id"] = event["event_id"]
+    zipped = io.BytesIO()
+    with zipfile.ZipFile(zipped, "w") as archive:
+        archive.writestr(f"{batch_id}/completion_event.json", json.dumps(event))
+        archive.writestr(f"{batch_id}/batch_result.json", json.dumps(report))
+    raw = zipped.getvalue()
+    root = f"https://api.github.com/repos/{repository}"
+    run = f"{root}/actions/runs/{run_id}"
+    artifact_id = run_id + 12
+    i["responses"][run] = {**i["run"], "id": run_id}
+    i["responses"][run + "/artifacts?per_page=100"] = {
+        "total_count": 1, "artifacts": [{"id": artifact_id, "name": f"ef02-results-{run_id}-1",
+            "expired": False, "workflow_run": {"id": run_id}, "digest": "sha256:" + hashlib.sha256(raw).hexdigest()}],
+    }
+    i["archives"][f"{root}/actions/artifacts/{artifact_id}/zip"] = raw
+    return event
+
+
+def test_flat03_two_exact_ef02_runs_keep_independent_registration_and_grants(supervisor):
+    s, i = supervisor, supervisor.i
+    second_event = set_ef02_artifact(i, run_id=18, issue_number=24,
+                                     batch_id="fixture-second-batch", action_status="EXECUTOR_FAILED")
+    second = json.loads(json.dumps(i["registered"]))
+    second.update(run_id=18, event_id=second_event["event_id"], request_artifact_id=32)
+    second["intent"].update(issue_number=24, batch_id=second_event["batch_id"])
+    second_path = i["config_path"].with_name("second-run.json")
+    i["save"](second_path, second)
+    first_path = i["config"].pop("registered_source")
+    i["config"]["registered_targets"] = [
+        {"kind": "ef02-completion", "path": path} for path in (first_path, str(second_path))]
+    i["save"](i["config_path"], i["config"])
+    second_scope = {k: second_event[k] for k in ("repository", "batch_id", "source_sha", "issue_number")}
+    binding = i["registration"].binding
+    i["registry"]["claims"].append({"route_id": binding.route_id, "generation": binding.generation,
+                                    **second_scope})
+    i["save"](r.Path(i["config"]["registry"]), i["registry"])
+    old_grant = i["grants"]["grants"][0]
+    body = {k: v for k, v in old_grant.items() if k != "signature"}
+    body["registry_sha256"] = r.registry_sha256(i["registry"])
+    key = bytes.fromhex(os.environ["AI_COMMERCE_WAKE_HMAC_KEY_HEX"])
+
+    def sign(grant_scope):
+        grant = {**body, "scope": grant_scope}
+        raw = json.dumps(grant, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+        return {**grant, "signature": hmac.new(key, raw.encode(), hashlib.sha256).hexdigest()}
+
+    i["grants"]["grants"] = [sign(old_grant["scope"])]
+    i["save"](r.Path(i["config"]["grants"]), i["grants"])
+    assert s.run(max_ticks=2).code == "MISSING_GRANT"
+    assert i["browser"].reads == 1
+    i["grants"]["grants"].append(sign(second_scope))
+    i["save"](r.Path(i["config"]["grants"]), i["grants"])
+    assert s.run(max_ticks=2).code == "EXACT_CHAT_CANDIDATE_ACCOUNT_MARKER_UNATTESTED"
+    assert i["browser"].reads == 3 and len(i["calls"]) == 24
+    with sqlite3.connect(s.path) as db:
+        rows = db.execute("SELECT event_id, record FROM events").fetchall()
+        assert {row[0] for row in rows} == {i["event"]["event_id"], second_event["event_id"]}
+        for _, raw in rows:
+            assert json.loads(raw)["history"] == ["PENDING"]
+
+
+def test_flat03_verified_ef02_run_identity_cannot_be_rebound_to_another_event(ingress):
+    i = ingress
+    assert r.run_read_only(i["config_path"], i["root"]).code == "WINDOWS_INTERACTIVE_REQUIRED"
+    changed = set_ef02_artifact(i, run_id=17, issue_number=23, batch_id="fixture-batch",
+                                action_status="VERIFICATION_FAILED")
+    assert changed["event_id"] != i["event"]["event_id"]
+    i["registered"]["event_id"] = changed["event_id"]
+    i["save"](r.Path(i["config"]["registered_source"]), i["registered"])
+    assert r.run_read_only(i["config_path"], i["root"]).code == "EVENT_IDENTITY_DRIFT"
+    assert len(i["calls"]) == 12  # Both candidates independently verified against their REST fixtures.
+    with sqlite3.connect(i["config"]["journal"]) as db:
+        assert db.execute("SELECT event_id FROM events").fetchall() == [(i["event"]["event_id"],)]
