@@ -287,6 +287,16 @@ _INFRASTRUCTURE_MARKERS = (
     "failed to start worker", "could not start worker", "error while receiving from worker",
 )
 _SKIPPED_LINE_RE = re.compile(rb"SKIPPED \[([1-9][0-9]*)\] ([^:\r\n]+):([1-9][0-9]*): (.+)")
+_PYTEST_SUBTEST_PASS_SUMMARY_RE = re.compile(
+    rb"[1-9][0-9]* passed, [1-9][0-9]* skipped(?:, [1-9][0-9]* deselected)?"
+    rb"(?:, [1-9][0-9]* xfailed)?(?:, [1-9][0-9]* xpassed)?(?:, [1-9][0-9]* warnings?)?"
+    rb", ([1-9][0-9]*) subtests passed in [0-9]+\.[0-9]{2}s(?: \([0-9]+:[0-9]{2}:[0-9]{2}\))?"
+)
+_PYTEST_EXTRA_SUMMARY_RE = re.compile(
+    rb"^[ \t]*(?:=+ )?(?:[0-9]+ (?:passed|failed|skipped|deselected|xfailed|xpassed|warnings?|errors?)\b"
+    rb"|no tests ran\b)|\b(?:[0-9]+ subtests?|SUBFAILED|SUBSKIPPED|SUBXFAIL|SUBERROR)\b",
+    re.MULTILINE | re.IGNORECASE,
+)
 _JUNIT_PLUGIN_SOURCE = (
     "import os\n"
     "import pytest\n\n"
@@ -612,8 +622,7 @@ def _strip_verified_symlink_skip(
         suite_skipped = int(suite.get("skipped", "-1"))
     except (ValueError, TypeError):
         return stdout
-    if (suite_tests != len(cases) or suite_errors != 0
-            or suite_failures != 0 or suite_skipped < 1):
+    if suite_tests < len(cases) or suite_errors != 0 or suite_failures != 0 or suite_skipped < 1:
         return stdout
     if any(c.find("failure") is not None or c.find("error") is not None for c in cases):
         return stdout
@@ -650,6 +659,17 @@ def _strip_verified_symlink_skip(
         return stdout
 
     lines = stdout.splitlines(keepends=True)
+    unlisted_subtests = suite_tests - len(cases)
+    if unlisted_subtests:
+        # Pytest counts successful subtests in the suite total and uses their parent testcase node.
+        final_line = lines[-1].rstrip(b"\r\n")
+        summary = _PYTEST_SUBTEST_PASS_SUMMARY_RE.fullmatch(final_line)
+        if (summary is None or summary[1] != str(unlisted_subtests).encode()
+                or pytest_counts(final_line) != counts
+                or _PYTEST_EXTRA_SUMMARY_RE.search(stdout, 0, len(stdout) - len(lines[-1]))
+                or _PYTEST_EXTRA_SUMMARY_RE.search(stderr)):
+            return stdout
+
     skip_indices = {i for i, line in enumerate(lines) if line.rstrip(b"\r\n").startswith(b"SKIPPED [")}
     marked_indices = [i for i, line in enumerate(lines) if b"winerror" in line.lower()]
     if not marked_indices or any(i not in skip_indices for i in marked_indices):

@@ -4045,7 +4045,8 @@ _RECONCILE_SKIP_CLASS = "tests.test_hostops_ef02_attempt_reconcile_readonly.EF02
 
 
 def _build_native_skip_repo(tmp_path: Path, *, test_path: str, class_name: str | None,
-                            skip_func: str, pass_count: int, use_unittest: bool = True):
+                            skip_func: str, pass_count: int, use_unittest: bool = True,
+                            extra_skip_funcs: tuple[str, ...] = ()):
     repo = tmp_path / "repo"
     (repo / "tests").mkdir(parents=True)
     (repo / "feature_a.py").write_text("VALUE = 1\n", encoding="utf-8")
@@ -4069,12 +4070,12 @@ def _build_native_skip_repo(tmp_path: Path, *, test_path: str, class_name: str |
     for i in range(pass_count):
         lines.append(f"{indent}def test_pass_{i}(self):" if class_name else f"def test_pass_{i}():")
         lines.append(f"{indent}    assert feature_a.VALUE == 1")
-    lines.append(f"{indent}def {skip_func}(self):" if class_name else f"def {skip_func}():")
-    skip_line_no = len(lines) + 1
-    if use_unittest:
-        lines.append(f'{indent}    self.skipTest("{_MT01_NATIVE_SKIP}")')
-    else:
-        lines.append(f'{indent}    pytest.skip("{_MT01_NATIVE_SKIP}")')
+    skip_lines = []
+    for name in (skip_func, *extra_skip_funcs):
+        lines.append(f"{indent}def {name}(self):" if class_name else f"def {name}():")
+        skip_lines.append(len(lines) + 1)
+        skip_call = "self.skipTest" if use_unittest else "pytest.skip"
+        lines.append(f'{indent}    {skip_call}("{_MT01_NATIVE_SKIP}")')
     target = repo / test_path
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -4086,7 +4087,7 @@ def _build_native_skip_repo(tmp_path: Path, *, test_path: str, class_name: str |
     )
     return SimpleNamespace(
         repo=repo, base=base, groups=groups,
-        evidence=tmp_path / "evidence", skip_line=skip_line_no,
+        evidence=tmp_path / "evidence", skip_line=skip_lines[0], skip_lines=skip_lines,
     )
 
 
@@ -4209,6 +4210,62 @@ def test_mt01_reconcile_winerror1314_junit_skips_pass_with_unmodified_evidence(t
     assert (fix.evidence / "round-0/mt01.0.stdout.log").read_bytes() == stdout
 
 
+def test_mt01_reconcile_counts_successful_subtests_with_unmodified_evidence(
+    tmp_path, monkeypatch, candidate_verification,
+):
+    test_path = _RECONCILE_TEST_PATH
+    first_skip = "test_symlink_or_junction_is_never_read_as_source"
+    second_skip = "test_fixed_ef02_root_does_not_follow_reparse"
+    fix = _build_native_skip_repo(
+        tmp_path, test_path=test_path, class_name="EF02Attempt698ReadOnlyTests",
+        skip_func=first_skip, pass_count=6, extra_skip_funcs=(second_skip,),
+    )
+    first_line, second_line = fix.skip_lines
+    stdout = _win_skip_stdout(
+        test_path=test_path, lineno=first_line, slash="/", pass_count=6, skip_count=2,
+        extra_skip_lines=f"SKIPPED [1] {test_path}:{second_line}: {_MT01_NATIVE_SKIP}\n",
+    ).replace(b"2 skipped in 1.83s", b"2 skipped, 7 subtests passed in 1.36s")
+    junit = _make_win_junit(
+        classname=_RECONCILE_SKIP_CLASS, name=first_skip, pass_count=6, tests=15, skipped=2,
+        skip_text=f"{test_path}:{first_line}: {_MT01_NATIVE_SKIP}",
+        extra_skips=((_RECONCILE_SKIP_CLASS, second_skip, "pytest.skip", _MT01_NATIVE_SKIP),),
+    )
+    argv_a = ["python", "-m", "pytest", test_path, "-q", "-n", "12"]
+    argv_b = ["python", "-m", "pytest", "tests/test_b.py", "-q", "-n", "12"]
+    fallback = [*FULL, "-n", "12"]
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if test_path in cmd:
+            Path(kwargs["env"]["AI_COMMERCE_MT01_JUNIT_PATH"]).write_bytes(junit)
+            return subprocess.CompletedProcess(cmd, 0, stdout, b"")
+        return subprocess.CompletedProcess(cmd, 0, b"MT01_XDIST_WORKERS_COLLECTED=12\n1 passed in 0.02s\n", b"")
+
+    monkeypatch.setattr(candidate_verification, "subprocess", SimpleNamespace(
+        run=run, CompletedProcess=subprocess.CompletedProcess, TimeoutExpired=subprocess.TimeoutExpired,
+    ))
+    result, selected, prior = _execute(
+        fix, verifier=candidate_verification, acs=("AC-A", "AC-B"), registered_only=True,
+        fallback_argv=fallback,
+        registered_profiles={"project-tests": fallback, "mt01-a-tests": argv_a, "mt01-b-tests": argv_b},
+    )
+    assert result.returncode == 0
+    assert calls == [argv_a, argv_b]
+    group_a, group_b = selected["groups"]
+    assert group_a["result"] == group_b["result"] == "PASS"
+    assert group_a["workers_actual"] == 12
+    assert group_a["tests_executed"] == {
+        "passed": 6, "skipped": 2, "failed": 0, "errors": 0, "xfailed": 0, "xpassed": 0,
+    }
+    assert (fix.evidence / "round-0/mt01.0.stdout.log").read_bytes() == stdout
+    assert (fix.evidence / "round-0/mt01.0.stderr.log").read_bytes() == b""
+    assert (fix.evidence / "round-0/mt01.0.junit.xml").read_bytes() == junit
+    receipt = (fix.evidence / "round-0/mt01.0.evidence.json").read_bytes()
+    assert receipt == prior["a"].payload.encode()
+    assert prior["a"].valid_for(group_a["binding"], fix.evidence)
+
+
 def test_mt01_other_optional_native_skip_with_matching_junit_and_coexisting_skip(tmp_path, monkeypatch):
     test_path = "tests/test_native_optional_symlink.py"
     fix = _build_native_skip_repo(
@@ -4253,8 +4310,15 @@ def test_mt01_other_optional_native_skip_with_matching_junit_and_coexisting_skip
     "missing_junit", "actual_worker_11", "no_valid_worker_receipt",
     "raw_error_outside_skip", "nonzero_exit", "missing_fixture",
     "permission_denied", "no_selected_tests",
+    "subtests_junit_name_mismatch", "subtests_stderr_winerror", "subtests_nonzero_exit",
+    "subtests_failed_suite", "subtests_count_mismatch", "subtests_ordinary_count_mismatch",
+    "subtests_missing_summary", "subtests_fake_summary", "subtests_nonfinal_summary",
+    "subtests_duplicate_summary", "subtests_contradictory_summary",
+    "subtests_failed_outcome", "subtests_error_outcome", "subtests_skipped_outcome",
 ])
-def test_mt01_winerror1314_negative_matrix_holds(tmp_path, monkeypatch, case):
+def test_mt01_winerror1314_negative_matrix_holds(tmp_path, monkeypatch, candidate_verification, case):
+    with_subtests = case.startswith("subtests_")
+    case = case.removeprefix("subtests_")
     fix = _build_native_skip_repo(
         tmp_path, test_path=_R02_TEST_PATH, class_name="EF02ForensicR02Tests",
         skip_func=_R02_SKIP_NAME, pass_count=7, use_unittest=True,
@@ -4319,6 +4383,27 @@ def test_mt01_winerror1314_negative_matrix_holds(tmp_path, monkeypatch, case):
         code = 5
         stdout = b"MT01_XDIST_WORKERS_COLLECTED=12\nno tests ran in 0.01s\n"
 
+    if with_subtests:
+        ordinary_summary = b"7 passed, 1 skipped in 1.83s\n"
+        summary = b"7 passed, 1 skipped, 7 subtests passed in 1.83s\n"
+        summary = {
+            "count_mismatch": summary.replace(b"7 subtests", b"6 subtests"),
+            "ordinary_count_mismatch": summary.replace(b"7 passed", b"8 passed"),
+            "missing_summary": ordinary_summary,
+            "fake_summary": b"captured output: " + summary,
+            "nonfinal_summary": summary + b"trailing output\n",
+            "duplicate_summary": summary + summary,
+            "contradictory_summary": b"=== 8 passed, 1 skipped in 1.83s ===\n" + summary,
+            "failed_outcome": summary.replace(b" in ", b", 1 subtests failed in "),
+            "error_outcome": summary.replace(b" in ", b", 1 subtests error in "),
+            "skipped_outcome": summary.replace(b" in ", b", 1 subtests skipped in "),
+        }.get(case, summary)
+        stdout = stdout.removesuffix(ordinary_summary) + summary
+        assert junit is not None
+        junit = junit.replace(b'tests="8"', b'tests="15"')
+        if case == "failed_suite":
+            junit = junit.replace(b'failures="0"', b'failures="1"')
+
     argv = ["python", "-m", "pytest", _R02_TEST_PATH, "-q", "-n", "12"]
 
     def run(cmd, **kwargs):
@@ -4326,11 +4411,11 @@ def test_mt01_winerror1314_negative_matrix_holds(tmp_path, monkeypatch, case):
             Path(kwargs["env"]["AI_COMMERCE_MT01_JUNIT_PATH"]).write_bytes(junit)
         return subprocess.CompletedProcess(cmd, code, stdout.decode(), stderr.decode())
 
-    monkeypatch.setattr(verification, "subprocess", SimpleNamespace(
+    monkeypatch.setattr(candidate_verification, "subprocess", SimpleNamespace(
         run=run, CompletedProcess=subprocess.CompletedProcess, TimeoutExpired=subprocess.TimeoutExpired,
     ))
     result, selected, prior = _execute(
-        fix, acs=("AC-A", "AC-B"), registered_only=True,
+        fix, verifier=candidate_verification, acs=("AC-A", "AC-B"), registered_only=True,
         fallback_argv=[*FULL, "-n", "12"],
         registered_profiles={"project-tests": [*FULL, "-n", "12"], "mt01-a-tests": argv,
                              "mt01-b-tests": ["python", "-m", "pytest", "tests/test_b.py", "-q", "-n", "12"]},
@@ -4502,6 +4587,57 @@ def test_mt01_winerror1314_junit_reason_recorded_when_absent_or_malformed(
     assert selected["groups"][0]["result"] == "UNPROVEN"
     assert selected["groups"][0]["junit_error"] == expected_reason
     assert selected["groups"][0]["reason"] == expected_reason
+
+
+def test_mt01_real_subprocess_junit_counts_successful_unittest_subtests(
+    tmp_path, monkeypatch, candidate_verification,
+):
+    if pytest.version_tuple[0] < 9:
+        pytest.skip("Requires pytest's built-in subtest reporting")
+    import xml.etree.ElementTree as ET
+
+    repo = tmp_path
+    test_path = repo / "tests/test_subtests.py"
+    test_path.parent.mkdir()
+    test_path.write_text(
+        "import unittest\n\n"
+        "class TestSubtests(unittest.TestCase):\n"
+        "    def test_parent(self):\n"
+        "        for index in range(2):\n"
+        "            with self.subTest(index=index):\n"
+        "                self.assertGreaterEqual(index, 0)\n\n"
+        "    def test_synthetic_privilege_denial(self):\n"
+        "        exc = OSError('synthetic privilege denial')\n"
+        "        exc.winerror = 1314\n"
+        "        if exc.winerror == 1314:\n"
+        f'            self.skipTest("{_MT01_NATIVE_SKIP}")\n',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
+    inherited_path = os.environ.get("PYTHONPATH")
+    pythonpath = [str(ROOT / "src"), *([inherited_path] if inherited_path else [])]
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(pythonpath))
+
+    verifier = candidate_verification
+    result, out, err, junit, issue = verifier._run_pytest_with_junit(
+        [sys.executable, "-m", "pytest", "tests/test_subtests.py", "-q", "-rs", "--color=no"],
+        repo=repo, timeout=30,
+    )
+    assert result.returncode == 0, (out, err)
+    assert out.splitlines()[-1].startswith(b"1 passed, 1 skipped, 2 subtests passed in "), out
+    assert _MT01_NATIVE_SKIP.encode() in out
+    assert issue is None and junit is not None
+    suite = ET.fromstring(junit).find("testsuite")
+    assert suite is not None
+    assert (suite.get("tests"), suite.get("failures"), suite.get("errors"), suite.get("skipped")) == (
+        "4", "0", "0", "1",
+    )
+    assert len(suite.findall("testcase")) == 2
+    diagnostics, issue = verifier._diagnose_junit_and_infra(
+        out, err, result.returncode, junit, issue, repo=repo, candidate_files=mt.file_hashes(repo),
+    )
+    assert issue is None
+    assert not any(marker in diagnostics for marker in verifier._INFRASTRUCTURE_MARKERS)
 
 
 def test_mt01_windows_real_subprocess_xdist_junit_winerror1314_and_replay_holds(
