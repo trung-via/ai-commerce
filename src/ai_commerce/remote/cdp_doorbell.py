@@ -120,12 +120,15 @@ const opaqueEnough = el => {
  return true;
 };
 const surfaceBlocked = () => visible('main').length !== 1 || visible(args.login).length ||
-  visible(args.work).length || (args.documentClock && visible(
+  visible(args.work).length || (args.documentClock && (visible(
+    'input[autocomplete="one-time-code"], input[type="password"], form[action^="/auth/"], ' +
+    'main[aria-busy="true"], main [role="progressbar"]'
+  ).length || visible(
     'dialog[open], [role="dialog"], [role="alertdialog"], [aria-modal="true"], [role="alert"], iframe'
   ).some(el => {
     const rect = el.getBoundingClientRect();
     return rect.width > 1 && rect.height > 1 && opaqueEnough(el);
-  }));
+  })));
 const unobstructed = el => {
  if (el.matches(':disabled') || el.closest(
      '[inert], [hidden], [aria-hidden="true"], [aria-disabled="true"], [aria-busy="true"]')) return false;
@@ -245,6 +248,10 @@ _PROVE = "(args) => { " + _GUARD + """
 
 _PRE_STAGE_REFS = "(args) => { " + _GUARD + """
  return sameDocument() && sameRoute() && turnRefs();
+}"""
+_AGY_SURFACE_READY = "(args) => { " + _GUARD + """
+ return document.readyState === 'complete' && document.querySelectorAll('*').length <= 20000 &&
+   typeof inspect() !== 'string' && !matches().length;
 }"""
 _EXISTING_USER_TURN = "(args) => { " + _GUARD + """
  if (!args.documentClock || document.readyState !== 'complete' ||
@@ -1093,6 +1100,13 @@ class LocalUISendResult:
     turn_ref: str | None = None
 
 
+@dataclass(frozen=True, repr=False)
+class LocalUISurface:
+    document: str
+    clock: float
+    prior_refs: tuple[str, ...]
+
+
 class LocalChromeDoorbellAdapter:
     """UI-only exact-chat doorbell, explicitly opt-in, without semantic authority."""
 
@@ -1159,15 +1173,21 @@ class LocalChromeDoorbellAdapter:
 
     def observe_registered_ui(self, *, binding: ResolvedBinding, event_id: str,
                               marker_digest: str, revalidate: Callable[[], None],
-                              excluded_refs: list[str]) -> LocalUISendResult:
+                              excluded_refs: list[str], document: str | None = None) -> LocalUISendResult:
         """Look once for an existing UI turn on the current exact-chat document."""
         if type(excluded_refs) is not list:
             return LocalUISendResult("EXISTING_USER_TURN_UNPROVEN")
         return self._registered_ui(binding, event_id, marker_digest, revalidate,
-                                   excluded_refs=excluded_refs)
+                                   excluded_refs=excluded_refs, document=document)
+
+    def inspect_registered_ui(self, *, binding: ResolvedBinding, event_id: str,
+                              marker_digest: str, revalidate: Callable[[], None],
+                              capture: Callable[[LocalUISurface], None]) -> LocalUISendResult:
+        """Read the same guarded composer and collect its pre-mutation witness."""
+        return self._registered_ui(binding, event_id, marker_digest, revalidate, capture=capture)
 
     def _registered_ui(self, binding, event_id, marker_digest, revalidate, *,
-                       before_stage=None, excluded_refs=None) -> LocalUISendResult:
+                       before_stage=None, excluded_refs=None, capture=None, document=None) -> LocalUISendResult:
         if (type(binding) is not ResolvedBinding or type(binding.chat_url) is not str
                 or not _CHAT.fullmatch(binding.chat_url)
                 or binding.cdp_endpoint != "http://127.0.0.1:9444"
@@ -1179,14 +1199,14 @@ class LocalChromeDoorbellAdapter:
 
         def check_page(page) -> None:
             args = {"digest": marker_digest}
-            if excluded_refs is not None:
+            if excluded_refs is not None or capture is not None:
                 args["strict"] = True
             if page.evaluate(_WH03_COMMITTED_SIGNAL_DOM, args) != "TEST_SIGNAL_MATCH_UNATTESTED":
                 raise ValueError("LOCAL_UI_MARKER_UNPROVEN")
 
         return self._send_ui(binding, _doorbell_text(event_id, self.repository, send_only=True),
                              check_page=check_page, revalidate=revalidate, before_stage=before_stage,
-                             excluded_refs=excluded_refs)
+                             excluded_refs=excluded_refs, capture=capture, document=document)
 
     @staticmethod
     def _surface_commitment(context, page, clock: float) -> str:
@@ -1203,7 +1223,7 @@ class LocalChromeDoorbellAdapter:
 
     def _send_ui(self, binding: ResolvedBinding, doorbell: str, *,
                  check_page=None, revalidate=None, before_stage=None,
-                 excluded_refs=None) -> LocalUISendResult:
+                 excluded_refs=None, capture=None, document=None) -> LocalUISendResult:
         args = {**_ARGS, "url": binding.chat_url, "text": doorbell}
         scoped = check_page is not None
         # Timer polling keeps the scoped checks usable on an unfocused tab.
@@ -1229,7 +1249,7 @@ class LocalChromeDoorbellAdapter:
                     return LocalUISendResult("EXACT_CHAT_TAB_NOT_FOUND" if not matching
                                              else "AMBIGUOUS_CHAT_TARGETS")
                 page = matching[0]
-                if excluded_refs is None:
+                if excluded_refs is None and capture is None:
                     page.set_default_timeout(3000)
                 if scoped:
                     clock = page.evaluate(_DOCUMENT_CLOCK)
@@ -1257,6 +1277,8 @@ class LocalChromeDoorbellAdapter:
 
                 if excluded_refs is not None:
                     current_surface = self._surface_commitment(context, page, clock)
+                    if document is not None and current_surface != document:
+                        return LocalUISendResult("TARGET_PAGE_CHANGED")
                     guard()
                     ref = page.evaluate(_EXISTING_USER_TURN, {**args, "priorRefs": excluded_refs})
                     guard()
@@ -1274,6 +1296,8 @@ class LocalChromeDoorbellAdapter:
                         "DRAFT_PRESENT", "OUTBOUND_ALREADY_PRESENT",
                     } else "SURFACE_UNPROVEN"
                     return LocalUISendResult(code)
+                if capture is not None and page.evaluate(_AGY_SURFACE_READY, args) is not True:
+                    return LocalUISendResult("SURFACE_UNPROVEN")
                 guard()
                 if scoped:
                     surface = self._surface_commitment(context, page, clock)
@@ -1281,6 +1305,12 @@ class LocalChromeDoorbellAdapter:
                     if (type(refs) is not list or len(refs) > 8192 or
                             any(type(ref) is not str or not _UI_TURN_REF.fullmatch(ref) for ref in refs)):
                         return LocalUISendResult("EXACT_CHAT_TURN_INVENTORY_UNPROVEN")
+                    if capture is not None:
+                        guard()
+                        if self._surface_commitment(context, page, clock) != surface:
+                            return LocalUISendResult("TARGET_PAGE_CHANGED")
+                        capture(LocalUISurface(surface, clock, tuple(sorted(set(refs)))))
+                        return LocalUISendResult("READY")
                     before_stage(surface, sorted(set(refs)))
                     guard()
                 stage = "INSERT"

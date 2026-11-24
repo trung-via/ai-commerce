@@ -684,8 +684,19 @@ def test_owner_admission_and_existing_consumer_closure():
     changed = PATHS[:-1]
     impact = impact_v21.select_impact(root=ROOT, changed_paths=changed, groups=baseline)
     assert impact.runnable, impact.missing_mapping
-    assert {"wakehub-g2-native", "wakehub-private-operator", "wakehub-native-inventory"} <= set(impact.selected_groups)
-    assert set(impact.selected_tests) == {PATHS[3], "tests/test_wakehub_private_operator.py", "tests/test_wakehub_native_inventory.py"}
+    wakehub_groups = {
+        "wakehub-g2-native",
+        "wakehub-private-operator",
+        "wakehub-native-inventory",
+    }
+    wakehub_tests = {
+        PATHS[3],
+        "tests/test_wakehub_private_operator.py",
+        "tests/test_wakehub_native_inventory.py",
+    }
+    # HostOps personal reaches native authority through the WakeHub runtime runner.
+    assert set(impact.selected_groups) == wakehub_groups | {"hostops-personal"}
+    assert set(impact.selected_tests) == wakehub_tests | {"tests/test_hostops_personal.py"}
     assert "ONBOARD_CONSUMER_OWNER_CLOSURE" in impact.reason_codes
     profiles = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text())
     candidate = minimum_test.file_hashes(ROOT)
@@ -694,7 +705,10 @@ def test_owner_admission_and_existing_consumer_closure():
         base_files=base, candidate_files=candidate, changed_paths=changed, required_acs=data["acs"],
         fallback_argv=profiles["mt01-component-onboarding"], groups=groups,
         registered_profiles=profiles, allowed_paths=changed)
-    assert plan["selected_groups"] == sorted(impact.selected_groups)
+    # The registered plan narrows imports to the symbol delta against TASK_PARENT.
+    # The runtime's _desktop_identity import falls outside that delta.
+    assert plan["selected_groups"] == sorted(wakehub_groups)
+    assert set(plan["impact_v21"]["selected_tests"]) == wakehub_tests
     assert not plan["unknown_acs"]
     assert all(g["execute"] for g in plan["groups"]), plan["reason_codes"]
     for selected in plan["groups"]:

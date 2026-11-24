@@ -8,19 +8,24 @@ receipt validation execute normally. No Git, browser, login or external writes.
 """
 from contextlib import contextmanager
 from dataclasses import FrozenInstanceError, asdict, replace
+import faulthandler
 import hashlib
 import hmac
 import io
 import json
 import os
+import re
 import socket
 import sqlite3
 import subprocess
-from types import SimpleNamespace
+import sys
+from tempfile import TemporaryFile
+from types import FunctionType, SimpleNamespace
 from urllib.error import HTTPError
 import zipfile
 
 import pytest
+from _pytest.faulthandler import fault_handler_stderr_fd_key
 
 from ai_commerce.production_orchestration.contracts import ProductionStageReceipt, digest
 from ai_commerce.production_orchestration.orchestrator import ProductionPipelineOrchestrator
@@ -34,13 +39,151 @@ from ai_commerce.wakehub_runtime import runner as r
 from ai_commerce.wakehub_runtime.__main__ import main
 
 
+_EXTERNAL_EFFECTS = frozenset({
+    "socket.__new__", "socket.bind", "socket.connect", "socket.sendto", "socket.sendmsg",
+    "socket.getaddrinfo", "socket.gethostbyname", "socket.gethostbyaddr", "socket.getnameinfo",
+    "subprocess.Popen", "_winapi.CreateProcess", "os.system", "os.exec", "os.spawn",
+    "os.posix_spawn", "os.fork", "os.forkpty", "os.startfile", "os.startfile/2",
+})
+_WORKER_MODULES = {"_pytest", "pytest", "pluggy", "xdist", "execnet"}
+_ORIGINAL_TRANSPORTS = (socket.socket, socket.create_connection, subprocess.Popen)
+_offline_active = False
+_offline_hook_installed = False
+
+
+class _ExternalEffectDenied(AssertionError):
+    pass
+
+
+def _deny_external_effect(event, args):
+    if not _offline_active or event not in _EXTERNAL_EFFECTS:
+        return
+    frame = sys._getframe(1)
+    while frame is not None:
+        package = frame.f_globals.get("__name__", "").partition(".")[0]
+        if package in _WORKER_MODULES:
+            return
+        if frame.f_globals is globals() or package == "ai_commerce":
+            raise _ExternalEffectDenied(f"External operation attempted: {event}")
+        frame = frame.f_back
+
+
+@contextmanager
+def _offline_effects():
+    global _offline_active, _offline_hook_installed
+    if not _offline_hook_installed:
+        sys.addaudithook(_deny_external_effect)
+        _offline_hook_installed = True
+    previous = _offline_active
+    _offline_active = True
+    try:
+        # Fail closed if an existing audit hook prevented registration.
+        try:
+            sys.audit("socket.__new__", None, socket.AF_INET, socket.SOCK_STREAM, 0)
+        except _ExternalEffectDenied:
+            pass
+        else:
+            raise AssertionError("WakeHub offline audit hook unavailable")
+        yield
+    finally:
+        # CPython audit hooks cannot be unregistered. This hook stays inert
+        # outside the fixture, including during worker shutdown.
+        _offline_active = previous
+
+
+_COMPOSITION_TEST = "test_composition_persists_each_state_and_typed_consumer_receipt"
+_COMPOSITION_FILES = {"test_wakehub_runtime.py", "_private_state.py", "runner.py"}
+_COMPOSITION_FRAME = re.compile(
+    rb'[/\\](test_wakehub_runtime\.py|_private_state\.py|runner\.py)", line ([0-9]+)')
+
+
+class _CompositionWorkerDiagnostics:
+    def __init__(self, config):
+        self.worker = config.workerinput["workerid"]
+        # Use the same uncaptured stderr as pytest's native fault handler.
+        # On Windows execnet preserves this stream separately from fd 2.
+        self.stderr = config.stash.get(fault_handler_stderr_fd_key, None)
+        self.phase = None
+        self.first_error = False
+
+    def write(self, message):
+        if self.stderr is not None:
+            try:
+                line = f"WakeHub composition [{self.worker}] {message}\n"
+                os.write(self.stderr, line.encode("ascii", errors="backslashreplace"))
+            except OSError:
+                pass  # Diagnostics must never change the worker's outcome.
+
+    def start(self):
+        self.phase = "setup-started"
+        self.write(f"{self.phase} native_faulthandler={faulthandler.is_enabled()}")
+
+    def report_error(self, phase, excinfo):
+        if not self.first_error:
+            self.first_error = True
+            location = "outside_composition_sources"
+            for entry in reversed(excinfo.traceback):
+                filename = os.path.basename(str(entry.path))
+                if filename in _COMPOSITION_FILES:
+                    location = f"{filename}:{entry.lineno + 1}"
+                    break
+            self.write(f"first_exception phase={phase} type={excinfo.type.__name__} at={location}")
+            self.fault_snapshot()
+
+    def fault_snapshot(self):
+        # Report a bounded snapshot of live test/owner frames. Keep absolute
+        # paths, thread addresses, exception values and locals out of the log.
+        try:
+            with TemporaryFile() as stack:
+                faulthandler.dump_traceback(file=stack)
+                stack.seek(0)
+                frames = _COMPOSITION_FRAME.findall(stack.read(65536))
+        except (OSError, RuntimeError):
+            self.write("faulthandler_snapshot=unavailable")
+            return
+        locations = [f"{file.decode('ascii')}:{line.decode('ascii')}" for file, line in frames[:8]]
+        self.write(f"faulthandler_snapshot={','.join(locations) or 'no_composition_frames'}")
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_runtest_makereport(self, item, call):
+        if item.name == _COMPOSITION_TEST and item.module is sys.modules[__name__]:
+            self.phase = f"{call.when}-{'ok' if call.excinfo is None else 'raised'}"
+            if call.excinfo is not None:
+                self.report_error(call.when, call.excinfo)
+            self.write(self.phase)
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_internalerror(self, excinfo):
+        if self.phase is not None:
+            self.report_error("worker-internal", excinfo)
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_sessionfinish(self, exitstatus):
+        if self.phase is not None:
+            self.write(f"pytest_exit={int(exitstatus)} last_phase={self.phase}")
+            if self.phase != "teardown-ok" and not self.first_error:
+                self.fault_snapshot()
+
+
+@pytest.fixture(scope="session")
+def composition_worker_diagnostics(request):
+    if hasattr(request.config, "workerinput"):
+        diagnostics = _CompositionWorkerDiagnostics(request.config)
+        # Remain registered through sessionfinish so the worker can report its
+        # own exit status before xdist processes workerfinished.
+        request.config.pluginmanager.register(diagnostics)
+        return diagnostics
+    return None
+
+
 @pytest.fixture(autouse=True)
-def offline(monkeypatch):
-    def deny(*args, **kwargs):
-        raise AssertionError("External operation attempted")
-    monkeypatch.setattr(socket, "socket", deny)
-    monkeypatch.setattr(socket, "create_connection", deny)
-    monkeypatch.setattr(subprocess, "Popen", deny)
+def offline(request, composition_worker_diagnostics):
+    if request.node.name == _COMPOSITION_TEST and composition_worker_diagnostics is not None:
+        composition_worker_diagnostics.start()
+    with _offline_effects():
+        yield
+    # Exercise the installed hook after deactivation without creating a socket.
+    sys.audit("socket.__new__", None, socket.AF_INET, socket.SOCK_STREAM, 0)
 
 
 @pytest.fixture
@@ -140,6 +283,26 @@ def test_windows_fixture_grants_real_access_to_journal_and_lock(composition):
     assert _private_identity(path) == principal
     assert _private_identity(path.with_name(path.name + ".lock")) == principal
     assert make().run_once().replayed
+
+
+def test_offline_fixture_denies_effects_without_replacing_transport_globals():
+    assert all(current is original for current, original in zip(
+        (socket.socket, socket.create_connection, subprocess.Popen), _ORIGINAL_TRANSPORTS))
+    with pytest.raises(_ExternalEffectDenied, match=r"socket\.__new__"):
+        socket.socket(32767, socket.SOCK_STREAM)
+    with pytest.raises(_ExternalEffectDenied, match=r"socket\.getaddrinfo"):
+        socket.getaddrinfo("127.0.0.1", 0, flags=socket.AI_NUMERICHOST)
+    with pytest.raises(_ExternalEffectDenied, match=r"socket\.connect"):
+        sys.audit("socket.connect", None, ("127.0.0.1", 0))
+    with pytest.raises(_ExternalEffectDenied, match=r"subprocess\.Popen"):
+        subprocess.Popen([""], executable="")
+
+    # Exercise the control-traffic boundary with an audit event and no I/O.
+    def worker_socket_event():
+        sys.audit("socket.__new__", None, socket.AF_INET, socket.SOCK_STREAM, 0)
+
+    worker_globals = {"__name__": "execnet.gateway_base", "sys": sys, "socket": socket}
+    FunctionType(worker_socket_event.__code__, worker_globals)()
 
 
 def test_duplicate_delivery_and_reopen_do_not_resend_or_handoff(composition):
@@ -4265,7 +4428,8 @@ def flat05(flat04, r3a_ingress, monkeypatch):
     event = f.i["event"]
     f.ef02 = r.SourceIdentity("ef02-completion", event["repository"], event["run_id"], event["run_attempt"])
     f.consent = {
-        "schema": "WakeHubLocalUIDelivery.v2",
+        "schema": "WakeHubLocalUIDelivery.v3",
+        "transport": "playwright",
         "route_marker": f.i["registration"].marker,
         "registration_id": prepared.registration_id,
         "marker_digest": f.origin()["marker_digest"],
@@ -4317,6 +4481,8 @@ def flat05(flat04, r3a_ingress, monkeypatch):
         text = args["text"]
         if script == adapter._PRE_STAGE_REFS:
             return list(ui.outbound)
+        if script == adapter._AGY_SURFACE_READY:
+            return ui.blocked is None and not ui.draft
         if script == adapter._EXISTING_USER_TURN:
             ui.observations += 1
             assert any(row["status"] == "UNKNOWN_EFFECT" for row in rows().values())
@@ -4330,7 +4496,11 @@ def flat05(flat04, r3a_ingress, monkeypatch):
         phase = {adapter._CHECK: "check", adapter._INSERT: "insert", adapter._READY: "ready",
                  adapter._CLICK: "click", adapter._PROVE: "prove"}[script]
         reserved = next(row for row in rows().values() if row["status"] == "RESERVED")
-        assert reserved["evidence"]["local_send"]["phase"] == ("PRE_STAGE" if phase == "check" else "STAGING")
+        reservation = reserved["evidence"]["local_send"]
+        if phase == "check" and reservation.get("transport") == "agy":
+            assert reservation["phase"] in ("PRE_STAGE", "STAGING")
+        else:
+            assert reservation["phase"] == ("PRE_STAGE" if phase == "check" else "STAGING")
         if phase in ui.on_stage:
             ui.on_stage[phase]()
         if phase == "check":
@@ -4435,6 +4605,233 @@ def test_flat05_supervisor_sends_each_authenticated_source_once(flat05):
     f.save()
     assert f.s.run(2).replayed
     assert f.ui.inserts == f.ui.clicks == 2 and f.unrelated.reads == f.state.new_pages == 0
+
+
+@pytest.fixture
+def dual_route(flat05, monkeypatch):
+    f = flat05
+    del f.consent["transport"]  # Intentional v3 opt-in selects AGY by default.
+    f.consent["agy"] = {
+        "executable": str(f.i["config_path"].with_name("agy.exe")), "executable_sha256": "a" * 64,
+        "workspace": str(f.i["config_path"].parent), "skill_sha256": "b" * 64,
+    }
+    f.agy = SimpleNamespace(calls=[], effect=lambda request: "AGY_REPORTED_SEND")
+
+    def launcher(runtime, config, request, marker_digest, surface, expires_ms, stop, revalidate):
+        row = f.rows()[request.event_id]
+        reservation = row["evidence"]["local_send"]
+        assert row["status"] == "RESERVED" and reservation["phase"] == "STAGING"
+        assert reservation["transport"] == "agy" and reservation["surface"]["document"] == surface.document
+        assert reservation["doorbell_sha256"] == hashlib.sha256(request.canonical_bytes).hexdigest()
+        assert marker_digest == f.consent["marker_digest"] and not stop()
+        revalidate()
+        f.agy.calls.append(request)
+        return r._AgyOutcome(f.agy.effect(request), 37)
+
+    monkeypatch.setattr(r, "_launch_agy", launcher)
+    f.save()
+    return f
+
+
+def test_dual_route_default_uses_fixed_doorbell_and_independent_witness(dual_route):
+    f = dual_route
+    event_id = f.select("github-issue-created")
+
+    def sent(request):
+        text = request.canonical_bytes.decode()
+        assert request.event_id == event_id and "Discard this title" not in text
+        f.ui.outbound["turn-agy"] = text
+        return "AGY_REPORTED_SEND"
+
+    f.agy.effect = sent
+    assert f.s.run().code == "LOCAL_UI_EXISTING_TURN_RECONCILED"
+    row = f.rows()[event_id]
+    assert row["evidence"]["user_turn_ref"] == "turn-agy"
+    assert row["evidence"]["local_send"]["agy_attempt"] == {"code": "AGY_REPORTED_SEND", "elapsed_ms": 37}
+    del f.consent["agy"]
+    f.consent["transport"] = "playwright"
+    f.save()
+    assert f.s.run().replayed and f.rows()[event_id] == row
+    assert len(f.agy.calls) == f.ui.observations == 1 and f.ui.inserts == f.ui.clicks == 0
+
+
+@pytest.mark.parametrize("code", ["AGY_LAUNCH_NOT_ATTEMPTED", "AGY_PREINVOCATION_QUOTA"])
+@pytest.mark.parametrize("ready", [True, False])
+def test_dual_route_fallback_requires_trusted_no_invocation_and_ready_standby(dual_route, code, ready):
+    f = dual_route
+    event_id = f.select("ef02-completion")
+
+    def unattempted(_):
+        if not ready:
+            f.ui.blocked = "DRAFT_PRESENT"
+        return code
+
+    f.agy.effect = unattempted
+    result = f.s.run()
+    row = f.rows()[event_id]
+    assert len(f.agy.calls) == 1
+    if ready:
+        assert result.status == "UI_TURN_OBSERVED" and f.ui.inserts == f.ui.clicks == 1
+        reservation = row["evidence"]["local_send"]
+        assert reservation["transport"] == "playwright" and reservation["agy_attempt"]["code"] == code
+        assert f.s.run().replayed and len(f.agy.calls) == f.ui.clicks == 1
+    else:
+        assert result.code == "DRAFT_PRESENT" and row["history"] == ["PENDING"]
+        assert f.ui.inserts == f.ui.clicks == 0
+
+
+@pytest.mark.parametrize("reported", ["AGY_REPORTED_SEND", "AGY_REPORTED_HOLD", "AGY_TIMEOUT", "malformed", "crash"])
+def test_dual_route_unknown_survives_restart_and_transport_change(dual_route, reported):
+    f = dual_route
+    event_id = f.select("ef02-completion")
+
+    def ambiguous(request):
+        if reported == "crash":
+            raise SimulatedWakeHubCrash()
+        if reported == "malformed":
+            return r._agy_report(0, b'{"status":"SUCCESS","response":"sent"}', b"", request.event_key)
+        return reported
+
+    f.agy.effect = ambiguous
+    if reported == "crash":
+        with pytest.raises(SimulatedWakeHubCrash):
+            f.s.run()
+        assert f.rows()[event_id]["status"] == "RESERVED"
+    else:
+        assert f.s.run().status == "UNKNOWN_EFFECT"
+    del f.consent["agy"]
+    f.consent["transport"] = "playwright"
+    f.save()
+    resumed = f.s.run()
+    assert resumed.status == "UNKNOWN_EFFECT" and resumed.replayed
+    if reported == "malformed":
+        assert resumed.code == "AGY_RECEIPT_UNPROVEN"
+    assert len(f.agy.calls) == 1 and f.ui.inserts == f.ui.clicks == 0
+
+
+def test_dual_route_unknown_reconciles_only_with_independent_user_turn(dual_route):
+    f = dual_route
+    event_id = f.select("ef02-completion")
+    f.agy.effect = lambda request: "AGY_TIMEOUT"
+    assert f.s.run().status == "UNKNOWN_EFFECT"
+    assert f.s.run().code == "AGY_TIMEOUT"
+    f.ui.outbound["turn-agy"] = f.agy.calls[0].canonical_bytes.decode()
+    assert f.s.run().code == "LOCAL_UI_EXISTING_TURN_RECONCILED"
+    assert f.rows()[event_id]["evidence"]["local_unknown_code"] == "AGY_TIMEOUT"
+    assert len(f.agy.calls) == 1 and f.ui.clicks == 0
+
+
+@pytest.mark.parametrize("output, expected", [
+    (b"quota exhausted", "AGY_RECEIPT_UNPROVEN"),
+    (b"x" * (r._AGY_OUTPUT_LIMIT + 1), "AGY_OUTPUT_LIMIT"),
+    (None, "AGY_REPORTED_SEND"),
+])
+def test_dual_route_powershell_launch_uses_fixed_argv_and_bounded_receipt(flat05, monkeypatch, output, expected):
+    from ai_commerce.remote import worker
+
+    f = flat05
+    runtime = r._read_runtime_config(f.i["config_path"], f.i["root"])
+    issue = f.issue.target
+    event = r.SourceEvent(issue.identity, digest({"identity": asdict(issue.identity), "creation": asdict(issue.creation)}),
+                          issue)
+    request = r.DoorbellRequest.for_source(event, runtime.registration)
+    workspace = f.i["config_path"].parent
+    executable = workspace / "agy.exe"
+    grant = f.consent["grants"][1]
+    surface = r.cdp_doorbell.LocalUISurface("d" * 64, 12345, ())
+    effects = []
+
+    def popen(argv, *, cwd, env, shell, stdin, **kwargs):
+        effects.append("launch")
+        assert argv[1:] == ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", r._AGY_POWERSHELL]
+        assert "--model gemini-4-hydrogen-low --effort low" in argv[-1]
+        assert request.binding.chat_url not in argv[-1]
+        assert cwd == workspace and shell is False and stdin == subprocess.DEVNULL
+        assert env["AI_COMMERCE_WAKE_AGY_EXE"] == str(executable) and "GH_TOKEN" not in env
+        header, body = env["AI_COMMERCE_WAKE_AGY_PROMPT"].split("\n", 1)
+        assert header.startswith("/wakehub-executor ")
+        assert json.loads(body)["message"].encode() == request.canonical_bytes
+        report = json.dumps({"conversation_id": "fake-conversation", "status": "SUCCESS", "response": json.dumps({
+            "event_key": request.event_key, "outcome": "SEND_ATTEMPTED",
+        })}).encode()
+        return SimpleNamespace(stdout=io.BytesIO(report if output is None else output), stderr=io.BytesIO(),
+                               poll=lambda: 0, returncode=0)
+
+    monkeypatch.setenv("GH_TOKEN", "synthetic-token-not-for-agy")
+    monkeypatch.setattr(r, "subprocess", SimpleNamespace(Popen=popen, PIPE=subprocess.PIPE,
+                                                        DEVNULL=subprocess.DEVNULL))
+    monkeypatch.setattr(r, "_agy_local_paths", lambda *args: (executable, workspace))
+    monkeypatch.setattr(worker, "_windows_diagnostic_job", lambda: SimpleNamespace(
+        attach=lambda child: effects.append("attach"), close=lambda: effects.append("close")))
+    result = r._launch_agy(runtime, {}, request, f.consent["marker_digest"], surface,
+                           grant["expires_ms"], lambda: False, lambda: effects.append("validate"))
+    assert result.code == expected and result.elapsed_ms >= 0
+    assert effects == ["validate", "launch", "attach", "close"]
+
+
+@pytest.mark.parametrize("fault, expected", [
+    ("consent-route", "LOCAL_UI_ENROLLMENT_DRIFT"),
+    ("wrong-grant", "LOCAL_UI_DELIVERY_GRANT_REQUIRED"),
+    ("verification", "SURFACE_UNPROVEN"),
+    ("busy", "GENERATION_ACTIVE"),
+    ("draft", "DRAFT_PRESENT"),
+    ("permission", "AGY_PERMISSION_REQUIRED"),
+])
+def test_dual_route_shared_holds_prevent_send(dual_route, fault, expected):
+    f = dual_route
+    event_id = f.select("ef02-completion")
+    if fault == "consent-route":
+        f.consent["route_marker"] = "wakehub-r1:" + "a" * 64
+    elif fault == "wrong-grant":
+        f.consent["grants"].pop(0)
+    elif fault == "permission":
+        f.agy.effect = lambda request: "AGY_PERMISSION_REQUIRED"
+    else:
+        f.ui.blocked = expected
+    f.save()
+    assert f.s.run().code == expected
+    assert f.rows()[event_id]["history"] == ["PENDING"]
+    assert len(f.agy.calls) == int(fault == "permission") and f.ui.inserts == f.ui.clicks == 0
+
+
+def test_dual_route_legacy_grant_is_read_only_and_old_row_can_reconcile(flat05):
+    f = flat05
+    event_id = f.select("ef02-completion")
+    legacy = {key: value for key, value in f.consent.items() if key != "transport"}
+    legacy["schema"] = "WakeHubLocalUIDelivery.v2"
+    f.i["config"]["ui_delivery"] = legacy
+    f.save()
+    assert f.s.run().code == "EXACT_CHAT_REUSED"
+    assert f.rows()[event_id]["history"] == ["PENDING"] and f.ui.clicks == 0
+
+    f.i["config"]["ui_delivery"] = f.consent
+    f.save()
+    f.ui.ref_mode = "boolean"
+    assert f.s.run().status == "UNKNOWN_EFFECT"
+    runner = r.compose_read_only(f.i["config_path"], f.i["root"])
+    with runner.journal.locked(runner.registration) as (txn, data):
+        row, = data["events"].values()
+        reservation = row["evidence"]["local_send"]
+        del reservation["transport"]
+        reservation["consent_sha256"] = runner._ui_consent_digest(legacy, legacy["grants"][0])
+        txn.write(data)
+    assert f.s.run().code == "LOCAL_UI_EXISTING_TURN_RECONCILED"
+    assert f.ui.clicks == f.ui.observations == 1
+
+
+def test_dual_route_journal_rejects_agy_staging_without_surface(dual_route):
+    f = dual_route
+    f.select("ef02-completion")
+    f.agy.effect = lambda request: "AGY_TIMEOUT"
+    assert f.s.run().status == "UNKNOWN_EFFECT"
+    before = f.rows()
+    runner = r.compose_read_only(f.i["config_path"], f.i["root"])
+    with runner.journal.locked(runner.registration) as (txn, data):
+        row, = data["events"].values()
+        del row["evidence"]["local_send"]["surface"]
+        with pytest.raises(r.RuntimeHold, match="LOCAL_UI_RESERVATION_INVALID"):
+            txn.write(data)
+    assert f.rows() == before
 
 
 @pytest.mark.parametrize("schema", ["WakeHubLocalUIDelivery.v1", "WakeHubLocalUIDelivery.v99"])

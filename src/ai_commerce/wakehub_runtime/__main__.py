@@ -24,9 +24,17 @@ def main(argv: list[str] | None = None) -> int:
                     "chrome_lifecycle to demand-start for the verified demand task, or paused to withhold effects. "
                     "Set chat_preload to true to allow dedicated-browser preload after local registration. "
                     "To explicitly opt in to Send, configure private ui_delivery with schema "
-                    "WakeHubLocalUIDelivery.v2, the current route_marker, registration_id, marker_digest, "
+                    "WakeHubLocalUIDelivery.v3, the current route_marker, registration_id, marker_digest, "
                     "and a grants list with exact source_key and expires_ms (UTC epoch milliseconds) entries. "
-                    "The v2 schema requires intentional owner configuration. Earlier schemas are rejected. "
+                    "Human decision #1406 defaults v3 to transport agy. Set transport to playwright to "
+                    "select the direct route. For agy, supply an agy object with the local absolute agy.exe "
+                    "path (executable), executable_sha256, the absolute private workspace, and the enrolled "
+                    "wakehub-executor V1.2 SKILL.md digest (skill_sha256). The workspace or owner profile must "
+                    "already enroll wake-browser with the pinned chrome-devtools-mcp@1.14.0 package and "
+                    "browserUrl http://127.0.0.1:9444. AGY uses PowerShell, gemini-4-hydrogen-low and low effort. "
+                    "Fallback requires trusted evidence of no invocation and fresh Playwright readiness. "
+                    "An uncertain effect is reconciled through a read-only USER-turn observation. Existing "
+                    "v2 config permits reconciliation under its original grant. New Sends require v3. "
                     "Local UI proof leaves ChatGPT account identity independently unverified.")
     supervisor.add_argument("--max-ticks", type=int,
                             help="Count all ticks, including Chrome health ticks with no eligible source.")
