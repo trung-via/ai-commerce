@@ -145,6 +145,99 @@ def test_exact_user_turn_observed_is_only_unknown_not_server_confirmed():
     assert "candidate_sha" not in page.submitted_text
 
 
+def test_registered_doorbell_rejects_foreign_port_and_legacy_issue_selector(monkeypatch):
+    monkeypatch.setattr(doorbell, "_is_windows", lambda: True)
+    inv = FakeInventory(FakePage())
+    adapter = LocalChromeDoorbellAdapter(allow_submit=True, inventory=inv, send_only=True)
+    issue = "github-issue-created-v1:" + "b" * 64
+    assert adapter.send_wake(binding=BIND, message="", event_id=issue).delivery_status == "UNSUPPORTED"
+    result = adapter.send_registered_ui(
+        binding=replace(BIND, cdp_endpoint="http://127.0.0.1:9555"), event_id=issue,
+        marker_digest="a" * 64, account_sha256="b" * 64, session_sha256=None,
+        revalidate=lambda: pytest.fail("foreign port reached authority"),
+        before_stage=lambda: pytest.fail("foreign port reached staging"),
+    )
+    assert result.code == "NATIVE_DESKTOP_UNPROVEN" and not result.staged
+    assert inv.calls == []
+
+
+def test_registered_doorbell_scripts_require_fresh_exact_user_reference():
+    """Exercise the production JS on fake page primitives, including the synchronous click fence."""
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js not installed in this Python environment")
+    program = r"""
+const input = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const args = input.args;
+const check = eval(input.check), click = eval(input.click), prove = eval(input.prove);
+globalThis.location = {href:args.url};
+Object.defineProperty(globalThis, 'performance', {value:{timeOrigin:args.documentClock}});
+globalThis.getComputedStyle = () => ({visibility:'visible'});
+const node = (text = '', attrs = {}) => ({
+  textContent:text, innerText:text, childNodes:[], getClientRects:() => [1],
+  getAttribute:name => attrs[name] ?? null, closest:() => null,
+});
+const editor = node();
+const old = node('unrelated', {'data-turn-id':'turn-old'});
+const fresh = node(args.text, {'data-message-id':'turn-new'});
+fresh.closest = selector => selector.startsWith('[data-message-id]') ? fresh : null;
+let roles = [], ids = [old], clicks = 0;
+const button = node();
+button.disabled = true;
+button.click = () => { clicks++; roles.push(fresh); ids.push(fresh); };
+editor.parentElement = {tagName:'FORM', querySelectorAll:() => [button]};
+globalThis.document = {querySelectorAll:selector => {
+  if (selector === 'main') return [node()];
+  if (selector === args.composer) return [editor];
+  if (selector === 'main [data-message-author-role="user"]') return roles;
+  if (selector === '[data-message-id], [data-turn-id]') return ids;
+  return [];
+}};
+if (check(args) !== 'READY') process.exit(10);
+button.disabled = false;
+if (check(args) !== 'DRAFT_PRESENT') process.exit(20);
+button.disabled = true;
+roles = [fresh];
+if (check(args) !== 'OUTBOUND_ALREADY_PRESENT') process.exit(11);
+editor.textContent = editor.innerText = args.text;
+button.disabled = false;
+if (click(args) !== false || clicks) process.exit(12);
+roles = [];
+args.priorRefs = click(args);
+if (clicks !== 1 || JSON.stringify(args.priorRefs) !== '["turn-old"]') process.exit(13);
+if (prove(args) !== 'turn-new') process.exit(14);
+args.priorRefs.push('turn-new');
+if (prove(args) !== false) process.exit(15);
+args.priorRefs.pop();
+ids.push(node('', {'data-turn-id':'turn-new'}));
+if (prove(args) !== false) process.exit(16);
+ids.pop();
+fresh.textContent += ' extra';
+fresh.innerText = fresh.textContent;
+if (prove(args) !== false) process.exit(17);
+fresh.textContent = fresh.innerText = args.text;
+roles = [];
+if (prove(args) !== false) process.exit(18);
+roles = [fresh];
+performance.timeOrigin++;
+if (prove(args) !== false || click(args) !== false || clicks !== 1) process.exit(19);
+"""
+    result = subprocess.run(
+        [node, "-e", program],
+        input=json.dumps({
+            "check": doorbell._CHECK, "click": doorbell._CLICK, "prove": doorbell._PROVE,
+            "args": {**doorbell._ARGS, "url": URL, "documentClock": 100,
+                     "text": doorbell._doorbell_text(EVENT, "trung-via/ai-commerce", send_only=True)},
+        }),
+        text=True, capture_output=True, timeout=45,
+    )
+    assert result.returncode == 0, (result.returncode, result.stderr[:1000])
+
+
 @pytest.mark.parametrize("failure,expected_code,expected_click", [
     ("insert", "INSERT_BLOCKED", 0),
     ("wait_ready", "INSERT_BLOCKED", 0),

@@ -14,16 +14,20 @@ from .runner import (
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Source-only WakeHub intake for exact EF02 runs and GitHub Issue creations. "
+        description="WakeHub intake for exact EF02 runs and GitHub Issue creations. "
                     "Chrome 9444 readiness and locally opted-in exact-chat preload. "
-                    "No UI Send, "
-                    "login, scheduler, HostOps or GitHub writes.")
+                    "Scoped UI Send is available only through the supervisor with enrolled local evidence.")
     sub = parser.add_subparsers(dest="command", required=True)
     supervisor = sub.add_parser(
         "supervise", help="Run serial ticks for the interactive owner on Windows.",
         description="Observe Chrome 9444 by default. An owner-controlled private runtime config may set "
                     "chrome_lifecycle to demand-start for the verified demand task, or paused to withhold effects. "
-                    "Set chat_preload to true to allow dedicated-browser preload after local registration.")
+                    "Set chat_preload to true to allow dedicated-browser preload after local registration. "
+                    "For one-time owner enrollment, set the private ui_delivery schema to WakeHubLocalUIDelivery.v1 "
+                    "with the current route_marker, registration_id and marker_digest, account_sha256, "
+                    "session_sha256 (null if the reader lacks a session reference), and grants with the exact "
+                    "source_key and expires_ms (UTC epoch milliseconds). Without ui_delivery, Send is disabled. "
+                    "An independently enrolled local account reader must supply current evidence on the exact chat.")
     supervisor.add_argument("--max-ticks", type=int,
                             help="Count all ticks, including Chrome health ticks with no eligible source.")
     supervisor.add_argument("--idle-seconds", type=int, default=30,
