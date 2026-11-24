@@ -16,6 +16,7 @@ from ai_commerce.remote.validation import approved_verification_plan
 from ai_commerce.remote.scheduler import run_schedule
 
 FULL = ["python", "-m", "pytest", "tests", "-q"]
+M02_TEST = "src/ai_commerce/opportunity/trends/tests/test_m02.py"
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -1986,6 +1987,7 @@ def test_real_source_and_schema_preserve_cli_and_import_consumers(real_tree, mon
 ])
 def test_a10_m05_selects_a03_consumer_with_only_reviewed_closure(real_tree, monkeypatch, path, v21):
     current = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text())
+    producer = "src/ai_commerce/opportunity/bridge/briefs.py"
     if v21:
         monkeypatch.setenv("MT01_V21_ENABLED", "1")
         groups = mt.approved_groups()  # V2 loads persisted owners from the trusted base.
@@ -2003,82 +2005,72 @@ def test_a10_m05_selects_a03_consumer_with_only_reviewed_closure(real_tree, monk
             registered_only=True, registered_profiles=registry, env={})
 
     selected = select(groups)
+    assert not selected["fallback"]
+    assert selected["unknown_tests"] == selected["unknown_acs"] == selected["unknown_consumers"] == []
+    assert all(entry["state"] == "EXECUTE" for entry in selected["groups"])
+    without_a03_consumer = tuple(
+        replace(g, consumers=tuple(p for p in g.consumers if p != producer))
+        if g.name == "a03" else g for g in groups)
+    if not v21 or path == producer:
+        local = next(entry for entry in selected["groups"] if entry["group"] == "a10-m02")
+        assert M02_TEST in selected["affected_paths"]
+        assert local["selected_profile"] == "mt01-a10-m02-tests"
+        assert local["binding"]["argv"] == current["mt01-a10-m02-tests"]
+        assert local["binding"]["argv"] == ["python", "-m", "pytest", M02_TEST, "-q", "-n", "12"]
+
     if v21:
-        # MT-01 V2.1 no longer treats every indirect CLI/test import as a
-        # mandatory owner suite. It keeps M05's actual owner, its declared A03
-        # consumer and the reviewed production/WakeHub consumer chain.
+        # V2.1 bounds imports to two edges. The schema reaches the A03
+        # registration via briefs.py before it reaches any A03 source or test.
         expected_v21 = {
             "a03", "a10", "cli", "production-orchestration", "wakehub-runtime",
         }
-        if path.endswith("/briefs.py"):
+        if path == producer:
+            # The orchestrator is used by creative/v2.py, A04's registered
+            # contract. The opportunity initializer re-exports briefs.py.
+            # Importing its core from HostOps Personal runs that initializer,
+            # and the reconcile manifest lists personal.py as a consumer.
             expected_v21.update({
-                "a10-m02", "a18-1", "a18-2", "a18-3", "b0-1",
-                "b3-portfolio", "wakehub-cdp-native",
+                "a04", "a10-m02", "a18-1", "a18-2", "a18-3", "b0-1",
+                "b3-portfolio", "hostops-ef02-attempt-reconcile", "hostops-personal",
+                "wakehub-cdp-native",
             })
+        else:
+            previous = select(without_a03_consumer)
+            assert set(previous["selected_groups"]) == expected_v21 - {"a03"}
+            assert previous["unknown_tests"] == previous["unknown_consumers"] == []
+            assert all(entry["state"] == "EXECUTE" for entry in previous["groups"])
         assert set(selected["selected_groups"]) == expected_v21
-        assert not selected["fallback"]
         assert selected["reason_codes"] == ["SCOPED_CONSUMER_CLOSURE"]
-        assert selected["unknown_tests"] == selected["unknown_acs"] == selected["unknown_consumers"] == []
-        assert all(entry["state"] == "EXECUTE" for entry in selected["groups"])
-        assert not {"a05", "a06", "a07", "a08", "a09", "a11", "a12", "bq-04a"} & expected_v21
+        # Generic CLI smoke imports and deeper creative/runtime consumers
+        # are insufficient to select their owners in V2.1.
+        assert not {"a05", "a06", "a07", "a08", "a09", "a11", "a12", "b0-3", "bq-04a"} & set(
+            selected["selected_groups"])
         for owner in ("a03", "a10", "production-orchestration", "wakehub-runtime"):
             entry = next(e for e in selected["groups"] if e["group"] == owner)
             assert entry["binding"]["candidate_files"][path] == real_tree.files[path]
         return
+    # The legacy planner follows all import depths, including ancestor
+    # initializers and test imports. The bridge feeds the shared CLI and
+    # orchestrator, and creative/v2.py links those paths to Media, B0 and
+    # BQ. These suites need no direct registration against M05 to be selected.
     expected = {
         "a03", "a04", "a05", "a06", "a07", "a08", "a09", "a10", "a10-m02",
-        "a11", "a12", "a18-1", "a18-2", "a18-3", "b0-1", "b3-portfolio",
-        "bq-02b", "bq-04a", "cli", "production-orchestration", "wakehub-runtime",
-        "wakehub-cdp-native",
+        "a11", "a12", "a13", "a14-e04", "a15", "a16", "a17-1", "a17-2", "a17-3",
+        "a18-1", "a18-2", "a18-3", "a04-pulse-handoff", "b0-1", "b0-2", "b0-3",
+        "b0-4", "b0-s", "b0-s3", "b0-s3b", "b1-3-audio", "b1-3-subtitle",
+        "b3-next-brief", "b3-operations-dashboard", "b3-portfolio", "b4-feed-readiness",
+        "bq-01a", "bq-01b", "bq-02a", "bq-02b", "bq-03a", "bq-03b", "bq-04a",
+        "bq-04b", "bq-05a", "bq-05b0", "bq-05b1", "bq-06a", "bq-06b", "cli",
+        "hostops-ef02-attempt-reconcile", "hostops-personal", "production-orchestration",
+        "wakehub-cdp-native", "wakehub-runtime",
     }
     assert set(selected["selected_groups"]) == expected
-    assert not selected["fallback"]
-    assert selected["reason_codes"] == (["SCOPED_CONSUMER_CLOSURE"] if v21 else [])
-    assert selected["unknown_tests"] == selected["unknown_acs"] == selected["unknown_consumers"] == []
-    assert all(entry["state"] == "EXECUTE" for entry in selected["groups"])
-    # A05 depends on M05 through the shared CLI; the registered production and
-    # wakehub consumers also belong to the closure before adding A03's edge.
-    # The persisted CDP owner declares the affected WakeHub runtime runner as
-    # a consumer, so its registered tests belong to that exact closure too.
-    producer = "src/ai_commerce/opportunity/bridge/briefs.py"
-    without_a03_consumer = tuple(
-        replace(g, consumers=tuple(p for p in g.consumers if p != producer))
-        if g.name == "a03" else g for g in groups)
-    # Two independent A03 test-only imports now select the bridge even without
-    # its declared consumer edge: the creative test imports the orchestrator,
-    # and the upgrade CLI smoke imports ai_commerce.cli. Preserve both real
-    # positive paths; isolate both ONLY for the declared-edge negative control.
+    assert selected["reason_codes"] == []
+    # Creative's production import and CLI smoke still reach the bridge
+    # through the legacy graph when the explicit A03 declaration is absent.
     assert set(select(without_a03_consumer)["selected_groups"]) == expected
-    # Isolate the declared edge's negative control from that test-only import.
-    # All production imports and the production/wakehub owner chain stay real.
-    a03_test = "tests/test_a03_creative.py"
-    orchestration_init = "src/ai_commerce/production_orchestration/__init__.py"
-    a03_cli_test = "tests/test_a03_upgrade_v11.py"
-    cli_source = "src/ai_commerce/cli.py"
-    with monkeypatch.context() as control:
-        if v21:
-            from ai_commerce.engineering import impact_v21
-            reverse_import_graph = impact_v21._reverse_import_graph
-
-            def previous_import_graph(root, paths):
-                reverse, uncertain = reverse_import_graph(root, paths)
-                reverse[orchestration_init].remove(a03_test)
-                return reverse, uncertain
-
-            control.setattr(impact_v21, "_reverse_import_graph", previous_import_graph)
-        else:
-            graph, complete = real_tree.graph
-            previous_graph = {p: set(deps) for p, deps in graph.items()}
-            previous_graph[a03_test].remove(orchestration_init)
-            previous_graph[a03_cli_test].remove(cli_source)
-            control.setattr(mt, "import_graph", lambda *_: (previous_graph, complete))
-        assert set(select(groups)["selected_groups"]) == expected
-        previous = select(without_a03_consumer)
-    assert set(previous["selected_groups"]) == expected - {"a03"}
-    assert not previous["fallback"]
-    assert previous["unknown_tests"] == previous["unknown_acs"] == previous["unknown_consumers"] == []
     assert "src/ai_commerce/cli.py" in selected["affected_paths"]
-    unrelated = {"bq-05a", "bq-05b0", "bq-05b1", "ef02", "ef02-wake"}
+    unrelated = {"foundation", "a02", "ef02", "ef02-wake", "mt01"}
     assert unrelated <= {g.name for g in real_tree.groups}
     assert not unrelated & set(selected["selected_groups"])
 
@@ -2109,7 +2101,7 @@ def test_a10_m05_selects_a03_consumer_with_only_reviewed_closure(real_tree, monk
         assert consumer in mapping["consumers"]
         assert mapping["tests"] == [test_path]
         entry = next(e for e in selected["groups"] if e["group"] == owner)
-        profile = "mt01-component-onboarding" if v21 else f"mt01-{owner}-tests"
+        profile = f"mt01-{owner}-tests"
         assert profile in registry
         assert entry["selected_profile"] == entry["binding"]["registered_profile"] == profile
         assert entry["binding"]["argv"] == ["python", "-m", "pytest", test_path, "-q", "-n", "12"]
@@ -3607,7 +3599,7 @@ def test_pr_ci_real_a12_component_can_select_narrow_test_files(pr_ci_module):
 
 
 
-def test_v21_authenticated_full_runs_entire_registered_scope_not_affected_subset(monkeypatch, real_tree):
+def test_v21_authenticated_full_holds_when_registered_scope_omits_affected_test(monkeypatch, real_tree):
     from ai_commerce.engineering.minimum_test import select_plan
     groups = real_tree.groups
     monkeypatch.setenv("MT01_V21_ENABLED", "1")
@@ -3624,10 +3616,16 @@ def test_v21_authenticated_full_runs_entire_registered_scope_not_affected_subset
     full = select_plan(**kwargs, human_full_suite_authorized=True)
     assert full["version"] == 1 and full["fallback"]
     assert full["human_full_suite_authorized"] is True
-    assert full["groups"][0]["state"] == "EXECUTE"
-    assert full["groups"][0]["binding"]["argv"] == broad
-    assert "tests/test_minimum_test.py" in full["groups"][0]["binding"]["candidate_files"]
+    entry, = full["groups"]
+    assert entry["state"] == "UNPROVEN" and not entry["execute"]
+    assert entry["selected_profile"] == "project-tests"
+    assert entry["binding"]["argv"] == broad
+    assert "tests/test_minimum_test.py" in entry["binding"]["candidate_files"]
+    assert full["consumer_map"]["a10-m02"]["tests"] == [M02_TEST]
+    assert M02_TEST in full["affected_paths"]
+    assert not full["unknown_tests"]
     assert "AUTHENTICATED_HUMAN_EXPLICIT_FULL_SUITE" in full["reason_codes"]
+    assert "REQUIRED_TEST_OUTSIDE_FALLBACK_SCOPE:" + M02_TEST in full["reason_codes"]
     with pytest.raises(ValueError, match="UNTRUSTED_OR_UNREGISTERED"):
         select_plan(**{**kwargs, "fallback_argv": registry["mt01-a12-tests"]},
                     human_full_suite_authorized=True)
@@ -3641,21 +3639,25 @@ def test_human_full_preserves_owner_ac_mapping_for_minimum_test_source(monkeypat
     monkeypatch.setenv("MT01_V21_ENABLED", "1")
     files = real_tree.files
     registry = real_tree.registry
+    owner_path = "src/ai_commerce/engineering/" + owner
     planned = select_plan(
         repo=ROOT, base_sha=real_tree.sha, base_files=files, candidate_files=files,
-        changed_paths=["src/ai_commerce/engineering/" + owner],
+        changed_paths=[owner_path],
         required_acs=("MT01.selection-and-evidence",),
         fallback_argv=registry["project-tests"], groups=real_tree.groups,
         registered_only=True, registered_profiles=registry,
         human_full_suite_authorized=True,
     )
     assert planned["fallback"] is True
-    assert "mt01" in planned["selected_groups"]
+    assert owner_path in planned["consumer_map"]["mt01"]["paths"]
     assert "MT01.selection-and-evidence" in planned["required_acs"]
-    assert "src/ai_commerce/engineering/" + owner not in planned["unknown_tests"]
-    assert planned["groups"][0]["state"] == "EXECUTE"
-    assert planned["groups"][0]["binding"]["argv"] == registry["project-tests"]
-    assert "tests/test_minimum_test.py" in planned["groups"][0]["binding"]["candidate_files"]
+    assert not planned["unknown_acs"] and not planned["unknown_tests"]
+    entry, = planned["groups"]
+    assert entry["state"] == "UNPROVEN" and not entry["execute"]
+    assert entry["binding"]["argv"] == registry["project-tests"]
+    assert "tests/test_minimum_test.py" in entry["binding"]["candidate_files"]
+    assert planned["consumer_map"]["a10-m02"]["tests"] == [M02_TEST]
+    assert "REQUIRED_TEST_OUTSIDE_FALLBACK_SCOPE:" + M02_TEST in entry["explanation"]
 
 
 @pytest.mark.parametrize("owner", ["minimum_test.py", "verification.py"])
@@ -3751,9 +3753,11 @@ def test_human_full_loads_existing_trusted_personal_hostops_ac(monkeypatch, real
     assert ac in plan["required_acs"]
     assert ac not in plan["unknown_acs"]
     assert "HUMAN_FULL_AC_MAPPING_UNPROVEN" not in plan["reason_codes"]
-    assert plan["groups"][0]["state"] == "EXECUTE"
-    assert plan["groups"][0]["binding"]["argv"] == real_tree.registry["project-tests"]
-    assert "tests/test_hostops_personal.py" in plan["groups"][0]["binding"]["candidate_files"]
+    entry, = plan["groups"]
+    assert entry["state"] == "EXECUTE" and entry["execute"]
+    assert entry["binding"]["argv"] == real_tree.registry["project-tests"]
+    assert "tests/test_hostops_personal.py" in entry["binding"]["candidate_files"]
+    assert "REQUIRED_TEST_OUTSIDE_FALLBACK_SCOPE:" + M02_TEST not in plan["reason_codes"]
 
 
 def test_human_full_rejects_conflicting_caller_owner_mapping(monkeypatch, real_tree):
