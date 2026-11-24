@@ -1,26 +1,29 @@
 """WakeHub interactive-session entrypoints."""
 import argparse
+from dataclasses import asdict
 import json
 import os
 from pathlib import Path
 import sys
 
 from .runner import (
-    Result, RuntimeHold, _CODE_ROOT, diagnostic, run_native_source_only, run_read_only, run_supervisor,
+    Result, RuntimeHold, _CODE_ROOT, diagnostic, register_local_chat, run_native_source_only, run_read_only,
+    run_supervisor,
 )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Source-only WakeHub intake for exact EF02 runs and GitHub Issue creations. "
-                    "Chrome 9444 readiness and typed dependency gates. "
-                    "No tab preload, UI Send, "
+                    "Chrome 9444 readiness and locally opted-in exact-chat preload. "
+                    "No UI Send, "
                     "login, scheduler, HostOps or GitHub writes.")
     sub = parser.add_subparsers(dest="command", required=True)
     supervisor = sub.add_parser(
         "supervise", help="Run serial ticks for the interactive owner on Windows.",
         description="Observe Chrome 9444 by default. An owner-controlled private runtime config may set "
-                    "chrome_lifecycle to demand-start for the verified demand task, or paused to withhold starts.")
+                    "chrome_lifecycle to demand-start for the verified demand task, or paused to withhold effects. "
+                    "Set chat_preload to true to allow dedicated-browser preload after local registration.")
     supervisor.add_argument("--max-ticks", type=int,
                             help="Count all ticks, including Chrome health ticks with no eligible source.")
     supervisor.add_argument("--idle-seconds", type=int, default=30,
@@ -42,11 +45,30 @@ def main(argv: list[str] | None = None) -> int:
                      help="Diagnostic-only private file in an existing operator-owned directory, outside checkout.")
     run.add_argument("--target-index", type=int,
                      help="Select a zero-based entry in the private registered_targets list (default 0).")
-    for command in (run, supervisor):
+    registration = sub.add_parser(
+        "register", help="Enroll exact Chat A from a local Windows owner terminal.",
+        description="Set chat_preload to false or true in the private config. Open the configured Chat A "
+                    "in the dedicated Chrome profile, prepare a private marker, manually post it as a USER "
+                    "turn there, then observe using its registration ID before it expires.")
+    actions = registration.add_subparsers(dest="action", required=True)
+    prepare = actions.add_parser("prepare", help="Print a fresh private marker for manual presentation.")
+    observe = actions.add_parser("observe", help="Verify and consume that marker in the exact Chat A.")
+    observe.add_argument("registration_id")
+    for command in (run, supervisor, prepare, observe):
         command.add_argument("--repository-root", type=Path, help="Checkout excluded from private journal storage.")
         command.add_argument("--config", type=Path,
                              help="Existing private WakeHubRuntimeR1.v1 local config; never an Issue payload.")
     args = parser.parse_args(argv)
+    if args.command == "register":
+        configured = os.environ.get("AI_COMMERCE_WAKEHUB_CONFIG")
+        config = args.config if args.config is not None else Path(configured) if configured else None
+        result = register_local_chat(config, args.repository_root or _CODE_ROOT,
+                                     registration_id=getattr(args, "registration_id", None))
+        if not isinstance(result, Result):
+            print(json.dumps({"code": "LOCAL_CHAT_MARKER_PREPARED", **asdict(result)}, sort_keys=True))
+            return 0
+        print(json.dumps(result.to_dict(), sort_keys=True))
+        return 0 if result.code == "LOCAL_CHAT_REGISTERED_UI_EVIDENCE" else 2
     if args.command == "supervise":
         configured = os.environ.get("AI_COMMERCE_WAKEHUB_CONFIG")
         config = args.config if args.config is not None else Path(configured) if configured else None
