@@ -3249,6 +3249,8 @@ class PersonalCdp9444ConfigRegistryTests(unittest.TestCase):
             ("SUPERVISOR_TASK_CONFLICT", "HOLD"),
             ("SUPERVISOR_START_NOT_ATTEMPTED", "HOLD"),
             ("LOCAL_CONFIG_REQUIRED", "HOLD"),
+            ("LOCAL_CONFIG_STALE", "HOLD"),
+            ("LOCAL_CONFIG_AMBIGUOUS", "HOLD"),
             ("PRIVATE_CONFIG_PATH", "HOLD"),
         ):
             native = hostops._supervisor_receipt(code, 17, "f" * 40)
@@ -3325,6 +3327,8 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.runtime = runner
         self.stack = self.enterContext(ExitStack())
         self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        self.workspace = self.root / "checkout"
+        self.workspace.mkdir()
         self.config = self.root / "existing-config.json"
         self.config.touch()
         self.executable = self.root / "pythonw.exe"
@@ -3351,13 +3355,15 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         clock = count()
         self.mock(hostops, "time", new=SimpleNamespace(monotonic=lambda: next(clock), sleep=Mock()))
         self.mock(hostops, "os", new=SimpleNamespace(name="nt", environ=self.env))
+        self.mock(runner, "os", new=SimpleNamespace(name="nt", environ=self.env))
         self.mock(hostops.sys, "_base_executable", new=str(self.executable))
         self.mock(hostops.sys, "prefix", new=str(self.root))
-        self.mock(hostops, "ROOTS", new={"workspace": self.root})
+        self.mock(hostops, "ROOTS", new={"workspace": self.workspace})
         self.mock(hostops, "_persistent_clean_source", return_value=self.source)
         self.mock(acquisition, "_native_operator", side_effect=AssertionError("HostOps has no desktop"))
         self.desktop_read = self.mock(runner, "_desktop_logon", side_effect=AssertionError("HostOps has no desktop"))
         self.owner_session = self.mock(runner, "_supervisor_owner_session", return_value=(self.owner, self.desktop))
+        self.user_config = self.mock(runner, "_user_runtime_config", return_value=None)
         self.config_read = self.mock(runner, "_observe_only_config", return_value=(None, self.config_pin))
         self.active = self.mock(runner, "_supervisor_active", return_value=False)
         self.mock(runner, "_supervisor_deployment_value", side_effect=self.values.get)
@@ -3451,6 +3457,11 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
     def test_missing_changed_or_unavailable_config_holds_before_launch(self):
         self.env.pop("AI_COMMERCE_WAKEHUB_CONFIG")
         self.assertEqual(self.dispatch()["code"], "LOCAL_CONFIG_REQUIRED")
+        self.env["AI_COMMERCE_WAKEHUB_CONFIG"] = str(self.root / "missing-runtime.json")
+        self.user_config.return_value = str(self.config)
+        self.assertEqual(self.dispatch()["code"], "LOCAL_CONFIG_STALE")
+        self.user_config.assert_called_once_with(self.owner[0])
+        self.assertEqual(self.modes, [])
         self.env["AI_COMMERCE_WAKEHUB_CONFIG"] = str(self.config)
         self.config_read.side_effect = self.runtime.RuntimeHold("LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED")
         self.assertEqual(self.dispatch()["code"], "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED")
@@ -3463,6 +3474,25 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.assertNotIn("start", self.modes)
         self.assertNotIn("install", self.modes)
         self.assertEqual(self.values, {})
+
+    def test_persisted_config_supplies_the_pinned_task_intent(self):
+        self.env.pop("AI_COMMERCE_WAKEHUB_CONFIG")
+        self.user_config.return_value = str(self.config)
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_STARTED_HEALTH_OBSERVED")
+        self.assertEqual(json.loads(self.values["Run"])["config"], str(self.config))
+        self.assertEqual({call.args[0] for call in self.config_read.call_args_list}, {self.config})
+        self.assertEqual(self.modes.count("start"), 1)
+
+    def test_selected_config_drift_after_task_inspection_holds_before_start(self):
+        self.state = "READY"
+        self.env.pop("AI_COMMERCE_WAKEHUB_CONFIG")
+        other = self.root / "other-config.json"
+        other.touch()
+        self.user_config.side_effect = [str(self.config), str(self.config), str(other)]
+        self.assertEqual(self.dispatch()["code"], "LOCAL_CONFIG_CHANGED")
+        self.assertEqual(self.modes, ["inspect"])
+        self.assertEqual(self.values, {})
+        self.launch.assert_not_called()
 
     def test_reuse_needs_matching_live_source_owner_and_fresh_health(self):
         self.state = self.instance

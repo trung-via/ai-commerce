@@ -950,6 +950,7 @@ _SUPERVISOR_DESKTOP_HOLDS = frozenset({
 _SUPERVISOR_HOLDS = frozenset({
     "PROTECTED_HOSTOPS_ONLY", "SOURCE_CUSTODY_UNVERIFIED", "WINDOWS_OWNER_CONTEXT_UNVERIFIED",
     "LOCAL_CONFIG_REQUIRED", "LOCAL_CONFIG_INVALID", "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED",
+    "LOCAL_CONFIG_STALE", "LOCAL_CONFIG_AMBIGUOUS", "LOCAL_CONFIG_USER_ENV_UNAVAILABLE",
     "LOCAL_CONFIG_CHANGED", "SUPERVISOR_RUNTIME_UNAVAILABLE", "SUPERVISOR_ACTIVE_UNVERIFIED",
     "SUPERVISOR_START_UNKNOWN", "SUPERVISOR_TASK_CONFLICT", "SUPERVISOR_START_NOT_ATTEMPTED",
 }) | _SUPERVISOR_DESKTOP_HOLDS
@@ -1191,22 +1192,11 @@ def _deploy_protected_supervisor(event):
 
         failure = "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
         owner, desktop = read_owner()
-        configured = os.environ.get("AI_COMMERCE_WAKEHUB_CONFIG")
-        failure = "LOCAL_CONFIG_REQUIRED"
-        if not configured:
-            deny(failure)
-        config = Path(configured)
-        failure = "LOCAL_CONFIG_INVALID"
-        if not config.is_absolute() or config.drive.startswith("\\\\") or not acquisition._no_links(config):
-            deny(failure)
-        if not config.exists():
-            failure = "LOCAL_CONFIG_REQUIRED"
-            deny(failure)
+        failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
         try:
-            _, config_pin = runtime._observe_only_config(config, root, owner, lambda: False)
+            config, config_pin = runtime._resolve_runtime_config(root, owner=owner, observe_only=True)
         except runtime.RuntimeHold as exc:
-            if str(exc) == "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED":
-                failure = str(exc)
+            failure = str(exc)
             raise
         expected = {"source_sha": sha, "source_digest": source, "config_digest": config_pin,
                     "desktop": desktop, "session": owner[1]}
@@ -1234,7 +1224,7 @@ def _deploy_protected_supervisor(event):
             if read_owner() != (owner, desktop):
                 deny(failure)
             failure = "LOCAL_CONFIG_CHANGED"
-            if runtime._observe_only_config(config, root, owner, lambda: False)[1] != config_pin:
+            if runtime._resolve_runtime_config(root, owner=owner, observe_only=True) != (config, config_pin):
                 deny(failure)
 
         def task(**kwargs):

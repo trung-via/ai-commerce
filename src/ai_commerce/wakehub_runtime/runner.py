@@ -3567,6 +3567,118 @@ def _normal_source_wait(result: Result, chrome: Result) -> bool:
         or result.code.startswith("EXACT_CHAT_"))
 
 
+_RUNTIME_CONFIG_ENV = "AI_COMMERCE_WAKEHUB_CONFIG"
+# Keep the runtime filename in the existing local 9444 enrollment layout.
+# The shared config.json names may hold Chrome acquisition configs.
+_RUNTIME_CONFIG_LOCATIONS = ("WakeHub/runtime-config.json", "WakeHub/config.json", "WakeHub-9444/config.json")
+
+
+def _user_runtime_config(local: Path) -> str | None:
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", access=winreg.KEY_QUERY_VALUE) as key:
+            value, kind = winreg.QueryValueEx(key, _RUNTIME_CONFIG_ENV)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        raise RuntimeHold("LOCAL_CONFIG_USER_ENV_UNAVAILABLE") from None
+    _require(type(value) is str and kind in (winreg.REG_SZ, winreg.REG_EXPAND_SZ), "LOCAL_CONFIG_INVALID")
+    if kind == winreg.REG_EXPAND_SZ:
+        # Expand only the verified token's native known folder.
+        value = re.sub(r"^%LOCALAPPDATA%(?=[\\/])", lambda _: str(local), value, flags=re.IGNORECASE)
+        _require("%" not in value, "LOCAL_CONFIG_INVALID")
+    return value
+
+
+def _resolve_runtime_config(repository_root: Path, *, owner: tuple[Path, int, str] | None = None,
+                            observe_only: bool = False) -> tuple[Path, str | None]:
+    """Resolve process, owner User environment, then the fixed enrollment paths."""
+    configured = os.environ.get(_RUNTIME_CONFIG_ENV)
+    if configured is None and owner is None:
+        try:
+            owner = chrome_acquisition._enrollment_operator(attended=False)
+        except (OSError, ValueError):
+            code = "WINDOWS_OWNER_CONTEXT_UNVERIFIED" if os.name == "nt" else "LOCAL_CONFIG_REQUIRED"
+            raise RuntimeHold(code) from None
+    if configured is None:
+        configured = _user_runtime_config(owner[0])
+
+    def validate(path: Path) -> str | None:
+        # The CLI's explicitly configured process environment already flows
+        # through the selected command's validators. Discovery proves custody.
+        if owner is None:
+            return None
+        if observe_only:
+            return _observe_only_config(path, repository_root, owner, lambda: False)[1]
+        runtime = _read_runtime_config(path, repository_root)
+        _validate_config_references(runtime, owner[2])
+        if "chrome_config" in runtime.raw:
+            _compose_supervisor_chrome(runtime, lambda: False)
+        return None
+
+    try:
+        if configured is not None:
+            path = Path(configured)
+            _require(path.is_absolute() and not path.drive.startswith("\\\\") and ".." not in path.parts
+                     and not any(char in configured for char in "\x00\r\n")
+                     and chrome_acquisition._no_links(path), "LOCAL_CONFIG_INVALID")
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                raise RuntimeHold("LOCAL_CONFIG_STALE") from None
+            _private_path(path, repository_root)
+            return path, validate(path)
+
+        local = owner[0]
+        _require(local.is_absolute() and not local.drive.startswith("\\\\"), "LOCAL_CONFIG_INVALID")
+        found = []
+        for relative in _RUNTIME_CONFIG_LOCATIONS:
+            path = local / "AI-Commerce" / relative
+            _require(chrome_acquisition._no_links(path), "LOCAL_CONFIG_INVALID")
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                continue
+            raw = _read_owned_json(path, repository_root)
+            if raw.keys() == {"version", "executable", "user_data_dir", "profile_directory",
+                              "cdp_endpoint", "allow_launch", "exclusive_user_data"}:
+                continue
+            found.append((path, validate(path)))
+        _require(found, "LOCAL_CONFIG_REQUIRED")
+        _require(len(found) == 1, "LOCAL_CONFIG_AMBIGUOUS")
+        return found[0]
+    except (OSError, ValueError, TypeError, KeyError, RecursionError, PrivateStateError) as exc:
+        if isinstance(exc, RuntimeHold) and str(exc) in {
+            "LOCAL_CONFIG_REQUIRED", "LOCAL_CONFIG_STALE", "LOCAL_CONFIG_AMBIGUOUS",
+            "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED",
+        }:
+            raise
+        raise RuntimeHold("LOCAL_CONFIG_INVALID") from None
+
+
+def _validate_config_references(runtime: _RuntimeConfig, owner: str) -> list[dict]:
+    _require(runtime.principal == owner, "LOCAL_CONFIG_INVALID")
+    runtime.journal._owner(owner)
+    registrations = []
+    for entry in runtime.targets:
+        kind, path = _target_key(entry)
+        _require(kind != "invalid", "LOCAL_CONFIG_INVALID")
+        path = _config_path(str(path), runtime.journal.repository_root)
+        _require(path not in (runtime.path, runtime.journal.path), "LOCAL_CONFIG_INVALID")
+        raw = _read_owned_json(path, runtime.journal.repository_root, limit=8192)
+        _require(_private_identity(path) == owner, "LOCAL_CONFIG_INVALID")
+        if kind == _ISSUE:
+            IssueRegistration.from_dict(raw).check_route(runtime.registration)
+        else:
+            _require(type(raw.get("intent")) is dict, "REGISTERED_SOURCE_INVALID")
+            intent = RegistrationIntent(**raw["intent"])
+            _record_valid(raw, intent)
+            _require(intent.source_sha == runtime.registration.source_sha, "SOURCE_TARGET_DRIFT")
+        registrations.append(raw)
+    return registrations
+
+
 def _observe_only_config(config_path: Path, repository_root: Path, owner: tuple[Path, int, str],
                          stop: Callable[[], bool]) -> tuple[_SupervisorChrome, str]:
     runtime = _read_runtime_config(config_path, repository_root)
@@ -3574,12 +3686,9 @@ def _observe_only_config(config_path: Path, repository_root: Path, owner: tuple[
              "LOCAL_CONFIG_INVALID")
     _require(runtime.chrome_lifecycle == "observe" and not runtime.raw.get("chat_preload", False)
              and "ui_delivery" not in runtime.raw, "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED")
-    for entry in runtime.targets:
-        kind, path = _target_key(entry)
-        _require(kind != "invalid", "LOCAL_CONFIG_INVALID")
-        _config_path(str(path), repository_root)
+    registrations = _validate_config_references(runtime, owner[2])
     chrome = _compose_supervisor_chrome(runtime, stop)
-    pin = digest([str(config_path), runtime.raw, chrome.config])
+    pin = digest([str(config_path), runtime.raw, chrome.config, registrations])
     return chrome, pin
 
 
