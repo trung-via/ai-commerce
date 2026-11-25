@@ -3267,6 +3267,14 @@ class PersonalCdp9444ConfigRegistryTests(unittest.TestCase):
                               "config": {"private_token": "PRIVATE"}, "source_digest": "PRIVATE"}
             cases.append({"name": code, "body": encode({**native, **local_evidence}),
                           "request": supervisor_request, "expected": expected})
+        config_probe = "wakehub_supervisor_config_probe"
+        probe_request = encode({"schema": hostops.SCHEMA, "operation": config_probe, "parameters": {}})
+        for status, code in (("OBSERVED", "LEGACY_9444_VERIFIED"),
+                             ("HOLD", "LEGACY_9444_CONFIG_ROOT_CUSTODY")):
+            expected = {"status": status, "code": code, "operation": config_probe,
+                        "issue_number": 17, "source_sha": "f" * 40, "remote_shell_enabled": False,
+                        "approval_channel": "CHATGPT_TO_AI_COMMERCE_ISSUE"}
+            cases.append({"name": code, "body": encode(expected), "request": probe_request, "expected": expected})
         harness = r"""
 const fs = require('fs'), path = require('path'), vm = require('vm');
 const cases = JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
@@ -3413,10 +3421,10 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.publish_health(nonce=nonce, health="CHROME_OWNED")
         return self.instance
 
-    def dispatch(self):
+    def dispatch(self, *, mode="write"):
         Path(self.env["GITHUB_EVENT_PATH"]).write_text(json.dumps(self.approval), encoding="utf-8")
         output = self.root / "result.json"
-        argv = ["personal", "--mode", "write", "--output", str(output)]
+        argv = ["personal", "--mode", mode, "--output", str(output)]
         with patch.object(hostops.sys, "argv", argv):
             exit_code = hostops.main()
         receipt = json.loads(output.read_text(encoding="utf-8"))
@@ -3433,6 +3441,77 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
             "desktop": self.desktop, "nonce": self.nonce, "session": 7, "pid": 123, "created": 456,
             "observed_ns": 99_000_000_000, "health": "CHROME_ABSENT", **overrides,
         })
+
+    def dispatch_config_probe(self):
+        self.env["GITHUB_EVENT_NAME"] = "issues"
+        self.approval = event("read", "wakehub_supervisor_config_probe", {})
+        return self.dispatch(mode="read")
+
+    def assert_config_probe_has_no_effects(self):
+        self.runtime._supervisor_active.assert_not_called()
+        self.runtime._supervisor_deployment_value.assert_not_called()
+        self.runtime._supervisor_slot.assert_not_called()
+        self.store.assert_not_called()
+        self.spawn.assert_not_called()
+        self.launch.assert_not_called()
+        self.assertEqual(self.modes, [])
+        self.assertEqual(self.values, {})
+
+    def test_config_probe_requires_protected_parameterless_owner_read(self):
+        operation = "wakehub_supervisor_config_probe"
+        with self.assertRaisesRegex(hostops.Denied, "WRITE_SCOPE_DENIED"):
+            hostops.parse_event(event("write", operation, {}), "write")
+        for parameters in ({"path": "PRIVATE"}, [], None):
+            with self.subTest(parameters=parameters), self.assertRaises(hostops.Denied):
+                hostops.parse_event(event("read", operation, parameters), "read")
+        payload = event("read", operation, {})
+        with self.assertRaisesRegex(hostops.Denied, "PROTECTED_HOSTOPS_ONLY"):
+            hostops.perform(hostops.parse_event(payload, "read"))
+        payload["sender"]["login"] = "unexpected"
+        with self.assertRaisesRegex(hostops.Denied, "NON_OWNER_EVENT"):
+            hostops._probe_protected_supervisor_config(payload)
+        for key, value in (("GITHUB_ACTOR", "unexpected"), ("GITHUB_WORKFLOW_SHA", "e" * 40),
+                           ("GITHUB_RUN_ATTEMPT", "2"), ("AI_COMMERCE_GIT_GUARD_TEST", "1")):
+            with self.subTest(key=key), patch.dict(self.env, {key: value}):
+                receipt = self.dispatch_config_probe()
+                self.assertEqual(receipt["code"], "PROTECTED_HOSTOPS_ONLY")
+                self.assertNotIn("source_sha", receipt)
+        hostops._persistent_clean_source.assert_not_called()
+        self.owner_session.assert_not_called()
+        self.config_read.assert_not_called()
+        self.assert_config_probe_has_no_effects()
+
+    def test_config_probe_reuses_preflight_and_emits_only_bound_scalar_status(self):
+        receipt = self.dispatch_config_probe()
+        self.assertEqual(receipt, {
+            "status": "OBSERVED", "code": "PROCESS_OVERRIDE_VERIFIED", "source_sha": self.sha,
+            "issue_number": 17, "operation": "wakehub_supervisor_config_probe",
+            "approval_channel": "CHATGPT_TO_AI_COMMERCE_ISSUE", "remote_shell_enabled": False,
+        })
+        self.assertEqual(hostops._persistent_clean_source.call_args_list,
+                         [call(acquisition, self.sha, pin_runtime=True)] * 2)
+        self.assertEqual(self.owner_session.call_args_list, [call()] * 2)
+        self.assertEqual([c.args[:3] for c in self.config_read.call_args_list],
+                         [(self.config, self.workspace, self.owner)] * 2)
+        self.assertTrue(all(c.kwargs == {"protected": True} for c in self.config_read.call_args_list))
+        self.assert_config_probe_has_no_effects()
+
+    def test_config_probe_holds_at_earliest_preflight_failure(self):
+        hostops._persistent_clean_source.side_effect = OSError("PRIVATE checked-out path")
+        self.assertEqual(self.dispatch_config_probe()["code"], "SOURCE_CUSTODY_UNVERIFIED")
+        self.owner_session.assert_not_called()
+        hostops._persistent_clean_source.side_effect = None
+        self.owner_session.side_effect = self.runtime.RuntimeHold("WINDOWS_INTERACTIVE_REQUIRED")
+        self.assertEqual(self.dispatch_config_probe()["code"], "WINDOWS_INTERACTIVE_REQUIRED")
+        self.config_read.assert_not_called()
+        self.owner_session.side_effect = [(self.owner, self.desktop), (self.owner, "f" * 64)]
+        self.assertEqual(self.dispatch_config_probe()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+        self.owner_session.side_effect = None
+        self.config_read.side_effect = [(None, self.config_pin), (None, "f" * 64)]
+        self.assertEqual(self.dispatch_config_probe()["code"], "LOCAL_CONFIG_CHANGED")
+        with patch.object(self.runtime, "_probe_supervisor_config", return_value=(None, "PRIVATE")):
+            self.assertEqual(self.dispatch_config_probe()["code"], "SUPERVISOR_RUNTIME_UNAVAILABLE")
+        self.assert_config_probe_has_no_effects()
 
     def test_authorization_and_parameters_are_fixed(self):
         with self.assertRaisesRegex(hostops.Denied, "READ_OPERATION_DENIED"):

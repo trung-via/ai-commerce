@@ -4,6 +4,7 @@ from __future__ import annotations
 from contextlib import ExitStack, closing, contextmanager, nullcontext, suppress
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
+from enum import Enum, auto
 import hashlib
 import json
 import ntpath
@@ -29,6 +30,9 @@ from ai_commerce.production_orchestration.contracts import (
 )
 from ai_commerce.production_orchestration.orchestrator import ProductionPipelineOrchestrator
 from ai_commerce.remote import cdp_doorbell, chrome_acquisition
+from ai_commerce.remote.chrome_acquisition import (
+    _SupervisorConfigCheck as _ConfigCheck, _supervisor_config_check as _config_check,
+)
 from ai_commerce.remote._private_state import (
     PrivateStateError, _Transaction, _linked, _regular, _windows_handle,
 )
@@ -1267,25 +1271,30 @@ def _private_path(path: Path, repository_root: Path) -> None:
 
 
 @contextmanager
-def _private_access(path: Path, repository_root: Path):
+def _private_access(path: Path, repository_root: Path, *, config_read: bool = False):
     """Pin ancestors while SQLite opens its own handles; never write JSON state."""
     handles = []
+    check = _config_check if config_read else nullcontext
     try:
-        _private_path(path, repository_root)
-        if os.name == "nt":
-            for part in reversed(path.parents):
-                handles.append(_windows_handle(part, 0, directory=True))
-            directory_fd = None
-        else:
-            directory_fd = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-            handles.append(directory_fd)
-            for part in path.parent.parts[1:]:
-                directory_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-                                       dir_fd=directory_fd)
+        with check(_ConfigCheck.CONFIG_PRIVATE_PATH):
+            _private_path(path, repository_root)
+        with check(_ConfigCheck.CONFIG_ANCESTOR_HANDLE):
+            if os.name == "nt":
+                for part in reversed(path.parents):
+                    handles.append(_windows_handle(part, 0, directory=True))
+                directory_fd = None
+            else:
+                directory_fd = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
                 handles.append(directory_fd)
-        owner = _private_identity(path.parent)
-        if path.exists():
-            _require(_private_identity(path) == owner, "JOURNAL_OWNER_DRIFT")
+                for part in path.parent.parts[1:]:
+                    directory_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                           dir_fd=directory_fd)
+                    handles.append(directory_fd)
+        with check(_ConfigCheck.CONFIG_PARENT_CUSTODY):
+            owner = _private_identity(path.parent)
+        with check(_ConfigCheck.CONFIG_FILE_CUSTODY):
+            if path.exists():
+                _require(_private_identity(path) == owner, "JOURNAL_OWNER_DRIFT")
         # Reuse only D5's safe handle opener, never its JSON read/write path.
         yield owner, _Transaction(SimpleNamespace(path=path), directory_fd,
                                   new_file_owner_sid=owner if os.name == "nt" else None)
@@ -2749,15 +2758,19 @@ class SyntheticBrain:
 
 def _read_owned_json(path: Path, repository_root: Path, *, limit: int = 131072) -> dict:
     """Read existing operator files without creating locks, state or credentials."""
-    _require(path.exists(), "LOCAL_AUTHORITY_MISSING")
-    with _private_access(path, repository_root) as (owner, files):
-        fd = files.open(path.name, os.O_RDONLY)
-        with os.fdopen(fd, "rb") as stream:
-            raw = stream.read(limit + 1)
-        _require(len(raw) <= limit, "LOCAL_AUTHORITY_INVALID")
-        value = _decode_unique(raw.decode("utf-8-sig"))
-        _require(type(value) is dict and _private_identity(path) == owner,
-                 "LOCAL_AUTHORITY_INVALID")
+    with _config_check(_ConfigCheck.CONFIG_FILE_READ):
+        _require(path.exists(), "LOCAL_AUTHORITY_MISSING")
+    with _private_access(path, repository_root, config_read=True) as (owner, files):
+        with _config_check(_ConfigCheck.CONFIG_FILE_READ):
+            fd = files.open(path.name, os.O_RDONLY)
+            with os.fdopen(fd, "rb") as stream:
+                raw = stream.read(limit + 1)
+            _require(len(raw) <= limit, "LOCAL_AUTHORITY_INVALID")
+        with _config_check(_ConfigCheck.CONFIG_JSON):
+            value = _decode_unique(raw.decode("utf-8-sig"))
+            _require(type(value) is dict, "LOCAL_AUTHORITY_INVALID")
+        with _config_check(_ConfigCheck.CONFIG_FILE_CUSTODY):
+            _require(_private_identity(path) == owner, "LOCAL_AUTHORITY_INVALID")
         return value
 
 
@@ -2885,7 +2898,8 @@ def compose_native_source_only(config_path: Path, repository_root: Path, *, targ
 def _config_path(value: object, repository_root: Path) -> Path:
     _require(type(value) is str, "LOCAL_CONFIG_INVALID")
     path = Path(value)
-    _private_path(path, repository_root)
+    with _config_check(_ConfigCheck.CONFIG_PRIVATE_PATH):
+        _private_path(path, repository_root)
     return path
 
 
@@ -3977,6 +3991,48 @@ _CHROME_HEALTH_SCHEMA = "WakeHubChromeHealth.v1"
 _CHROME_HEALTH_ONLY = "CHROME_HEALTH_ONLY"
 
 
+class _ConfigSelection(Enum):
+    PROCESS_OVERRIDE = auto()
+    USER_OVERRIDE = auto()
+    FIXED_RUNTIME = auto()
+    FIXED_HEALTH_WRAPPER = auto()
+    LEGACY_9444 = auto()
+
+
+@dataclass
+class _ConfigProbe:
+    selection: _ConfigSelection = _ConfigSelection.FIXED_RUNTIME
+    failure: _ConfigCheck | None = None
+
+    def note_failure(self, check: _ConfigCheck) -> None:
+        if self.failure is None:
+            self.failure = check
+
+
+_CONFIG_PROBE_VERIFIED = frozenset(f"{selection.name}_VERIFIED" for selection in _ConfigSelection)
+_CONFIG_PROBE_FAILURES = frozenset(
+    f"{selection.name}_{check.name}" for selection in _ConfigSelection for check in _ConfigCheck
+)
+
+
+def _probe_supervisor_config(
+    repository_root: Path, owner: tuple[Path, int, str],
+) -> tuple[tuple[Path, str | None] | None, str]:
+    """Run the deployment resolver and reduce failures to the first failed check."""
+    probe = _ConfigProbe()
+    observer = chrome_acquisition._supervisor_config_failure
+    token = observer.set(probe.note_failure)
+    try:
+        resolved = _resolve_runtime_config(repository_root, owner=owner, observe_only=True,
+                                           protected=True, _probe=probe)
+    except Exception:
+        check = probe.failure or _ConfigCheck.UNAVAILABLE
+        return None, f"{probe.selection.name}_{check.name}"
+    finally:
+        observer.reset(token)
+    return resolved, f"{probe.selection.name}_VERIFIED"
+
+
 def _user_runtime_config(local: Path) -> str | None:
     import winreg
 
@@ -3987,18 +4043,23 @@ def _user_runtime_config(local: Path) -> str | None:
         return None
     except OSError:
         raise RuntimeHold("LOCAL_CONFIG_USER_ENV_UNAVAILABLE") from None
-    _require(type(value) is str and kind in (winreg.REG_SZ, winreg.REG_EXPAND_SZ), "LOCAL_CONFIG_INVALID")
-    if kind == winreg.REG_EXPAND_SZ:
-        # Expand only the verified token's native known folder.
-        value = re.sub(r"^%LOCALAPPDATA%(?=[\\/])", lambda _: str(local), value, flags=re.IGNORECASE)
-        _require("%" not in value, "LOCAL_CONFIG_INVALID")
+    with _config_check(_ConfigCheck.USER_ENV_VALUE):
+        _require(type(value) is str and kind in (winreg.REG_SZ, winreg.REG_EXPAND_SZ), "LOCAL_CONFIG_INVALID")
+        if kind == winreg.REG_EXPAND_SZ:
+            # Expand only the verified token's native known folder.
+            value = re.sub(r"^%LOCALAPPDATA%(?=[\\/])", lambda _: str(local), value, flags=re.IGNORECASE)
+            _require("%" not in value, "LOCAL_CONFIG_INVALID")
     return value
 
 
 def _resolve_runtime_config(repository_root: Path, *, owner: tuple[Path, int, str] | None = None,
                             observe_only: bool = False, registration_only: bool = False,
-                            protected: bool = False) -> tuple[Path, str | None]:
+                            protected: bool = False, _probe: _ConfigProbe | None = None) -> tuple[Path, str | None]:
     """Resolve process, owner User environment, then the fixed enrollment paths."""
+    def select(selection: _ConfigSelection) -> None:
+        if _probe is not None:
+            _probe.selection = selection
+
     configured = os.environ.get(_RUNTIME_CONFIG_ENV)
     if configured is None and owner is None:
         try:
@@ -4007,7 +4068,11 @@ def _resolve_runtime_config(repository_root: Path, *, owner: tuple[Path, int, st
             code = "WINDOWS_OWNER_CONTEXT_UNVERIFIED" if os.name == "nt" else "LOCAL_CONFIG_REQUIRED"
             raise RuntimeHold(code) from None
     if configured is None:
-        configured = _user_runtime_config(owner[0])
+        select(_ConfigSelection.USER_OVERRIDE)
+        with _config_check(_ConfigCheck.USER_ENV_READ):
+            configured = _user_runtime_config(owner[0])
+    else:
+        select(_ConfigSelection.PROCESS_OVERRIDE)
 
     def validate(path: Path) -> str | None:
         # The CLI's explicitly configured process environment already flows
@@ -4017,7 +4082,8 @@ def _resolve_runtime_config(repository_root: Path, *, owner: tuple[Path, int, st
         if observe_only:
             chrome, pin = _observe_only_config(path, repository_root, owner, lambda: False, protected=protected)
             if protected and isinstance(chrome, NativeChrome9444) and chrome.environment.config_path == path:
-                chrome_acquisition._verify_google_chrome(chrome.environment)
+                with _config_check(_ConfigCheck.CHROME_SIGNATURE):
+                    chrome_acquisition._verify_google_chrome(chrome.environment)
             return pin
         runtime = _read_runtime_config(path, repository_root, registration_only=registration_only)
         _validate_config_references(runtime, owner[2])
@@ -4027,37 +4093,53 @@ def _resolve_runtime_config(repository_root: Path, *, owner: tuple[Path, int, st
 
     try:
         if configured is not None:
-            path = Path(configured)
-            _require(path.is_absolute() and not path.drive.startswith("\\\\") and ".." not in path.parts
-                     and not any(char in configured for char in "\x00\r\n")
-                     and chrome_acquisition._no_links(path), "LOCAL_CONFIG_INVALID")
-            try:
-                path.lstat()
-            except FileNotFoundError:
-                raise RuntimeHold("LOCAL_CONFIG_STALE") from None
-            _private_path(path, repository_root)
+            with _config_check(_ConfigCheck.OVERRIDE_PATH):
+                path = Path(configured)
+                _require(path.is_absolute() and not path.drive.startswith("\\\\") and ".." not in path.parts
+                         and not any(char in configured for char in "\x00\r\n")
+                         and chrome_acquisition._no_links(path), "LOCAL_CONFIG_INVALID")
+                try:
+                    path.lstat()
+                except FileNotFoundError:
+                    with _config_check(_ConfigCheck.OVERRIDE_MISSING):
+                        raise RuntimeHold("LOCAL_CONFIG_STALE") from None
+            with _config_check(_ConfigCheck.CONFIG_PRIVATE_PATH):
+                _private_path(path, repository_root)
             return path, validate(path)
 
+        selected = _ConfigSelection.FIXED_RUNTIME
+        select(selected)
         local = owner[0]
-        _require(local.is_absolute() and not local.drive.startswith("\\\\"), "LOCAL_CONFIG_INVALID")
+        with _config_check(_ConfigCheck.DISCOVERY_PATH):
+            _require(local.is_absolute() and not local.drive.startswith("\\\\"), "LOCAL_CONFIG_INVALID")
         found = []
         for relative in _RUNTIME_CONFIG_LOCATIONS:
-            path = local / "AI-Commerce" / relative
-            _require(chrome_acquisition._no_links(path), "LOCAL_CONFIG_INVALID")
-            try:
-                path.lstat()
-            except FileNotFoundError:
-                continue
+            select(_ConfigSelection.FIXED_RUNTIME)
+            with _config_check(_ConfigCheck.DISCOVERY_PATH):
+                path = local / "AI-Commerce" / relative
+                _require(chrome_acquisition._no_links(path), "LOCAL_CONFIG_INVALID")
+                try:
+                    path.lstat()
+                except FileNotFoundError:
+                    continue
             raw = _read_owned_json(path, repository_root)
             if raw.keys() == chrome_acquisition._CHROME_CONFIG_FIELDS:
                 continue
+            selected = (_ConfigSelection.FIXED_HEALTH_WRAPPER if raw.get("schema") == _CHROME_HEALTH_SCHEMA
+                        else _ConfigSelection.FIXED_RUNTIME)
+            select(selected)
             found.append((path, validate(path)))
         if not found and observe_only and protected:
+            select(_ConfigSelection.LEGACY_9444)
             env, pin = _legacy_health_config(repository_root, owner)
-            chrome_acquisition._verify_google_chrome(env)
+            with _config_check(_ConfigCheck.CHROME_SIGNATURE):
+                chrome_acquisition._verify_google_chrome(env)
             return env.config_path, pin
         _require(found, "LOCAL_CONFIG_REQUIRED")
-        _require(len(found) == 1, "LOCAL_CONFIG_AMBIGUOUS")
+        select(_ConfigSelection.FIXED_RUNTIME)
+        with _config_check(_ConfigCheck.RUNTIME_AMBIGUOUS):
+            _require(len(found) == 1, "LOCAL_CONFIG_AMBIGUOUS")
+        select(selected)
         return found[0]
     except (OSError, ValueError, TypeError, KeyError, RecursionError, PrivateStateError) as exc:
         if isinstance(exc, (RuntimeHold, chrome_acquisition._EnrollmentHold)) and str(exc) in {
@@ -4098,15 +4180,19 @@ def _legacy_health_config(repository_root: Path, owner: tuple[Path, int, str], *
     """Pin the sole existing 9444 enrollment for health-only use."""
     local, _, sid = owner
     env = chrome_acquisition._supervisor_9444_environment(local, repository_root, sid)
-    _require(env is not None, "LOCAL_CONFIG_REQUIRED")
-    _require(path is None or env.config_path == path, "LOCAL_CONFIG_INVALID")
+    with _config_check(_ConfigCheck.LEGACY_REGISTRY_EMPTY):
+        _require(env is not None, "LOCAL_CONFIG_REQUIRED")
+    with _config_check(_ConfigCheck.CONFIG_PATH):
+        _require(path is None or env.config_path == path, "LOCAL_CONFIG_INVALID")
     config = _read_owned_json(env.config_path, repository_root, limit=8192) if raw is None else raw
-    _require(chrome_acquisition._environment_from_value(
-        config, env.config_path, repository_root, local_app_data=local) == env, "LOCAL_CONFIG_CHANGED")
+    with _config_check(_ConfigCheck.CONFIG_PIN_CHANGED):
+        _require(chrome_acquisition._environment_from_value(
+            config, env.config_path, repository_root, local_app_data=local) == env, "LOCAL_CONFIG_CHANGED")
     # Installing the canonical runtime config invalidates a running health-only pin.
     canonical = local / "AI-Commerce" / _RUNTIME_CONFIG_LOCATIONS[0]
-    _require(chrome_acquisition._no_links(canonical), "LOCAL_CONFIG_INVALID")
-    return env, digest([str(env.config_path), config, canonical.exists()])
+    with _config_check(_ConfigCheck.DISCOVERY_PATH):
+        _require(chrome_acquisition._no_links(canonical), "LOCAL_CONFIG_INVALID")
+        return env, digest([str(env.config_path), config, canonical.exists()])
 
 
 def _observe_only_config(config_path: Path, repository_root: Path, owner: tuple[Path, int, str],
@@ -4117,25 +4203,33 @@ def _observe_only_config(config_path: Path, repository_root: Path, owner: tuple[
         env, pin = _legacy_health_config(repository_root, owner, path=config_path, raw=raw)
         return NativeChrome9444(repository_root, env, supervised=True), pin
     if raw.get("schema") == _CHROME_HEALTH_SCHEMA:
-        _require(raw.keys() == {"schema", "chrome_config"} and _private_identity(config_path) == owner[2],
-                 "LOCAL_CONFIG_INVALID")
+        with _config_check(_ConfigCheck.WRAPPER_SCHEMA):
+            _require(raw.keys() == {"schema", "chrome_config"}, "LOCAL_CONFIG_INVALID")
+        with _config_check(_ConfigCheck.CONFIG_FILE_CUSTODY):
+            _require(_private_identity(config_path) == owner[2], "LOCAL_CONFIG_INVALID")
         env = chrome_acquisition._supervisor_9444_environment(owner[0], repository_root, owner[2])
-        _require(env is not None and env.config_path == _config_path(raw["chrome_config"], repository_root),
-                 "LOCAL_CONFIG_INVALID")
+        with _config_check(_ConfigCheck.WRAPPER_REFERENCE):
+            _require(env is not None and env.config_path == _config_path(raw["chrome_config"], repository_root),
+                     "LOCAL_CONFIG_INVALID")
         config = _read_owned_json(env.config_path, repository_root, limit=8192)
         return NativeChrome9444(repository_root, env, supervised=True), digest([str(config_path), raw, config])
 
-    runtime = _read_runtime_config(config_path, repository_root, registration_only=protected)
-    _require(runtime.raw == raw, "LOCAL_CONFIG_CHANGED")
-    _require(runtime.principal == owner[2] and Path(os.environ.get("LOCALAPPDATA", "")) == owner[0],
-             "LOCAL_CONFIG_INVALID")
+    with _config_check(_ConfigCheck.RUNTIME_SCHEMA_OR_PATH):
+        runtime = _read_runtime_config(config_path, repository_root, registration_only=protected)
+    with _config_check(_ConfigCheck.CONFIG_PIN_CHANGED):
+        _require(runtime.raw == raw, "LOCAL_CONFIG_CHANGED")
+    with _config_check(_ConfigCheck.RUNTIME_OWNER):
+        _require(runtime.principal == owner[2] and Path(os.environ.get("LOCALAPPDATA", "")) == owner[0],
+                 "LOCAL_CONFIG_INVALID")
     consent = raw.get("ui_delivery", {})
     standing = any(kind in consent for kind in _STANDING_SOURCES)
     if not protected and not standing:
         _require(runtime.chrome_lifecycle == "observe" and not runtime.raw.get("chat_preload", False)
                  and "ui_delivery" not in runtime.raw, "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED")
-    registrations = _validate_config_references(runtime, owner[2])
-    chrome = _compose_supervisor_chrome(runtime, stop)
+    with _config_check(_ConfigCheck.RUNTIME_REFERENCES):
+        registrations = _validate_config_references(runtime, owner[2])
+    with _config_check(_ConfigCheck.RUNTIME_CHROME_REFERENCE):
+        chrome = _compose_supervisor_chrome(runtime, stop)
     pins = [str(config_path), raw, chrome.config, registrations]
     if protected and standing:
         try:

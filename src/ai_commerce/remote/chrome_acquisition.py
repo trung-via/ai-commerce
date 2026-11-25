@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from enum import Enum, auto
 import hashlib
 import json
 import os
@@ -70,6 +72,54 @@ class ChromeEnvironment(_ChromeTarget):
     config_path: Path
 
 
+class _SupervisorConfigCheck(Enum):
+    UNAVAILABLE = auto()
+    USER_ENV_READ = auto()
+    USER_ENV_VALUE = auto()
+    OVERRIDE_PATH = auto()
+    OVERRIDE_MISSING = auto()
+    DISCOVERY_PATH = auto()
+    RUNTIME_AMBIGUOUS = auto()
+    LEGACY_REGISTRY_DISCOVERY = auto()
+    LEGACY_REGISTRY_EMPTY = auto()
+    LEGACY_REGISTRY_AMBIGUOUS = auto()
+    CONFIG_ROOT_CUSTODY = auto()
+    CONFIG_PARENT_CUSTODY = auto()
+    CONFIG_FILE_CUSTODY = auto()
+    PROFILE_CUSTODY = auto()
+    CONFIG_PRIVATE_PATH = auto()
+    CONFIG_ANCESTOR_HANDLE = auto()
+    CONFIG_FILE_READ = auto()
+    CONFIG_JSON = auto()
+    CONFIG_SCHEMA = auto()
+    CONFIG_PATH = auto()
+    WRAPPER_SCHEMA = auto()
+    WRAPPER_REFERENCE = auto()
+    RUNTIME_SCHEMA_OR_PATH = auto()
+    RUNTIME_OWNER = auto()
+    RUNTIME_REFERENCES = auto()
+    RUNTIME_CHROME_REFERENCE = auto()
+    CHROME_SIGNATURE = auto()
+    CONFIG_PIN_CHANGED = auto()
+
+
+_supervisor_config_failure: ContextVar[Callable[[_SupervisorConfigCheck], None] | None] = ContextVar(
+    "supervisor_config_failure", default=None,
+)
+
+
+@contextmanager
+def _supervisor_config_check(check: _SupervisorConfigCheck):
+    """Observe a failing check without changing the underlying exception."""
+    report = _supervisor_config_failure.get()
+    try:
+        yield
+    except Exception:
+        if report is not None:
+            report(check)
+        raise
+
+
 def _no_links(path: Path) -> bool:
     """Do not follow a link in any existing ancestor of a trusted path."""
     for part in (path, *path.parents):
@@ -94,19 +144,21 @@ def load_environment(config_path: Path, checkout: Path, *, local_app_data: Path)
     This never provisions a profile, attempts authentication or reads cookies.
     """
     try:
-        if (not all(p.is_absolute() for p in (config_path, checkout, local_app_data))
-                or not config_path.is_file() or not checkout.is_dir()
-                or not _no_links(config_path) or not _no_links(checkout)):
-            raise AcquisitionBlocked("CONFIG_PATH_INVALID")
-        checkout = checkout.resolve(strict=True)
-        if _inside(config_path.resolve(strict=True), checkout):
-            raise AcquisitionBlocked("CONFIG_IN_REPOSITORY")
-        owned_config_root = (local_app_data.resolve(strict=True) / "AI-Commerce").resolve()
-        if not _inside(config_path.resolve(strict=True), owned_config_root):
-            raise AcquisitionBlocked("CONFIG_NOT_OPERATOR_OWNED")
-        if config_path.stat().st_size > 8192:
-            raise AcquisitionBlocked("CONFIG_INVALID")
-        raw = config_path.read_text(encoding="utf-8-sig")
+        with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_PATH):
+            if (not all(p.is_absolute() for p in (config_path, checkout, local_app_data))
+                    or not config_path.is_file() or not checkout.is_dir()
+                    or not _no_links(config_path) or not _no_links(checkout)):
+                raise AcquisitionBlocked("CONFIG_PATH_INVALID")
+            checkout = checkout.resolve(strict=True)
+            if _inside(config_path.resolve(strict=True), checkout):
+                raise AcquisitionBlocked("CONFIG_IN_REPOSITORY")
+            owned_config_root = (local_app_data.resolve(strict=True) / "AI-Commerce").resolve()
+            if not _inside(config_path.resolve(strict=True), owned_config_root):
+                raise AcquisitionBlocked("CONFIG_NOT_OPERATOR_OWNED")
+        with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_FILE_READ):
+            if config_path.stat().st_size > 8192:
+                raise AcquisitionBlocked("CONFIG_INVALID")
+            raw = config_path.read_text(encoding="utf-8-sig")
         def unique(pairs):
             obj = {}
             for key, value in pairs:
@@ -114,7 +166,8 @@ def load_environment(config_path: Path, checkout: Path, *, local_app_data: Path)
                     raise AcquisitionBlocked("CONFIG_DUPLICATE_KEY")
                 obj[key] = value
             return obj
-        value = json.loads(raw, object_pairs_hook=unique)
+        with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_JSON):
+            value = json.loads(raw, object_pairs_hook=unique)
         return _environment_from_value(value, config_path, checkout, local_app_data=local_app_data)
     except AcquisitionBlocked:
         raise
@@ -137,42 +190,46 @@ def _environment_from_value(value, config_path: Path, checkout: Path, *,
     profile rules without weakening that existing-file requirement.
     """
     try:
-        if (not isinstance(value, dict) or value.keys() != _CHROME_CONFIG_FIELDS
-                or type(value["version"]) is not int or value["version"] != 1
-                or type(value["allow_launch"]) is not bool
-                or value["exclusive_user_data"] is not True
-                or type(value["profile_directory"]) is not str
-                or not _PROFILE.fullmatch(value["profile_directory"])):
-            raise AcquisitionBlocked("CONFIG_INVALID")
-        if type(value["executable"]) is not str or type(value["user_data_dir"]) is not str:
-            raise AcquisitionBlocked("CONFIG_INVALID")
-        executable, directory = Path(value["executable"]), Path(value["user_data_dir"])
-        if (not executable.is_absolute() or not executable.is_file()
-                or executable.name.lower() != "chrome.exe" or not _no_links(executable)
-                or not directory.is_absolute() or not directory.is_dir()
-                or not _no_links(directory)):
-            raise AcquisitionBlocked("CHROME_PATH_INVALID")
-        executable, directory = executable.resolve(strict=True), directory.resolve(strict=True)
-        owned_base = (local_app_data.resolve(strict=True) / "AI-Commerce").resolve()
-        # Never operate on Google default User Data, AIOS-Renew or a sibling project.
-        if (not _inside(directory, owned_base) or _inside(directory, checkout)
-                or directory == executable or directory in executable.parents):
-            raise AcquisitionBlocked("PROFILE_NOT_DEDICATED")
-        profile = directory / value["profile_directory"]
-        if not profile.is_dir() or not _no_links(profile) or profile.resolve() != profile:
-            raise AcquisitionBlocked("PROFILE_UNAVAILABLE")
-        endpoint = value["cdp_endpoint"]
-        if type(endpoint) is not str:
-            raise AcquisitionBlocked("CDP_ENDPOINT_INVALID")
-        parsed = urlsplit(endpoint)
-        if (parsed.scheme != "http" or parsed.netloc != f"127.0.0.1:{parsed.port}"
-                or parsed.port is None or parsed.port < 1024
-                or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
-            raise AcquisitionBlocked("CDP_ENDPOINT_INVALID")
-        if _inside(config_path.resolve(), directory):
-            raise AcquisitionBlocked("CONFIG_IN_CHROME_PROFILE")
-        return ChromeEnvironment(executable, directory, value["profile_directory"],
-                                 endpoint, parsed.port, value["allow_launch"], config_path.resolve())
+        with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_SCHEMA):
+            if (not isinstance(value, dict) or value.keys() != _CHROME_CONFIG_FIELDS
+                    or type(value["version"]) is not int or value["version"] != 1
+                    or type(value["allow_launch"]) is not bool
+                    or value["exclusive_user_data"] is not True
+                    or type(value["profile_directory"]) is not str
+                    or not _PROFILE.fullmatch(value["profile_directory"])):
+                raise AcquisitionBlocked("CONFIG_INVALID")
+            if type(value["executable"]) is not str or type(value["user_data_dir"]) is not str:
+                raise AcquisitionBlocked("CONFIG_INVALID")
+        with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_PATH):
+            executable, directory = Path(value["executable"]), Path(value["user_data_dir"])
+            if (not executable.is_absolute() or not executable.is_file()
+                    or executable.name.lower() != "chrome.exe" or not _no_links(executable)
+                    or not directory.is_absolute() or not directory.is_dir()
+                    or not _no_links(directory)):
+                raise AcquisitionBlocked("CHROME_PATH_INVALID")
+            executable, directory = executable.resolve(strict=True), directory.resolve(strict=True)
+            owned_base = (local_app_data.resolve(strict=True) / "AI-Commerce").resolve()
+            # Never operate on Google default User Data, AIOS-Renew or a sibling project.
+            if (not _inside(directory, owned_base) or _inside(directory, checkout)
+                    or directory == executable or directory in executable.parents):
+                raise AcquisitionBlocked("PROFILE_NOT_DEDICATED")
+            profile = directory / value["profile_directory"]
+            if not profile.is_dir() or not _no_links(profile) or profile.resolve() != profile:
+                raise AcquisitionBlocked("PROFILE_UNAVAILABLE")
+        with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_SCHEMA):
+            endpoint = value["cdp_endpoint"]
+            if type(endpoint) is not str:
+                raise AcquisitionBlocked("CDP_ENDPOINT_INVALID")
+            parsed = urlsplit(endpoint)
+            if (parsed.scheme != "http" or parsed.netloc != f"127.0.0.1:{parsed.port}"
+                    or parsed.port is None or parsed.port < 1024
+                    or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
+                raise AcquisitionBlocked("CDP_ENDPOINT_INVALID")
+        with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_PATH):
+            if _inside(config_path.resolve(), directory):
+                raise AcquisitionBlocked("CONFIG_IN_CHROME_PROFILE")
+            return ChromeEnvironment(executable, directory, value["profile_directory"],
+                                     endpoint, parsed.port, value["allow_launch"], config_path.resolve())
     except AcquisitionBlocked:
         raise
     except (OSError, ValueError, TypeError, KeyError, UnicodeError, RecursionError):
@@ -492,8 +549,11 @@ def _require_operator_control(env: ChromeEnvironment) -> None:
     """Apply the existing exact-SID, owner and ACL guard to private inputs."""
     from .local_completion_handoff import HandoffBlocked, _private_identity
     try:
-        for path in (env.config_path, env.user_data_dir, env.user_data_dir / env.profile_directory):
-            _private_identity(path)
+        with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_FILE_CUSTODY):
+            _private_identity(env.config_path)
+        with _supervisor_config_check(_SupervisorConfigCheck.PROFILE_CUSTODY):
+            for path in (env.user_data_dir, env.user_data_dir / env.profile_directory):
+                _private_identity(path)
     except (HandoffBlocked, OSError, ValueError):
         raise AcquisitionBlocked("OPERATOR_OWNERSHIP_UNPROVEN") from None
 
@@ -1489,22 +1549,28 @@ def _read_9444_config(config: Path, local: Path, checkout: Path, sid: str) -> Ch
     """Validate existing private inputs without enrolling or changing launch policy."""
     root = local / "AI-Commerce"
     from .local_completion_handoff import _private_identity
-    if any(not _no_links(path) or _private_identity(path) != sid
-           for path in (root, config.parent, config)):
-        raise _EnrollmentHold("CONFIG_UNTRUSTED")
+    for path, check in ((root, _SupervisorConfigCheck.CONFIG_ROOT_CUSTODY),
+                        (config.parent, _SupervisorConfigCheck.CONFIG_PARENT_CUSTODY),
+                        (config, _SupervisorConfigCheck.CONFIG_FILE_CUSTODY)):
+        with _supervisor_config_check(check):
+            if not _no_links(path) or _private_identity(path) != sid:
+                raise _EnrollmentHold("CONFIG_UNTRUSTED")
     env = load_environment(config, checkout, local_app_data=local)
-    if env.port != 9444 or env.endpoint != "http://127.0.0.1:9444":
-        raise _EnrollmentHold("CONFIG_UNTRUSTED")
+    with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_SCHEMA):
+        if env.port != 9444 or env.endpoint != "http://127.0.0.1:9444":
+            raise _EnrollmentHold("CONFIG_UNTRUSTED")
     return env
 
 
 def _supervisor_9444_environment(local: Path, checkout: Path, sid: str) -> ChromeEnvironment | None:
     """Adopt a sole registered Chrome config for health reads without changing it."""
-    registry = _config_9444_registry(local, checkout)
+    with _supervisor_config_check(_SupervisorConfigCheck.LEGACY_REGISTRY_DISCOVERY):
+        registry = _config_9444_registry(local, checkout)
     if not registry.present:
         return None
-    if len(registry.present) != 1:
-        raise _EnrollmentHold("LOCAL_CONFIG_AMBIGUOUS")
+    with _supervisor_config_check(_SupervisorConfigCheck.LEGACY_REGISTRY_AMBIGUOUS):
+        if len(registry.present) != 1:
+            raise _EnrollmentHold("LOCAL_CONFIG_AMBIGUOUS")
     env = _read_9444_config(registry.present[0], local, checkout, sid)
     _require_operator_control(env)
     return env
