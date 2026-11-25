@@ -80,6 +80,12 @@ def _windows_handle(path: Path, flags: int, *, directory: bool = False,
         advapi.ConvertStringSidToSidW.argtypes = (
             wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p))
         advapi.ConvertStringSidToSidW.restype = wintypes.BOOL
+        advapi.GetSecurityInfo.argtypes = (
+            wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p),
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p))
+        advapi.GetSecurityInfo.restype = wintypes.DWORD
+        advapi.EqualSid.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
+        advapi.EqualSid.restype = wintypes.BOOL
         advapi.SetSecurityInfo.argtypes = (
             wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
             ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
@@ -87,15 +93,24 @@ def _windows_handle(path: Path, flags: int, *, directory: bool = False,
         kernel.LocalFree.argtypes = (ctypes.c_void_p,)
         kernel.LocalFree.restype = ctypes.c_void_p
         owner_sid = ctypes.c_void_p()
+        actual_owner = ctypes.c_void_p()
+        descriptor = ctypes.c_void_p()
         try:
             if not advapi.ConvertStringSidToSidW(new_file_owner_sid, ctypes.byref(owner_sid)):
                 raise PrivateStateError("OWNER_PROVISION_FAILED")
-            if advapi.SetSecurityInfo(handle, 1, 1, owner_sid, None, None, None):
+            # Prove ownership from the same open handle before requesting a change.
+            # Windows can deny reassignment even when the file already has this SID.
+            status = advapi.GetSecurityInfo(handle, 1, 1, ctypes.byref(actual_owner),
+                                            None, None, None, ctypes.byref(descriptor))
+            owner_matches = status == 0 and actual_owner and advapi.EqualSid(actual_owner, owner_sid)
+            if not owner_matches and advapi.SetSecurityInfo(handle, 1, 1, owner_sid, None, None, None):
                 raise PrivateStateError("OWNER_PROVISION_FAILED")
         except BaseException:
             close(handle)
             raise
         finally:
+            if descriptor:
+                kernel.LocalFree(descriptor)
             if owner_sid:
                 kernel.LocalFree(owner_sid)
     return handle, close
