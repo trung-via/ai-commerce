@@ -652,7 +652,9 @@ def _owned_chrome_process(inventory: tuple, desktop: str) -> tuple[str, int]:
 
 def _supervised_desktop(session: int, sid: str) -> str:
     _require(os.name == "nt" and not any(
-        os.environ.get(key) for key in ("CI", "GITHUB_ACTIONS", "GITHUB_RUN_ID", "GITHUB_EVENT_PATH")
+        os.environ.get(key) for key in (
+            "CI", "GITHUB_ACTIONS", "GITHUB_RUN_ID", "GITHUB_EVENT_PATH", "TF_BUILD", "BUILD_BUILDID",
+        )
     ) and not any(key.startswith("AI_COMMERCE_GIT_GUARD_") for key in os.environ),
              "LOCAL_OPERATOR_ONLY")
     return _desktop_logon(session, sid)
@@ -660,10 +662,11 @@ def _supervised_desktop(session: int, sid: str) -> str:
 
 def _desktop_logon(session: int, sid: str) -> str:
     """Pin the live, unlocked Windows logon, even if its session ID is reused."""
+    _require(os.name == "nt", "WINDOWS_INTERACTIVE_REQUIRED")
     import ctypes
     from ctypes import wintypes as w
 
-    from ai_commerce.wakehub.native_authority import _desktop_identity
+    from ai_commerce.wakehub.native_authority import _attest_desktop_identity
 
     class Session(ctypes.Structure):
         _fields_ = [("id", w.DWORD), ("station", w.LPWSTR), ("state", ctypes.c_int)]
@@ -714,7 +717,7 @@ def _desktop_logon(session: int, sid: str) -> str:
                  and data.user and data.domain and 0 < data.logon <= data.current,
                  "WINDOWS_INTERACTIVE_REQUIRED")
         try:
-            _desktop_identity(SimpleNamespace(
+            _attest_desktop_identity(SimpleNamespace(
                 user_sid=sid, session_id=session, user_name=data.domain + "\\" + data.user,
                 desktop=r"WinSta0\Default"))
         except ValueError:
