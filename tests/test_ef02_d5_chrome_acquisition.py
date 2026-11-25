@@ -9,9 +9,44 @@ import stat
 import subprocess
 import tempfile
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from ai_commerce.remote import chrome_acquisition as ca
+
+
+@pytest.mark.parametrize("elevated", [False, True])
+def test_protocol_session_uses_token_and_session_without_opening_lock_desktop(monkeypatch, elevated):
+    import ctypes
+
+    def session(_pid, target):
+        target._obj.value = 7
+        return True
+
+    def elevation(_token, info_class, target, _size, _returned):
+        assert info_class == 20
+        target._obj.value = int(elevated)
+        return True
+
+    kernel = SimpleNamespace(GetCurrentProcess=Mock(return_value=1), GetCurrentProcessId=Mock(return_value=42),
+                             ProcessIdToSessionId=Mock(side_effect=session), CloseHandle=Mock())
+    security = SimpleNamespace(OpenProcessToken=Mock(return_value=True),
+                               GetTokenInformation=Mock(side_effect=elevation))
+    desktop = SimpleNamespace(OpenInputDesktop=Mock(return_value=None), CloseDesktop=Mock())
+    libraries = {"kernel32": kernel, "advapi32": security, "user32": desktop}
+    monkeypatch.setattr(ctypes, "WinDLL", lambda name, **_: libraries[name], raising=False)
+    monkeypatch.setattr(ca, "os", SimpleNamespace(name="nt"))
+
+    if elevated:
+        with pytest.raises(ca.AcquisitionBlocked, match="^ELEVATED_CHROME_DISALLOWED$"):
+            ca._interactive_session(protocol_only=True)
+    else:
+        assert ca._interactive_session(protocol_only=True) == 7
+    desktop.OpenInputDesktop.assert_not_called()
+    kernel.CloseHandle.assert_called_once()
+    with pytest.raises(ca.AcquisitionBlocked, match="^WINDOWS_INTERACTIVE_REQUIRED$"):
+        ca._interactive_session()
+    desktop.OpenInputDesktop.assert_called_once()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Native Windows paths")

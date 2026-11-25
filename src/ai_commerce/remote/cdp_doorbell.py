@@ -113,6 +113,11 @@ const matches = () => {
 const sameDocument = () => !args.documentClock || performance.timeOrigin === args.documentClock;
 const sameRoute = () => args.documentClock ? location.href === args.url :
   location.href.replace(/\\/$/,'') === args.url;
+const accountMatches = () => {
+ if (!args.account_id) return true;
+ const accounts = document.querySelectorAll('[data-account-id]');
+ return accounts.length === 1 && accounts[0].getAttribute('data-account-id') === args.account_id;
+};
 const opaqueEnough = el => {
  for (let node = el; node; node = node.parentElement) {
    if (getComputedStyle(node).opacity === '0') return false;
@@ -155,6 +160,7 @@ const turnRefs = () => {
 };
 const inspect = (expectText = false) => {
  if (!sameDocument() || !sameRoute()) return 'TARGET_PAGE_CHANGED';
+ if (!accountMatches()) return 'ACCOUNT_UNPROVEN';
  if (surfaceBlocked()) return 'SURFACE_UNPROVEN';
  const boxes = visible(composerSel);
  if (boxes.length !== 1 || boxes[0].getAttribute('aria-disabled') === 'true')
@@ -222,14 +228,16 @@ _CLICK = "(args) => { " + _GUARD + """
  if(!sendEnabled(button)) return false;
  if (args.documentClock) {
    const refs = turnRefs();
-   if (!refs) return false;
+   if (!refs || (args.standbyRefs &&
+       (refs.length !== args.standbyRefs.length ||
+        [...refs].sort().some((ref, index) => ref !== args.standbyRefs[index])))) return false;
    button.click();
    return refs;
  }
  button.click(); return true;
 }"""
 _PROVE = "(args) => { " + _GUARD + """
- if (!sameDocument() || !sameRoute() || surfaceBlocked()) return false;
+ if (!sameDocument() || !sameRoute() || !accountMatches() || surfaceBlocked()) return false;
  const found=matches();
  if (args.documentClock) {
    if (found.length !== 1 || !visible('main [data-message-author-role="user"]').includes(found[0]))
@@ -247,7 +255,7 @@ _PROVE = "(args) => { " + _GUARD + """
 }"""
 
 _PRE_STAGE_REFS = "(args) => { " + _GUARD + """
- return sameDocument() && sameRoute() && turnRefs();
+ return sameDocument() && sameRoute() && accountMatches() && turnRefs();
 }"""
 _AGY_SURFACE_READY = "(args) => { " + _GUARD + """
  return document.readyState === 'complete' && document.querySelectorAll('*').length <= 20000 &&
@@ -933,7 +941,7 @@ class WH03TestRegistrationLedger:
             return "TEST_REGISTRATION_STORE_UNAVAILABLE"
 
 
-def _wh03_commitment_gate_shape(value: WH03SignalCommitment) -> str:
+def _wh03_commitment_gate_shape(value: WH03SignalCommitment, *, max_lease_ms: int | None = 300_000) -> str:
     """Validate immutable commitment shape, excluding wall-clock expiry."""
     if (type(value) is not WH03SignalCommitment or
             type(value.registration_id) is not str or
@@ -945,7 +953,8 @@ def _wh03_commitment_gate_shape(value: WH03SignalCommitment) -> str:
             type(value.generation) is not int or value.generation < 1 or
             type(value.issued_ms) is not int or
             type(value.expires_ms) is not int or
-            not (1 <= value.expires_ms - value.issued_ms <= 300000) or
+            value.issued_ms >= value.expires_ms or
+            (max_lease_ms is not None and value.expires_ms - value.issued_ms > max_lease_ms) or
             type(value.consumed) is not bool):
         return "TEST_COMMITMENT_INVALID"
     if value.consumed:
@@ -953,10 +962,10 @@ def _wh03_commitment_gate_shape(value: WH03SignalCommitment) -> str:
     return "READY"
 
 
-def _wh03_commitment_gate(value: WH03SignalCommitment | None) -> str:
+def _wh03_commitment_gate(value: WH03SignalCommitment | None, *, max_lease_ms: int | None = 300_000) -> str:
     if value is None:
         return "TEST_COMMITMENT_REQUIRED"
-    shape = _wh03_commitment_gate_shape(value)
+    shape = _wh03_commitment_gate_shape(value, max_lease_ms=max_lease_ms)
     if shape != "READY":
         return shape
     now_ms = time.time_ns() // 1_000_000
@@ -1166,28 +1175,35 @@ class LocalChromeDoorbellAdapter:
     def send_registered_ui(self, *, binding: ResolvedBinding, event_id: str,
                            marker_digest: str,
                            revalidate: Callable[[], None],
-                           before_stage: Callable[[str, list[str]], None]) -> LocalUISendResult:
+                           before_stage: Callable[[str, list[str]], None],
+                           account_id: str | None = None,
+                           standby_refs: tuple[str, ...] | None = None) -> LocalUISendResult:
         """Deliver on the owner's supervisor reservation with local UI evidence only."""
         return self._registered_ui(binding, event_id, marker_digest, revalidate,
-                                   before_stage=before_stage)
+                                   before_stage=before_stage, account_id=account_id,
+                                   standby_refs=standby_refs)
 
     def observe_registered_ui(self, *, binding: ResolvedBinding, event_id: str,
                               marker_digest: str, revalidate: Callable[[], None],
-                              excluded_refs: list[str], document: str | None = None) -> LocalUISendResult:
+                              excluded_refs: list[str], document: str | None = None,
+                              account_id: str | None = None) -> LocalUISendResult:
         """Look once for an existing UI turn on the current exact-chat document."""
         if type(excluded_refs) is not list:
             return LocalUISendResult("EXISTING_USER_TURN_UNPROVEN")
         return self._registered_ui(binding, event_id, marker_digest, revalidate,
-                                   excluded_refs=excluded_refs, document=document)
+                                   excluded_refs=excluded_refs, document=document, account_id=account_id)
 
     def inspect_registered_ui(self, *, binding: ResolvedBinding, event_id: str,
                               marker_digest: str, revalidate: Callable[[], None],
-                              capture: Callable[[LocalUISurface], None]) -> LocalUISendResult:
+                              capture: Callable[[LocalUISurface], None],
+                              account_id: str | None = None) -> LocalUISendResult:
         """Read the same guarded composer and collect its pre-mutation witness."""
-        return self._registered_ui(binding, event_id, marker_digest, revalidate, capture=capture)
+        return self._registered_ui(binding, event_id, marker_digest, revalidate,
+                                   capture=capture, account_id=account_id)
 
     def _registered_ui(self, binding, event_id, marker_digest, revalidate, *,
-                       before_stage=None, excluded_refs=None, capture=None, document=None) -> LocalUISendResult:
+                       before_stage=None, excluded_refs=None, capture=None, document=None,
+                       account_id=None, standby_refs=None) -> LocalUISendResult:
         if (type(binding) is not ResolvedBinding or type(binding.chat_url) is not str
                 or not _CHAT.fullmatch(binding.chat_url)
                 or binding.cdp_endpoint != "http://127.0.0.1:9444"
@@ -1206,7 +1222,8 @@ class LocalChromeDoorbellAdapter:
 
         return self._send_ui(binding, _doorbell_text(event_id, self.repository, send_only=True),
                              check_page=check_page, revalidate=revalidate, before_stage=before_stage,
-                             excluded_refs=excluded_refs, capture=capture, document=document)
+                             excluded_refs=excluded_refs, capture=capture, document=document,
+                             account_id=account_id, standby_refs=standby_refs)
 
     @staticmethod
     def _surface_commitment(context, page, clock: float) -> str:
@@ -1223,8 +1240,12 @@ class LocalChromeDoorbellAdapter:
 
     def _send_ui(self, binding: ResolvedBinding, doorbell: str, *,
                  check_page=None, revalidate=None, before_stage=None,
-                 excluded_refs=None, capture=None, document=None) -> LocalUISendResult:
+                 excluded_refs=None, capture=None, document=None, account_id=None, standby_refs=None) -> LocalUISendResult:
         args = {**_ARGS, "url": binding.chat_url, "text": doorbell}
+        if account_id is not None:
+            args["account_id"] = account_id
+        if standby_refs is not None:
+            args["standbyRefs"] = list(standby_refs)
         scoped = check_page is not None
         # Timer polling keeps the scoped checks usable on an unfocused tab.
         polling = {"polling": 100} if scoped else {}
@@ -1238,9 +1259,7 @@ class LocalChromeDoorbellAdapter:
                     context = attached.contexts[0]
 
                 def candidates():
-                    pages = list(context.pages if scoped else attached)
-                    if scoped and len(pages) > 32:
-                        raise ValueError("EXACT_CHAT_INVENTORY_UNBOUNDED")
+                    pages = context.pages if scoped else attached
                     return [candidate for candidate in pages if isinstance(candidate.url, str)
                             and candidate.url.rstrip("/") == binding.chat_url]
 
@@ -1293,7 +1312,7 @@ class LocalChromeDoorbellAdapter:
                 if result != "READY":
                     code = result if result in {
                         "TARGET_PAGE_CHANGED", "SURFACE_UNPROVEN", "GENERATION_ACTIVE",
-                        "DRAFT_PRESENT", "OUTBOUND_ALREADY_PRESENT",
+                        "DRAFT_PRESENT", "OUTBOUND_ALREADY_PRESENT", "ACCOUNT_UNPROVEN",
                     } else "SURFACE_UNPROVEN"
                     return LocalUISendResult(code)
                 if capture is not None and page.evaluate(_AGY_SURFACE_READY, args) is not True:

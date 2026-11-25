@@ -73,6 +73,7 @@ class GitHubArtifactProvenance:
     workflow_run_status: str
     artifact_digest: str | None = None
     attestation_verified: bool = False
+    artifact_id: int | None = None
 
     def __repr__(self) -> str:
         return "GitHubArtifactProvenance(<private, unverified hints>)"
