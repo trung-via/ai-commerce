@@ -422,6 +422,95 @@ def test_ef02_hashed_original_junit_closes_consumer_tests_missing_from_argv(
     assert api.writes == []
 
 
+
+@pytest.mark.parametrize(("mutation", "expected"), [
+    (None, "READY_FOR_MERGE"),
+    ("final_hash", "WAIT_CI"),
+    ("final_failed", "WAIT_CI"),
+    ("missing_final", "WAIT_CI"),
+    ("duplicate_final", "WAIT_CI"),
+    ("mixed_rounds", "WAIT_CI"),
+    ("wrong_action", "WAIT_CI"),
+    ("metadata_missing", "WAIT_CI"),
+    ("result_mismatch", "WAIT_CI"),
+    ("extra_round", "WAIT_CI"),
+    ("wrong_mapping", "WAIT_CI"),
+])
+def test_ef02_verify_fix_reuses_only_candidate_bound_final_junit(
+    gate, monkeypatch, mutation, expected,
+):
+    import hashlib
+    import io
+    import zipfile
+    import json
+
+    monkeypatch.setattr(gate, "reviewed_coverage_for_changed_files",
+                        lambda files: (
+                            ("src/ai_commerce/product/identity.py",),
+                            ("tests/test_minimum_test.py", "tests/test_consumer.py")))
+    api = EF02JunitConsumerProof(gate, mutation=(
+        "failed_consumer" if mutation == "final_failed" else None))
+    api.evidence["tracked_diff_sha256"] = "b" * 64
+    owner = b'<testsuite tests="1" failures="0" errors="0"><testcase classname="tests.test_minimum_test" name="owner"/></testsuite>'
+    consumer = (b'<testsuite tests="1" failures="0" errors="0"><testcase classname="tests.test_consumer" name="consumer"/></testsuite>'
+                if mutation != "final_failed" else
+                b'<testsuite tests="1" failures="1" errors="0"><testcase classname="tests.test_consumer" name="consumer"><failure/></testcase></testsuite>')
+    hashes = api.evidence["verification"]["evidence_sha256"]
+    hashes.update(mt01_0_junit=hashlib.sha256(owner).hexdigest(),
+                  mt01_1_junit=hashlib.sha256(consumer).hexdigest())
+    original = api.read_artifact
+
+    def read(artifact_id):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(original(artifact_id))) as old:
+            report = json.loads(old.read("batch-id/batch_result.json"))
+        action = report["actions"][0]
+        rounds = [{"attempt_id": api.evidence["attempt_id"],
+                   "invocation_id": f"exact-01:invocation-{i:03d}",
+                   "evidence_dir": f"invocations/{i:03d}"}
+                  for i in range(2)]
+        final = rounds[-1]
+        final.update(status="BUILD_VERIFIED_FOR_SCOPE", verify_exit_code=0,
+                     evidence_sha256=dict(hashes),
+                     candidate_file_sha256=api.evidence["candidate_file_sha256"],
+                     tracked_diff_sha256=api.evidence["tracked_diff_sha256"],
+                     evidence_files={f"mt01_{i}_junit": f"invocations/001/mt01.{i}.junit.xml"
+                                     for i in range(2)})
+        if mutation == "wrong_mapping":
+            final["evidence_files"]["mt01_1_junit"] = "invocations/000/mt01.1.junit.xml"
+        if mutation != "metadata_missing":
+            action.update(ef01_invocations=rounds, invocation_count=2)
+        root = "batch-id/EXACT_SOURCE-exact-01/ef01"
+        if mutation == "wrong_action":
+            root = "batch-id/OTHER-exact-01/ef01"
+        first = root + "/invocations/000"
+        last = root + "/invocations/001"
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("batch-id/batch_result.json", json.dumps(report))
+            # The flat first-round alias is stale and must not be consulted.
+            z.writestr(root + "/mt01.0.junit.xml", b"<failed/>")
+            z.writestr(first + "/mt01.0.junit.xml", b"<failed/>")
+            z.writestr(first + "/mt01.1.junit.xml", consumer)
+            z.writestr(first + "/invocation_result.json", json.dumps(rounds[0]))
+            z.writestr(last + "/invocation_result.json",
+                       json.dumps({} if mutation == "result_mismatch" else final))
+            z.writestr(last + "/mt01.0.junit.xml", b"<bad/>" if mutation == "final_hash" else owner)
+            if mutation not in ("missing_final", "mixed_rounds"):
+                z.writestr(last + "/mt01.1.junit.xml", consumer)
+            if mutation == "duplicate_final":
+                with pytest.warns(UserWarning, match="Duplicate name"):
+                    z.writestr(last + "/mt01.1.junit.xml", consumer)
+            if mutation == "extra_round":
+                z.writestr(root + "/invocations/002/invocation_result.json", "{}")
+        return buf.getvalue()
+
+    api.read_artifact = read
+    verdict = gate.verify_one(api, api.repo, api.pr)
+    assert verdict.status == expected
+    assert api.ci_hits == (0 if expected == "READY_FOR_MERGE" else 1)
+    assert api.writes == []
+
+
 def test_ef02_exact_proof_brain_merges_without_second_ci(gate):
     api = EF02OriginalProofGitHub(gate)
     decision = gate.verify_one(api, api.repo, api.pr)
