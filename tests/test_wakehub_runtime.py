@@ -2948,6 +2948,39 @@ def test_runtime_config_discovery_checks_only_known_private_runtime_files(observ
     assert s.requests == [] and s.i["calls"] == [] and not s.path.exists()
 
 
+@pytest.mark.parametrize(("fault", "expected"), [
+    (None, "CHROME_OWNED"),
+    ("locked_profile", "PROFILE_LOCK_HOLD"),
+    ("foreign_port", "WINDOWS_PROBE_INVALID"),
+])
+def test_bootstrap_health_uses_existing_9444_without_route_or_journal(observe_only, monkeypatch, fault, expected):
+    s = observe_only
+    local = s.owner()[0]
+    monkeypatch.delenv("AI_COMMERCE_WAKEHUB_CONFIG", raising=False)
+    monkeypatch.setattr(r, "_user_runtime_config", lambda _: None)
+    cfg = r.Path(s.i["config"]["chrome_config"])
+    chrome_bytes = cfg.read_bytes()
+    r._bootstrap_supervisor_config(s.i["root"], s.owner())
+    path, pin = r._resolve_runtime_config(s.i["root"], owner=s.owner(), observe_only=True, protected=True)
+    assert path == local / "AI-Commerce" / "WakeHub" / "runtime-config.json"
+    assert json.loads(path.read_bytes()) == {"schema": r._CHROME_HEALTH_SCHEMA, "chrome_config": str(cfg)}
+    before = path.stat()
+    r._bootstrap_supervisor_config(s.i["root"], s.owner())
+    assert path.stat().st_mtime_ns == before.st_mtime_ns
+    assert r._resolve_runtime_config(s.i["root"], owner=s.owner(), observe_only=True, protected=True) == (path, pin)
+    assert cfg.read_bytes() == chrome_bytes
+
+    if fault == "locked_profile":
+        (s.i["environment"].user_data_dir / "Default" / r.chrome_acquisition._MARKERS[0]).touch()
+    elif fault == "foreign_port":
+        s.i["inventory"]["listeners"][0]["LocalPort"] = 9333
+    result = r.run_supervisor(path, s.i["root"], max_ticks=1, observe_only=True)
+    assert result.code == expected
+    assert s.i["native_calls"].count("protocol") == (2 if fault is None else 0)
+    assert not s.path.exists() and s.i["browser"].reads == 0
+    assert s.requests == [] and s.ticks == []
+
+
 @pytest.mark.parametrize("change", ["demand-start", "preload", "delivery", "missing", "observe"])
 def test_observe_only_holds_on_config_drift_without_effects(observe_only, change):
     s = observe_only
@@ -3005,7 +3038,7 @@ def test_observe_only_emits_private_source_bound_health_under_slot(observe_only,
     assert result.chrome_health == "CHROME_OWNED"
     assert writes == [{"source_sha": deployment["source_sha"], "source_digest": deployment["source_digest"],
                        "config_digest": config_pin, "desktop": desktop, "nonce": deployment["nonce"],
-                       "session": s.owner()[1],
+                       "session": s.owner()[1], "mode": "CHROME_HEALTH_ONLY",
                        "pid": os.getpid(), "created": 123456, "observed_ns": 123_000_000,
                        "health": "CHROME_OWNED"}, None]
     writes.clear()
@@ -3014,7 +3047,7 @@ def test_observe_only_emits_private_source_bound_health_under_slot(observe_only,
     assert writes == [] and s.slot.pending and not s.path.exists()
 
 
-def test_scheduled_observe_only_replaces_missing_session_health(observe_only, monkeypatch):
+def test_scheduled_observe_only_waits_for_owner_session_and_cdp(observe_only, monkeypatch):
     s = observe_only
     session, sid = s.owner()[1:]
     desktop = r._supervised_desktop(session, sid)
@@ -3038,17 +3071,26 @@ def test_scheduled_observe_only_replaces_missing_session_health(observe_only, mo
 
     def resume_session(_):
         nonlocal session_active
-        assert reports == ["WINDOWS_INTERACTIVE_REQUIRED"]
-        session_active = True
+        if not session_active:
+            assert reports == ["WINDOWS_INTERACTIVE_REQUIRED"]
+            session_active = True
+
+    probe = r.chrome_acquisition._probe_cdp
+
+    def probe_after_fault(env):
+        if reports[-1] == "WINDOWS_INTERACTIVE_REQUIRED":
+            raise r.chrome_acquisition.AcquisitionBlocked("CDP_PROTOCOL_UNAVAILABLE")
+        probe(env)
 
     monkeypatch.setattr(r, "_supervised_desktop", desktop_check)
     monkeypatch.setattr(r, "_supervisor_process", lambda pid, exe, owner: 123456)
     monkeypatch.setattr(r, "_supervisor_deployment_value", state.get)
     monkeypatch.setattr(r, "_store_supervisor_deployment_value", store)
+    monkeypatch.setattr(r.chrome_acquisition, "_probe_cdp", probe_after_fault)
     s.clock.on_wait = resume_session
-    result = s.run(max_ticks=2, observe_only=True, _deployment=deployment)
+    result = s.run(max_ticks=3, observe_only=True, _deployment=deployment)
     assert result.chrome_health == "CHROME_OWNED"
-    assert reports == ["WINDOWS_INTERACTIVE_REQUIRED", "CHROME_OWNED"]
+    assert reports == ["WINDOWS_INTERACTIVE_REQUIRED", "CDP_PROTOCOL_UNAVAILABLE", "CHROME_OWNED"]
     assert state["Health"] is None
     assert s.requests == [] and s.ticks == [] and not s.path.exists()
 
@@ -4331,6 +4373,61 @@ def flat04(supervisor, monkeypatch):
     return SimpleNamespace(s=s, i=i, issue=issue, sources=sources, browser=browser, context=context,
                            exact=exact, unrelated=unrelated, state=state, origin=origin,
                            prepare=prepare, observe=observe, enroll=enroll)
+
+
+def test_bootstrap_transition_requires_exact_enrollment_and_preserves_existing_journal(flat04, monkeypatch):
+    f = flat04
+    i, s = f.i, f.s
+    local = s.owner()[0]
+    monkeypatch.setattr(r, "_private_identity", lambda _: s.owner()[2])
+    r._bootstrap_supervisor_config(i["root"], s.owner())
+    canonical = local / "AI-Commerce" / "WakeHub" / "runtime-config.json"
+    prepared = f.prepare()
+    scope = {"repository_id": 3101, "creator_id": 711, "title_prefix": "[WAKEHUB PROJECT] ",
+             "not_before": "2026-11-15T00:00:00Z", "account_id": "fixture-account"}
+    consent = {"schema": r._UI_DELIVERY_SCHEMA, "transport": "playwright", "grants": [],
+               "route_marker": i["registration"].marker, "registration_id": prepared.registration_id,
+               "marker_digest": f.origin()["marker_digest"], "standing_issue": scope}
+    i["config"]["ui_delivery"] = consent
+    f.i["save"](i["config_path"], i["config"])
+
+    def setup(path):
+        return r._observe_only_config(path, i["root"], s.owner(), lambda: False, protected=True)
+
+    journal_before = s.path.read_bytes()
+    health, waiting_pin = setup(i["config_path"])
+    assert isinstance(health, r.NativeChrome9444)
+    assert s.path.read_bytes() == journal_before
+    f.exact.turns.append((prepared.marker, "user"))
+    assert f.observe(prepared).code == "LOCAL_CHAT_REGISTERED_UI_EVIDENCE"
+    journal_before = s.path.read_bytes()
+    operational, enrolled_pin = setup(i["config_path"])
+    assert isinstance(operational, r._SupervisorChrome) and enrolled_pin != waiting_pin
+    assert operational.runtime.journal.path == s.path
+    assert operational.runtime.registration == i["registration"]
+
+    marker_digest = consent["marker_digest"]
+    consent["marker_digest"] = "d" * 64
+    i["save"](i["config_path"], i["config"])
+    assert isinstance(setup(i["config_path"])[0], r.NativeChrome9444)
+    consent["marker_digest"] = marker_digest
+    account = scope.pop("account_id")
+    i["save"](i["config_path"], i["config"])
+    with pytest.raises(r.RuntimeHold, match="^LOCAL_UI_STANDING_SCOPE_INVALID$"):
+        setup(i["config_path"])
+    scope["account_id"] = account
+
+    def complete(code):
+        assert code == "CHROME_OWNED"
+        i["save"](canonical, i["config"])
+
+    result = r.run_supervisor(canonical, i["root"], max_ticks=2, observe_only=True,
+                              idle_seconds=2, on_health=complete)
+    assert result.code == "LOCAL_CONFIG_CHANGED" and not s.slot.active
+    chrome, _ = setup(canonical)
+    assert chrome.runtime.journal.path == s.path
+    assert s.path.read_bytes() == journal_before and f.origin()["phase"] == "ENROLLED"
+    assert s.requests == [] and s.ticks == []
 
 
 def test_flat04_registered_sources_share_exact_chat_and_keep_separate_pending_rows(flat04):

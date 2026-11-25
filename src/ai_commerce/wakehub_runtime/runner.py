@@ -1,7 +1,7 @@
 """WakeHub source admission, local route readiness and its private SQLite journal."""
 from __future__ import annotations
 
-from contextlib import ExitStack, contextmanager, nullcontext, suppress
+from contextlib import ExitStack, closing, contextmanager, nullcontext, suppress
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 import hashlib
@@ -1721,6 +1721,32 @@ class Journal:
         _require(len(rows) == 1 and rows[0][0] == owner, "JOURNAL_OWNER_DRIFT")
         actual = json.dumps(_decode_unique(rows[0][1]), sort_keys=True)
         _require(actual == json.dumps(asdict(registration), sort_keys=True), "REGISTRATION_DRIFT")
+
+    def enrolled_origin(self, registration: Registration, principal: str) -> dict | None:
+        """Read the exact existing enrollment without creating, migrating or recovering state."""
+        with _private_access(self.path, self.repository_root) as (owner, _):
+            _require(owner == principal, "JOURNAL_OWNER_DRIFT")
+            self._owner(owner)
+            if not self.path.exists():
+                return None
+            with closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=0)) as db:
+                db.execute("PRAGMA trusted_schema=OFF")
+                db.execute("BEGIN")
+                _require(db.execute("PRAGMA user_version").fetchone() in ((2,), (3,))
+                         and db.execute("PRAGMA application_id").fetchone() == (_APP_ID,),
+                         "JOURNAL_SCHEMA_INCOMPATIBLE")
+                schemas = dict(db.execute("SELECT name, sql FROM sqlite_master WHERE type='table' "
+                                          "AND name IN ('identity', 'local_origin')"))
+                _require(schemas.get("identity") == _TABLES["identity"], "JOURNAL_SCHEMA_INCOMPATIBLE")
+                self._check_registration(db, owner, registration)
+                if "local_origin" not in schemas:
+                    return None
+                _require(schemas["local_origin"] == _ORIGIN_TABLE, "JOURNAL_SCHEMA_INCOMPATIBLE")
+                rows = db.execute("SELECT singleton, record FROM local_origin").fetchall()
+                _require(len(rows) == 1 and rows[0][0] == 1, "LOCAL_ORIGIN_JOURNAL_INVALID")
+                origin = _decode_unique(rows[0][1])
+                _validate_local_origin(origin, registration)
+                return origin if origin["phase"] == "ENROLLED" else None
 
     @contextmanager
     def locked(self, registration: Registration):
@@ -3725,6 +3751,10 @@ _OBSERVED_CHROME_HEALTH = frozenset({"CHROME_OWNED", "CHROME_ABSENT"})
 _SUPERVISOR_DESKTOP_HOLDS = frozenset({
     "WINDOWS_INTERACTIVE_REQUIRED", "CHROME_INTERACTIVE_SESSION_CONFLICT",
 })
+_SUPERVISOR_CHROME_HOLDS = frozenset({
+    "CDP_PROTOCOL_UNAVAILABLE", "PROFILE_LOCK_HOLD", "ENROLLMENT_PROFILE_LOCK_UNPROVEN",
+    "PROFILE_ALREADY_ACTIVE_NO_CDP", "WINDOWS_PROBE_INVALID",
+})
 
 
 def _supervisor_owner_session() -> tuple[tuple[Path, int, str], str]:
@@ -3943,6 +3973,8 @@ _RUNTIME_CONFIG_ENV = "AI_COMMERCE_WAKEHUB_CONFIG"
 # Keep the runtime filename in the existing local 9444 enrollment layout.
 # The shared config.json names may hold Chrome acquisition configs.
 _RUNTIME_CONFIG_LOCATIONS = ("WakeHub/runtime-config.json", "WakeHub/config.json", "WakeHub-9444/config.json")
+_CHROME_HEALTH_SCHEMA = "WakeHubChromeHealth.v1"
+_CHROME_HEALTH_ONLY = "CHROME_HEALTH_ONLY"
 
 
 def _user_runtime_config(local: Path) -> str | None:
@@ -3964,7 +3996,8 @@ def _user_runtime_config(local: Path) -> str | None:
 
 
 def _resolve_runtime_config(repository_root: Path, *, owner: tuple[Path, int, str] | None = None,
-                            observe_only: bool = False, registration_only: bool = False) -> tuple[Path, str | None]:
+                            observe_only: bool = False, registration_only: bool = False,
+                            protected: bool = False) -> tuple[Path, str | None]:
     """Resolve process, owner User environment, then the fixed enrollment paths."""
     configured = os.environ.get(_RUNTIME_CONFIG_ENV)
     if configured is None and owner is None:
@@ -3982,7 +4015,7 @@ def _resolve_runtime_config(repository_root: Path, *, owner: tuple[Path, int, st
         if owner is None:
             return None
         if observe_only:
-            return _observe_only_config(path, repository_root, owner, lambda: False)[1]
+            return _observe_only_config(path, repository_root, owner, lambda: False, protected=protected)[1]
         runtime = _read_runtime_config(path, repository_root, registration_only=registration_only)
         _validate_config_references(runtime, owner[2])
         if "chrome_config" in runtime.raw:
@@ -4029,6 +4062,51 @@ def _resolve_runtime_config(repository_root: Path, *, owner: tuple[Path, int, st
         raise RuntimeHold("LOCAL_CONFIG_INVALID") from None
 
 
+def _bootstrap_supervisor_config(repository_root: Path, owner: tuple[Path, int, str]) -> None:
+    """Publish initial health configuration after protected deployment checks for existing config."""
+    local, _, sid = owner
+    try:
+        env = chrome_acquisition._supervisor_9444_environment(local, repository_root, sid)
+        _require(env is not None, "LOCAL_CONFIG_REQUIRED")
+        chrome_acquisition._verify_google_chrome(env)
+        base = local / "AI-Commerce"
+        path = base / _RUNTIME_CONFIG_LOCATIONS[0]
+        _require(_private_identity(base) == sid and chrome_acquisition._no_links(path),
+                 "LOCAL_CONFIG_INVALID")
+        path.parent.mkdir(mode=0o700, exist_ok=True)
+        with _private_access(path, repository_root) as (principal, files):
+            _require(principal == sid, "LOCAL_CONFIG_INVALID")
+            if path.exists():
+                return
+            name = path.name + "." + token_hex(16) + ".part"
+            temporary = path.with_name(name)
+            fd = files.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    json.dump({"schema": _CHROME_HEALTH_SCHEMA, "chrome_config": str(env.config_path)}, stream)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                _require(_private_identity(temporary) == sid, "LOCAL_CONFIG_INVALID")
+                try:
+                    if os.name == "nt":
+                        os.rename(temporary, path)  # Windows rename fails if the destination exists.
+                    else:
+                        os.link(name, path.name, src_dir_fd=files.directory_fd, dst_dir_fd=files.directory_fd)
+                except FileExistsError:
+                    pass  # Deployment resolves and validates the winning file.
+            finally:
+                with suppress(FileNotFoundError):
+                    temporary.unlink()
+            if os.name != "nt":
+                os.fsync(files.directory_fd)
+    except (RuntimeHold, chrome_acquisition._EnrollmentHold) as exc:
+        if str(exc) in {"LOCAL_CONFIG_REQUIRED", "LOCAL_CONFIG_AMBIGUOUS"}:
+            raise RuntimeHold(str(exc)) from None
+        raise RuntimeHold("LOCAL_CONFIG_INVALID") from None
+    except (OSError, ValueError, TypeError):
+        raise RuntimeHold("LOCAL_CONFIG_INVALID") from None
+
+
 def _validate_config_references(runtime: _RuntimeConfig, owner: str) -> list[dict]:
     _require(runtime.principal == owner, "LOCAL_CONFIG_INVALID")
     runtime.journal._owner(owner)
@@ -4054,20 +4132,47 @@ def _validate_config_references(runtime: _RuntimeConfig, owner: str) -> list[dic
 
 
 def _observe_only_config(config_path: Path, repository_root: Path, owner: tuple[Path, int, str],
-                         stop: Callable[[], bool]) -> tuple[_SupervisorChrome, str]:
-    runtime = _read_runtime_config(config_path, repository_root)
+                         stop: Callable[[], bool], *,
+                         protected: bool = False) -> tuple[_SupervisorChrome | NativeChrome9444, str]:
+    raw = _read_owned_json(config_path, repository_root)
+    if raw.get("schema") == _CHROME_HEALTH_SCHEMA:
+        _require(raw.keys() == {"schema", "chrome_config"} and _private_identity(config_path) == owner[2],
+                 "LOCAL_CONFIG_INVALID")
+        env = chrome_acquisition._supervisor_9444_environment(owner[0], repository_root, owner[2])
+        _require(env is not None and env.config_path == _config_path(raw["chrome_config"], repository_root),
+                 "LOCAL_CONFIG_INVALID")
+        config = _read_owned_json(env.config_path, repository_root, limit=8192)
+        return NativeChrome9444(repository_root, env, supervised=True), digest([str(config_path), raw, config])
+
+    runtime = _read_runtime_config(config_path, repository_root, registration_only=protected)
+    _require(runtime.raw == raw, "LOCAL_CONFIG_CHANGED")
     _require(runtime.principal == owner[2] and Path(os.environ.get("LOCALAPPDATA", "")) == owner[0],
              "LOCAL_CONFIG_INVALID")
-    if not any(kind in runtime.raw.get("ui_delivery", {}) for kind in _STANDING_SOURCES):
+    consent = raw.get("ui_delivery", {})
+    standing = any(kind in consent for kind in _STANDING_SOURCES)
+    if not protected and not standing:
         _require(runtime.chrome_lifecycle == "observe" and not runtime.raw.get("chat_preload", False)
                  and "ui_delivery" not in runtime.raw, "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED")
     registrations = _validate_config_references(runtime, owner[2])
     chrome = _compose_supervisor_chrome(runtime, stop)
-    pin = digest([str(config_path), runtime.raw, chrome.config, registrations])
-    return chrome, pin
+    pins = [str(config_path), raw, chrome.config, registrations]
+    if protected and standing:
+        try:
+            origin = runtime.journal.enrolled_origin(runtime.registration, owner[2])
+        except (RuntimeHold, OSError, ValueError, sqlite3.Error):
+            origin = None
+        env = chrome.sender.environment
+        enrolled = origin is not None and all(origin[key] == value for key, value in {
+            "registration_id": consent["registration_id"], "marker_digest": consent["marker_digest"],
+            "owner_scope": _chrome_scope(owner[0], owner[2], env), "chrome_config": digest(chrome.config),
+        }.items())
+        pins.append(enrolled)
+        if enrolled:
+            return chrome, digest(pins)
+    return (chrome.sender if protected else chrome), digest(pins)
 
 
-def _deployment_health(deployment: dict):
+def _deployment_health(deployment: dict, *, health_only: bool = False):
     last_health = None
 
     def publish(code: str) -> None:
@@ -4078,6 +4183,7 @@ def _deployment_health(deployment: dict):
         last_health = json.dumps({
             **{key: deployment[key] for key in (
                 "source_sha", "source_digest", "config_digest", "desktop", "session", "nonce")},
+            **({"mode": _CHROME_HEALTH_ONLY} if health_only else {}),
             "pid": pid, "created": created, "observed_ns": monotonic_ns(), "health": code,
         }, separators=(",", ":"))
         _store_supervisor_deployment_value("Health", last_health)
@@ -4097,7 +4203,8 @@ def _observe_only_supervisor(config_path: Path | None, repository_root: Path, *,
                              deployment: dict | None) -> Result:
     config_pin = deployment["config_digest"] if deployment is not None else None
     desktop_pin = deployment["desktop"] if deployment is not None else None
-    publish, clear_health = _deployment_health(deployment) if deployment is not None else (None, None)
+    protected = deployment is not None
+    publish, clear_health = _deployment_health(deployment, health_only=True) if protected else (None, None)
 
     def observe() -> Result:
         nonlocal config_pin, desktop_pin
@@ -4108,15 +4215,16 @@ def _observe_only_supervisor(config_path: Path | None, repository_root: Path, *,
         desktop = _supervised_desktop(owner[1], owner[2])
         _require(desktop_pin is None or desktop_pin == desktop, "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
         desktop_pin = desktop
-        chrome, pin = _observe_only_config(config_path, repository_root, owner, stop.is_set)
+        chrome, pin = _observe_only_config(config_path, repository_root, owner, stop.is_set, protected=protected)
         _require(config_pin is None or config_pin == pin, "LOCAL_CONFIG_CHANGED")
         config_pin = pin
-        # Only native health reads. No journal open, source admission or route/lifecycle effects.
-        state, provenance, pending = chrome.sender.lifecycle_snapshot()
+        # Use only the native health reader, even for a configured environment.
+        sender = chrome.sender if isinstance(chrome, _SupervisorChrome) else chrome
+        state, provenance, pending = sender.lifecycle_snapshot()
         _require(not pending, _LAUNCH_UNKNOWN)
         _require(state in ("OWNED", "ABSENT") and provenance[5] == desktop,
                  "CHROME_OBSERVATION_CHANGED")
-        _require(_observe_only_config(config_path, repository_root, owner, stop.is_set)[1] == pin,
+        _require(_observe_only_config(config_path, repository_root, owner, stop.is_set, protected=protected)[1] == pin,
                  "LOCAL_CONFIG_CHANGED")
         _require(chrome_acquisition._enrollment_operator(attended=False, protocol_only=True) == owner
                  and _supervised_desktop(owner[1], owner[2]) == desktop and not stop.is_set(),
@@ -4128,10 +4236,14 @@ def _observe_only_supervisor(config_path: Path | None, repository_root: Path, *,
 
     def tick() -> Result:
         result = _registered_result(observe)
-        if publish is not None and result.code in _SUPERVISOR_DESKTOP_HOLDS:
-            # Invalidate stale health on a missing or changed owner logon.
-            publish(result.code)
-            return result
+        if publish is not None:
+            if result.code in _SUPERVISOR_DESKTOP_HOLDS | _SUPERVISOR_CHROME_HOLDS:
+                # Replace stale positive health while waiting for a fresh observation.
+                publish(result.code)
+                return result
+            if result.code == _LAUNCH_UNKNOWN:
+                clear_health()
+                return result
         _require(isinstance(result, SupervisorTickResult), result.code)
         return result
 
@@ -4158,8 +4270,14 @@ def run_supervisor(config_path: Path | None, repository_root: Path, *, dry_run: 
     stop = StopEvent()
     if _deployment is not None:
         try:
-            raw = _read_owned_json(config_path, repository_root)
-            observe_only = not any(kind in raw.get("ui_delivery", {}) for kind in _STANDING_SOURCES)
+            owner = chrome_acquisition._enrollment_operator(attended=False, protocol_only=True)
+            _require((owner[1], owner[2]) == (_deployment["session"], _deployment["sid"]),
+                     "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+            chrome, pin = _observe_only_config(config_path, repository_root, owner, stop.is_set, protected=True)
+            _require(pin == _deployment["config_digest"], "LOCAL_CONFIG_CHANGED")
+            observe_only = not isinstance(chrome, _SupervisorChrome)
+        except RuntimeHold as exc:
+            return Result("HOLD", _safe_code(exc, "LOCAL_CONFIG_INVALID"), "SOURCE_ONLY")
         except (OSError, ValueError, TypeError, PrivateStateError, HandoffBlocked):
             return Result("HOLD", "LOCAL_CONFIG_INVALID", "SOURCE_ONLY")
     if observe_only:
@@ -4183,11 +4301,10 @@ def run_supervisor(config_path: Path | None, repository_root: Path, *, dry_run: 
             _require((owner[1], owner[2]) == (_deployment["session"], _deployment["sid"])
                      and _supervised_desktop(owner[1], owner[2]) == _deployment["desktop"],
                      "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
-            chrome_context, pin = _observe_only_config(config_path, repository_root, owner, stop.is_set)
-            runtime = chrome_context.runtime
-            _require(pin == _deployment["config_digest"]
-                     and any(kind in runtime.raw.get("ui_delivery", {}) for kind in _STANDING_SOURCES),
+            chrome_context, pin = _observe_only_config(config_path, repository_root, owner, stop.is_set, protected=True)
+            _require(isinstance(chrome_context, _SupervisorChrome) and pin == _deployment["config_digest"],
                      "LOCAL_CONFIG_CHANGED")
+            runtime = chrome_context.runtime
 
         def chrome_tick() -> Result:
             nonlocal chrome_context

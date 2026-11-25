@@ -3245,9 +3245,11 @@ class PersonalCdp9444ConfigRegistryTests(unittest.TestCase):
         for code, status in (
             ("SUPERVISOR_STARTED_HEALTH_OBSERVED", "OBSERVED"),
             ("SUPERVISOR_REUSED_HEALTH_OBSERVED", "OBSERVED"),
+            ("SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED", "OBSERVED"),
             ("SUPERVISOR_START_UNKNOWN", "HOLD"),
             ("SUPERVISOR_TASK_CONFLICT", "HOLD"),
             ("SUPERVISOR_START_NOT_ATTEMPTED", "HOLD"),
+            ("CDP_PROTOCOL_UNAVAILABLE", "HOLD"),
             ("LOCAL_CONFIG_REQUIRED", "HOLD"),
             ("LOCAL_CONFIG_STALE", "HOLD"),
             ("LOCAL_CONFIG_AMBIGUOUS", "HOLD"),
@@ -3261,7 +3263,7 @@ class PersonalCdp9444ConfigRegistryTests(unittest.TestCase):
                 "arbitrary_shell_enabled": False, "exact_chat_verified": False, "wake_sent": False,
             }
             self.assertEqual(native, expected)
-            local_evidence = {"chrome_health": "PRIVATE", "effect_state": "PRIVATE", "pid": 123,
+            local_evidence = {"chrome_health": "PRIVATE", "effect_state": "PRIVATE", "pid": 123, "mode": "PRIVATE",
                               "config": {"private_token": "PRIVATE"}, "source_digest": "PRIVATE"}
             cases.append({"name": code, "body": encode({**native, **local_evidence}),
                           "request": supervisor_request, "expected": expected})
@@ -3487,6 +3489,58 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.assertEqual(json.loads(self.values["Run"])["config"], str(self.config))
         self.assertEqual({call.args[0] for call in self.config_read.call_args_list}, {self.config})
         self.assertEqual(self.modes.count("start"), 1)
+
+    def test_bootstrap_starts_and_reuses_one_health_only_task(self):
+        self.env.pop("AI_COMMERCE_WAKEHUB_CONFIG")
+        self.config = self.owner[0] / "AI-Commerce" / "WakeHub" / "runtime-config.json"
+        chrome_config = self.config.parent.parent / "D5-Isolated-9444-Trial" / "config.json"
+
+        def create(root, owner):
+            self.assertEqual((root, owner), (self.workspace, self.owner))
+            self.config.parent.mkdir(parents=True)
+            self.config.write_text(json.dumps({
+                "schema": self.runtime._CHROME_HEALTH_SCHEMA, "chrome_config": str(chrome_config),
+            }), encoding="utf-8")
+
+        def read_config(path, root):
+            self.assertEqual((path, root), (self.config, self.workspace))
+            return json.loads(path.read_text(encoding="utf-8"))
+
+        def start(nonce):
+            self.state = self.instance
+            self.publish_health(nonce=nonce, mode=self.runtime._CHROME_HEALTH_ONLY, health="CDP_PROTOCOL_UNAVAILABLE")
+            return self.instance
+
+        bootstrap = self.mock(self.runtime, "_bootstrap_supervisor_config", side_effect=create)
+        self.mock(self.runtime, "_read_owned_json", side_effect=read_config)
+        self.launch.side_effect = start
+        held = self.dispatch()
+        self.assertEqual((held["status"], held["code"]), ("HOLD", "CDP_PROTOCOL_UNAVAILABLE"))
+        self.assertIsNone(self.values["StartPending"])
+        nonce = json.loads(self.values["Run"])["nonce"]
+        self.publish_health(nonce=nonce, mode=self.runtime._CHROME_HEALTH_ONLY)
+        receipt = self.dispatch()
+        self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED"))
+        self.assertFalse(receipt["wake_sent"])
+        self.assertFalse(receipt["exact_chat_verified"])
+        self.assertEqual(self.dispatch(), receipt)
+        bootstrap.assert_called_once()
+        self.assertEqual(self.modes.count("install"), 1)
+        self.assertEqual(self.modes.count("start"), 1)
+
+        # A completed config has a new pin. Wait for the old instance to release
+        # the receiver, then start the same task without reinstalling it.
+        self.config_pin = "f" * 64
+        self.config_read.return_value = (None, self.config_pin)
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_ACTIVE_UNVERIFIED")
+        self.assertEqual(self.modes.count("start"), 1)
+        self.active.return_value = False
+        self.state = "READY"
+        self.instance = "baada257-28df-48ab-8af9-c61e1d86d41a"
+        self.launch.side_effect = self.start_healthy
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_STARTED_HEALTH_OBSERVED")
+        self.assertEqual(self.modes.count("install"), 1)
+        self.assertEqual(self.modes.count("start"), 2)
 
     def test_selected_config_drift_after_task_inspection_holds_before_start(self):
         self.state = "READY"
