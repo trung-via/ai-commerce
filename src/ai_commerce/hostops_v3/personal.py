@@ -947,9 +947,14 @@ def _probe_protected_clean_runtime(event=None, *, forensic=False):
 
 _SUPERVISOR_OBSERVED = frozenset({
     "SUPERVISOR_STARTED_HEALTH_OBSERVED", "SUPERVISOR_REUSED_HEALTH_OBSERVED",
+    "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED",
 })
 _SUPERVISOR_DESKTOP_HOLDS = frozenset({
     "WINDOWS_INTERACTIVE_REQUIRED", "CHROME_INTERACTIVE_SESSION_CONFLICT",
+})
+_SUPERVISOR_CHROME_HOLDS = frozenset({
+    "CDP_PROTOCOL_UNAVAILABLE", "PROFILE_LOCK_HOLD", "ENROLLMENT_PROFILE_LOCK_UNPROVEN",
+    "PROFILE_ALREADY_ACTIVE_NO_CDP", "WINDOWS_PROBE_INVALID",
 })
 _SUPERVISOR_HOLDS = frozenset({
     "PROTECTED_HOSTOPS_ONLY", "SOURCE_CUSTODY_UNVERIFIED", "WINDOWS_OWNER_CONTEXT_UNVERIFIED",
@@ -957,7 +962,7 @@ _SUPERVISOR_HOLDS = frozenset({
     "LOCAL_CONFIG_STALE", "LOCAL_CONFIG_AMBIGUOUS", "LOCAL_CONFIG_USER_ENV_UNAVAILABLE",
     "LOCAL_CONFIG_CHANGED", "SUPERVISOR_RUNTIME_UNAVAILABLE", "SUPERVISOR_ACTIVE_UNVERIFIED",
     "SUPERVISOR_START_UNKNOWN", "SUPERVISOR_TASK_CONFLICT", "SUPERVISOR_START_NOT_ATTEMPTED",
-}) | _SUPERVISOR_DESKTOP_HOLDS
+}) | _SUPERVISOR_DESKTOP_HOLDS | _SUPERVISOR_CHROME_HOLDS
 
 _SUPERVISOR_TASK_SCRIPT = r"""
 $sid = $env:AI_COMMERCE_SUPERVISOR_SID
@@ -1144,15 +1149,18 @@ def _read_supervisor_health(runtime, expected, executable, owner):
         return None
     try:
         value = json.loads(raw, object_pairs_hook=_object_unique)
-        if (type(value) is not dict or set(value) != expected.keys() | {
-                "pid", "created", "observed_ns", "health"}
+        required = expected.keys() | {"pid", "created", "observed_ns", "health"}
+        if (type(value) is not dict or not required <= value.keys() <= required | {"mode"}
+                or ("mode" in value and value["mode"] != runtime._CHROME_HEALTH_ONLY)
                 or any(value[key] != pin for key, pin in expected.items())
                 or type(value["session"]) is not int
                 or type(value["pid"]) is not int or not 0 < value["pid"] < 2**32
                 or type(value["created"]) is not int or value["created"] <= 0
                 or type(value["observed_ns"]) is not int
                 or not 0 <= runtime.monotonic_ns() - value["observed_ns"] <= runtime._SUPERVISOR_HEALTH_MAX_AGE_NS
-                or value["health"] not in runtime._OBSERVED_CHROME_HEALTH | _SUPERVISOR_DESKTOP_HOLDS):
+                or value["health"] not in (
+                    runtime._OBSERVED_CHROME_HEALTH | _SUPERVISOR_DESKTOP_HOLDS
+                    | (_SUPERVISOR_CHROME_HOLDS if "mode" in value else frozenset()))):
             return None
         if (runtime._supervisor_process(value["pid"], executable, owner) == value["created"]
                 and runtime._supervisor_active() and runtime._supervisor_deployment_value("Health") == raw):
@@ -1201,15 +1209,6 @@ def _deploy_protected_supervisor(event):
         failure = "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
         owner, desktop = read_owner()
         failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
-        try:
-            config, config_pin = runtime._resolve_runtime_config(root, owner=owner, observe_only=True)
-        except runtime.RuntimeHold as exc:
-            failure = str(exc)
-            raise
-        expected = {"source_sha": sha, "source_digest": source, "config_digest": config_pin,
-                    "desktop": desktop, "session": owner[1]}
-        intent_pins = {**expected, "sid": owner[2], "config": str(config)}
-        failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
         # Use the installed GUI-subsystem interpreter rather than a venv redirector.
         executable = Path(sys._base_executable).with_name("pythonw.exe")
         dependencies = Path(sys.prefix) / "Lib" / "site-packages"
@@ -1223,6 +1222,9 @@ def _deploy_protected_supervisor(event):
             str(root), str(dependencies), "$(Arg0)",
         ])
 
+        def resolve_config():
+            return runtime._resolve_runtime_config(root, owner=owner, observe_only=True, protected=True)
+
         def recheck(*, check_source=False):
             nonlocal failure
             if check_source:
@@ -1233,7 +1235,7 @@ def _deploy_protected_supervisor(event):
             if read_owner() != (owner, desktop):
                 deny(failure)
             failure = "LOCAL_CONFIG_CHANGED"
-            if runtime._resolve_runtime_config(root, owner=owner, observe_only=True) != (config, config_pin):
+            if resolve_config() != (config, config_pin):
                 deny(failure)
 
         def task(**kwargs):
@@ -1248,32 +1250,57 @@ def _deploy_protected_supervisor(event):
             proof = _read_supervisor_health(runtime, proof_pins, executable, owner)
             if proof is None or task() != instance:
                 return None
-            if proof["health"] in runtime._OBSERVED_CHROME_HEALTH:
+            if proof["health"] not in _SUPERVISOR_DESKTOP_HOLDS:
                 proof_failure = failure
                 recheck()
                 failure = proof_failure
             current = _read_supervisor_health(runtime, proof_pins, executable, owner)
-            if current is not None and all(current[key] == proof[key] for key in ("pid", "created", "health")):
+            if current is not None and all(current.get(key) == proof.get(key)
+                                           for key in ("pid", "created", "health", "mode")):
                 if task() == instance:
-                    return current["health"]
+                    return current
             return None
 
         def finish(intent, instance, pending):
             if runtime._supervisor_deployment_value("StartPending") != pending:
                 return "SUPERVISOR_START_UNKNOWN"
             proven = confirmed_health(intent, instance)
-            if proven in _SUPERVISOR_DESKTOP_HOLDS:
-                return proven
             if proven is None:
                 return None
+            if proven["health"] in _SUPERVISOR_DESKTOP_HOLDS:
+                return proven["health"]
             if pending is not None:
+                # A pinned, live instance proves RunEx even when Chrome has a read fault.
                 runtime._store_supervisor_deployment_value("Run", json.dumps({**intent, "instance": instance}))
                 runtime._store_supervisor_deployment_value("StartPending", None)
+            if proven["health"] in _SUPERVISOR_CHROME_HOLDS:
+                return proven["health"]
+            if proven.get("mode") == runtime._CHROME_HEALTH_ONLY:
+                return "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED"
+            if pending is not None:
                 return "SUPERVISOR_STARTED_HEALTH_OBSERVED"
             return "SUPERVISOR_REUSED_HEALTH_OBSERVED"
 
         with runtime._supervisor_slot(runtime._SUPERVISOR_DEPLOY_MUTEX):
             pending = runtime._supervisor_deployment_value("StartPending")
+            try:
+                try:
+                    config, config_pin = resolve_config()
+                except runtime.RuntimeHold as exc:
+                    if str(exc) != "LOCAL_CONFIG_REQUIRED" or rerun or pending is not None:
+                        raise
+                    if runtime._supervisor_active():
+                        deny("SUPERVISOR_ACTIVE_UNVERIFIED")
+                    if read_owner() != (owner, desktop):
+                        deny("WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+                    runtime._bootstrap_supervisor_config(root, owner)
+                    config, config_pin = resolve_config()
+            except (runtime.RuntimeHold, Denied) as exc:
+                failure = "SUPERVISOR_START_UNKNOWN" if pending is not None else str(exc)
+                raise
+            expected = {"source_sha": sha, "source_digest": source, "config_digest": config_pin,
+                        "desktop": desktop, "session": owner[1]}
+            intent_pins = {**expected, "sid": owner[2], "config": str(config)}
             if pending is not None:
                 failure = "SUPERVISOR_START_UNKNOWN"
             state = task()

@@ -1494,6 +1494,18 @@ def _read_9444_config(config: Path, local: Path, checkout: Path, sid: str) -> Ch
     return env
 
 
+def _supervisor_9444_environment(local: Path, checkout: Path, sid: str) -> ChromeEnvironment | None:
+    """Adopt a sole registered Chrome config for health reads without changing it."""
+    registry = _config_9444_registry(local, checkout)
+    if not registry.present:
+        return None
+    if len(registry.present) != 1:
+        raise _EnrollmentHold("LOCAL_CONFIG_AMBIGUOUS")
+    env = _read_9444_config(registry.present[0], local, checkout, sid)
+    _require_operator_control(env)
+    return env
+
+
 def _logon_environment(local: Path, checkout: Path, sid: str) -> ChromeEnvironment | None:
     """Read only canonical enrollment using the shared six-name registry.
 

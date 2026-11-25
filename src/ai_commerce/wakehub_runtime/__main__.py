@@ -52,7 +52,8 @@ def main(argv: list[str] | None = None) -> int:
                             help="Maximum retry delay per source and for Chrome demand-start (default 300).")
     supervisor.add_argument("--dry-run", action="store_true", help="Report wiring without acquiring the receiver.")
     supervisor.add_argument("--observe-only", action="store_true",
-                            help="Read Chrome health from the owner session using an existing private config. "
+                            help="Read Chrome health from the owner session using an existing runtime config "
+                                 "or the private Chrome health config created by protected deployment. "
                                  "Stops on config drift and disables source admission, preload, demand start and Send.")
     run = sub.add_parser("run", help="Verify one registered event and read-only readiness; exits HOLD.")
     mode = run.add_mutually_exclusive_group()
@@ -69,12 +70,17 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--target-index", type=int,
                      help="Select a zero-based entry in the private registered_targets list (default 0).")
     registration = sub.add_parser(
-        "register", help="Enroll exact Chat A from a local Windows owner terminal.",
-        description="Set chat_preload to false or true in the private config. A registration-only config "
-                    "can omit event targets. Open the configured Chat A "
+        "register", help="Enroll the owner's exact chat from a local Windows owner terminal.",
+        description="For an initial Chrome-health-only install, prepare a private WakeHubRuntimeR1.v1 draft "
+                    "and pass it explicitly with --config. Use the existing Chrome config, the owner-selected "
+                    "exact route and its private journal. Set chat_preload explicitly. A registration-only "
+                    "config can omit event targets. Open the configured chat "
                     "in the dedicated Chrome profile, prepare a private marker, manually post it as a USER "
-                    "turn there, then observe using its registration ID before the preparation expires. "
-                    "The consumed registration remains bound to that exact chat until owner or route drift.")
+                    "turn there, then observe using its registration ID before preparation expires. "
+                    "Reuse an existing enrolled journal for that exact route if present. After enrolling "
+                    "and configuring standing consent for the verified account, atomically install the completed draft "
+                    "at the canonical WakeHub/runtime-config.json. The health-only instance exits on pin change. "
+                    "Once it exits, approve a fresh deploy_wakehub_supervisor to use the same task.")
     actions = registration.add_subparsers(dest="action", required=True)
     prepare = actions.add_parser("prepare", help="Print a fresh private marker for manual presentation.")
     observe = actions.add_parser("observe", help="Verify and consume that marker in the exact Chat A.")
@@ -82,8 +88,8 @@ def main(argv: list[str] | None = None) -> int:
     for command in (run, supervisor, prepare, observe):
         command.add_argument("--repository-root", type=Path, help="Checkout excluded from private journal storage.")
         command.add_argument("--config", type=Path,
-                             help="Existing private WakeHubRuntimeR1.v1 config with the owner's source registration "
-                                  "and, for supervise, the enrolled Chrome 9444 config. Defaults to the local process "
+                             help="Existing private WakeHubRuntimeR1.v1 config, or WakeHubChromeHealth.v1 "
+                                  "for supervise --observe-only. Defaults to the local process "
                                   "or Windows User setting AI_COMMERCE_WAKEHUB_CONFIG, then the WakeHub directories "
                                   "under the owner's LOCALAPPDATA/AI-Commerce.")
     args = parser.parse_args(argv)

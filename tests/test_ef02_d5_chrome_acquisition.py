@@ -1997,6 +1997,37 @@ def test_l1a_registry_is_finite_and_legacy_duplicates_hold(monkeypatch, tmp_path
     assert events == []
 
 
+@pytest.mark.parametrize(("fault", "code"), [
+    (None, None),
+    ("duplicate", "LOCAL_CONFIG_AMBIGUOUS"),
+    ("wrong_port", "CONFIG_UNTRUSTED"),
+    ("invalid", "CONFIG_INVALID"),
+    ("foreign_owner", "CONFIG_UNTRUSTED"),
+])
+def test_supervisor_adopts_only_a_valid_sole_d5_config(monkeypatch, tmp_path, fault, code):
+    env, repo, home, _, events = logon_fixture(monkeypatch, tmp_path, allow_launch=True)
+    d5 = home / "AI-Commerce" / "D5-Isolated-9444-Trial" / "config.json"
+    d5.parent.mkdir()
+    if fault == "duplicate":
+        d5.write_bytes(env.config_path.read_bytes())
+    else:
+        env.config_path.rename(d5)
+    if fault == "wrong_port":
+        value = json.loads(d5.read_bytes())
+        value["cdp_endpoint"] = "http://127.0.0.1:9333"
+        d5.write_text(json.dumps(value), encoding="utf-8")
+    elif fault == "invalid":
+        d5.write_text("{}", encoding="utf-8")
+    sid = "S-1-5-21-11-22-33-1002" if fault == "foreign_owner" else _OPERATOR_SID
+    before = d5.read_bytes()
+    if code is None:
+        assert ca._supervisor_9444_environment(home, repo, sid) == ca.replace(env, config_path=d5)
+    else:
+        with pytest.raises((ca._EnrollmentHold, ca.AcquisitionBlocked), match=f"^{code}$"):
+            ca._supervisor_9444_environment(home, repo, sid)
+    assert d5.read_bytes() == before and events == []
+
+
 @pytest.mark.parametrize("running,listener,cdp_ok,state,code", [
     (False, False, False, "OFF_CLEAN_ENROLLED", "PROCESS_AND_LOCK_ABSENT"),
     (True, False, False, "RUNNING_CDP_FAULT", "CDP_LISTENER_MISSING"),
