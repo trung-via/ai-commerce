@@ -953,6 +953,7 @@ _SUPERVISOR_HOLDS = frozenset({
     "LOCAL_CONFIG_STALE", "LOCAL_CONFIG_AMBIGUOUS", "LOCAL_CONFIG_USER_ENV_UNAVAILABLE",
     "LOCAL_CONFIG_CHANGED", "SUPERVISOR_RUNTIME_UNAVAILABLE", "SUPERVISOR_ACTIVE_UNVERIFIED",
     "SUPERVISOR_START_UNKNOWN", "SUPERVISOR_TASK_CONFLICT", "SUPERVISOR_START_NOT_ATTEMPTED",
+    "SUPERVISOR_TASK_INSTALLED_WAIT_SESSION",
 }) | _SUPERVISOR_DESKTOP_HOLDS
 
 _SUPERVISOR_TASK_SCRIPT = r"""
@@ -1179,27 +1180,34 @@ def _deploy_protected_supervisor(event):
             deny(failure)
         source = _persistent_clean_source(acquisition, sha, pin_runtime=True)
         root = ROOTS["workspace"]
+        health_not_before = 0
 
         def read_owner():
-            nonlocal failure
+            nonlocal failure, health_not_before
             try:
-                return runtime._supervisor_owner_session()
+                snapshot = runtime._supervisor_owner_session()
             except runtime.RuntimeHold as exc:
                 code = str(exc)
                 if code in _SUPERVISOR_DESKTOP_HOLDS:
                     failure = code
                 raise
+            # A quick unlock can precede the child's next health tick.
+            if not snapshot[2]:
+                health_not_before = runtime.monotonic_ns()
+            return snapshot
 
         failure = "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
-        owner, desktop = read_owner()
+        owner, logon_pin, _ = read_owner()
         failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
         try:
             config, config_pin = runtime._resolve_runtime_config(root, owner=owner, observe_only=True)
         except runtime.RuntimeHold as exc:
             failure = str(exc)
             raise
+        # The existing desktop pin is a logon digest. The child still attests
+        # the actual unlocked input desktop before publishing healthy proof.
         expected = {"source_sha": sha, "source_digest": source, "config_digest": config_pin,
-                    "desktop": desktop, "session": owner[1]}
+                    "desktop": logon_pin, "session": owner[1]}
         intent_pins = {**expected, "sid": owner[2], "config": str(config)}
         failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
         # Use the installed GUI-subsystem interpreter rather than a venv redirector.
@@ -1221,11 +1229,13 @@ def _deploy_protected_supervisor(event):
             if _persistent_clean_source(acquisition, sha, pin_runtime=True) != source:
                 deny(failure)
             failure = "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
-            if read_owner() != (owner, desktop):
+            current_owner, current_logon, unlocked = read_owner()
+            if (current_owner, current_logon) != (owner, logon_pin):
                 deny(failure)
             failure = "LOCAL_CONFIG_CHANGED"
             if runtime._resolve_runtime_config(root, owner=owner, observe_only=True) != (config, config_pin):
                 deny(failure)
+            return unlocked
 
         def task(**kwargs):
             return _supervisor_task(acquisition, executable, arguments, root, owner, **kwargs)
@@ -1239,12 +1249,15 @@ def _deploy_protected_supervisor(event):
             proof = _read_supervisor_health(runtime, proof_pins, executable, owner)
             if proof is None or task() != instance:
                 return None
-            if proof["health"] in runtime._OBSERVED_CHROME_HEALTH:
-                proof_failure = failure
-                recheck()
-                failure = proof_failure
+            proof_failure = failure
+            unlocked = recheck()
+            failure = proof_failure
+            if proof["health"] in runtime._OBSERVED_CHROME_HEALTH and not unlocked:
+                return None
             current = _read_supervisor_health(runtime, proof_pins, executable, owner)
             if current is not None and all(current[key] == proof[key] for key in ("pid", "created", "health")):
+                if current["health"] in runtime._OBSERVED_CHROME_HEALTH and current["observed_ns"] < health_not_before:
+                    return None
                 if task() == instance:
                     return current["health"]
             return None
@@ -1294,6 +1307,8 @@ def _deploy_protected_supervisor(event):
             if state != "READY" or runtime._supervisor_active():
                 return _supervisor_receipt("SUPERVISOR_ACTIVE_UNVERIFIED", issue_number, sha)
             recheck()
+            if logon_pin is None:
+                return _supervisor_receipt("SUPERVISOR_TASK_INSTALLED_WAIT_SESSION", issue_number, sha)
             failure = "SUPERVISOR_START_UNKNOWN"
             intent = {**intent_pins, "nonce": secrets.token_hex(16)}
             pending = json.dumps(intent)

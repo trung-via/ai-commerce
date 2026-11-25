@@ -2616,7 +2616,7 @@ class FixtureStop:
         return self.stopped
 
 
-@pytest.mark.parametrize("desktop_state", ["unlocked", "wts_locked", "secure_input_desktop"])
+@pytest.mark.parametrize("desktop_state", ["unlocked", "wts_locked", "wts_disconnected", "secure_input_desktop"])
 def test_protected_desktop_logon_attests_windows_wts_under_actions(monkeypatch, desktop_state):
     import ctypes
     from ctypes import wintypes as w
@@ -2639,10 +2639,12 @@ def test_protected_desktop_logon_attests_windows_wts_under_actions(monkeypatch, 
         _fields_ = [("level", w.DWORD), ("data", SessionData)]
 
     session, sid = 7, "S-1-5-21-101-202-303-1001"
-    rows = (SessionRow * 1)(SessionRow(session, "Console", 0))
+    session_state = 4 if desktop_state == "wts_disconnected" else 0
+    rows = (SessionRow * 1)(SessionRow(session, "Console", session_state))
     info = SessionInfoEx(level=1)
     info.data.session_id = session
-    info.data.flags = 0 if desktop_state == "wts_locked" else 1
+    info.data.state = session_state
+    info.data.flags = 0 if desktop_state in {"wts_locked", "wts_disconnected"} else 1
     info.data.username, info.data.domain = "FixtureOwner", "FixtureHost"
     info.data.times[0], info.data.times[4] = 1234, 2000
     active = w.DWORD(0)
@@ -2693,6 +2695,11 @@ def test_protected_desktop_logon_attests_windows_wts_under_actions(monkeypatch, 
     load.assert_not_called()
     if desktop_state == "unlocked":
         assert r._desktop_logon(session, sid) == digest([session, 1234])
+    elif desktop_state == "wts_disconnected":
+        with pytest.raises(r.RuntimeHold, match="^CHROME_INTERACTIVE_SESSION_CONFLICT$"):
+            r._desktop_logon(session, sid)
+        user.OpenInputDesktop.assert_not_called()
+        assert wts.WTSFreeMemory.call_count == 1
     else:
         with pytest.raises(r.RuntimeHold, match="^WINDOWS_INTERACTIVE_REQUIRED$"):
             r._desktop_logon(session, sid)
@@ -2700,7 +2707,7 @@ def test_protected_desktop_logon_attests_windows_wts_under_actions(monkeypatch, 
     if desktop_state == "wts_locked":
         user.OpenInputDesktop.assert_not_called()
         assert wts.WTSFreeMemory.call_count == 2
-    else:
+    elif desktop_state != "wts_disconnected":
         user.OpenInputDesktop.assert_called_once_with(0, False, 1)
         user.CloseDesktop.assert_called_once_with(3)
         assert wts.WTSFreeMemory.call_count == 3
@@ -2711,12 +2718,62 @@ def test_protected_desktop_logon_attests_windows_wts_under_actions(monkeypatch, 
     monkeypatch.setattr(security, "windows_identity", lambda: (sid, False))
     monkeypatch.setattr(r.chrome_acquisition, "_native_local_app_data", lambda: native_local)
     user.OpenInputDesktop.reset_mock()
-    if desktop_state == "wts_locked":
-        with pytest.raises(r.RuntimeHold, match="^WINDOWS_INTERACTIVE_REQUIRED$"):
-            r._supervisor_owner_session()
-    else:
-        assert r._supervisor_owner_session() == ((native_local, session, sid), digest([session, 1234]))
+    assert r._supervisor_owner_session() == (
+        (native_local, session, sid), digest([session, 1234]),
+        desktop_state in {"unlocked", "secure_input_desktop"},
+    )
+    info.data.flags = -1  # Unknown lock flag leaves the logon identity intact.
+    assert r._supervisor_owner_session() == ((native_local, session, sid), digest([session, 1234]), False)
+    info.data.username = info.data.domain = ""
+    info.data.times[0] = 0
+    assert r._supervisor_owner_session() == ((native_local, 0, sid), None, False)
+    wts.WTSQuerySessionInformationW = Mock(return_value=False)
+    with pytest.raises(r.RuntimeHold, match="^WINDOWS_INTERACTIVE_REQUIRED$"):
+        r._supervisor_owner_session()
     user.OpenInputDesktop.assert_not_called()
+
+
+def test_supervisor_owner_session_requires_verified_owner_and_unambiguous_logon(monkeypatch):
+    import ctypes
+
+    from ai_commerce.hostops_v3 import security
+
+    sid = "S-1-5-21-101-202-303-1001"
+    local = r.Path.cwd()
+    monkeypatch.setattr(r, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(r.chrome_acquisition, "_native_local_app_data", lambda: local)
+    token = (sid, False)
+    monkeypatch.setattr(security, "windows_identity", lambda: token)
+
+    def user_name(format_id, output, size):
+        output.value = r"FixtureHost\FixtureOwner"
+        return True
+
+    def load(name, *, use_last_error):
+        assert name == "secur32"
+        return SimpleNamespace(GetUserNameExW=user_name)
+
+    monkeypatch.setattr(ctypes, "WinDLL", load, raising=False)
+    sessions = [(0, 4), (65536, 6), (7, 1)]
+    logons = {7: None}
+    monkeypatch.setattr(r, "_wts_sessions", lambda: sessions)
+    monkeypatch.setattr(r, "_wts_logon", logons.__getitem__)
+
+    assert r._supervisor_owner_session() == ((local, 0, sid), None, False)
+    for token in ((sid, True), ("S-1-5-18", False), ("S-1-5-80-1-2-3-4-5", False)):
+        with pytest.raises(r.RuntimeHold, match="^WINDOWS_OWNER_CONTEXT_UNVERIFIED$"):
+            r._supervisor_owner_session()
+
+    token = (sid, False)
+    logons[7] = (r"FixtureHost\OtherOwner", digest([7, 1234]), False)
+    with pytest.raises(r.RuntimeHold, match="^WINDOWS_OWNER_CONTEXT_UNVERIFIED$"):
+        r._supervisor_owner_session()
+
+    logons[7] = (r"FixtureHost\FixtureOwner", digest([7, 1234]), False)
+    sessions.append((8, 4))
+    logons[8] = (r"FixtureHost\FixtureOwner", digest([8, 1235]), False)
+    with pytest.raises(r.RuntimeHold, match="^CHROME_INTERACTIVE_SESSION_CONFLICT$"):
+        r._supervisor_owner_session()
 
 
 @pytest.mark.parametrize("key", ["TF_BUILD", "BUILD_BUILDID", "AI_COMMERCE_GIT_GUARD_TEST"])
@@ -3015,7 +3072,8 @@ def test_observe_only_emits_private_source_bound_health_under_slot(observe_only,
     assert writes == [] and s.slot.pending and not s.path.exists()
 
 
-def test_scheduled_observe_only_waits_for_its_unlocked_desktop(observe_only, monkeypatch):
+@pytest.mark.parametrize("hold_at_operator", [False, True])
+def test_scheduled_observe_only_waits_for_its_unlocked_desktop(observe_only, monkeypatch, hold_at_operator):
     s = observe_only
     session, sid = s.owner()[1:]
     desktop = r._supervised_desktop(session, sid)
@@ -3031,6 +3089,12 @@ def test_scheduled_observe_only_waits_for_its_unlocked_desktop(observe_only, mon
             raise r.RuntimeHold("WINDOWS_INTERACTIVE_REQUIRED")
         return desktop
 
+    def operator(*, attended):
+        assert not attended
+        if hold_at_operator and not unlocked:
+            raise r.chrome_acquisition.AcquisitionBlocked("WINDOWS_INTERACTIVE_REQUIRED")
+        return s.owner()
+
     def store(name, raw):
         assert s.slot.active and name == "Health"
         state[name] = raw
@@ -3040,8 +3104,10 @@ def test_scheduled_observe_only_waits_for_its_unlocked_desktop(observe_only, mon
     def unlock(_):
         nonlocal unlocked
         assert reports == ["WINDOWS_INTERACTIVE_REQUIRED"]
+        assert s.run(observe_only=True, _deployment=deployment).code == "SUPERVISOR_ACTIVE"
         unlocked = True
 
+    monkeypatch.setattr(r.chrome_acquisition, "_enrollment_operator", operator)
     monkeypatch.setattr(r, "_supervised_desktop", desktop_check)
     monkeypatch.setattr(r, "_supervisor_process", lambda pid, exe, owner: 123456)
     monkeypatch.setattr(r, "_supervisor_deployment_value", state.get)
@@ -3051,6 +3117,7 @@ def test_scheduled_observe_only_waits_for_its_unlocked_desktop(observe_only, mon
     assert result.chrome_health == "CHROME_OWNED"
     assert reports == ["WINDOWS_INTERACTIVE_REQUIRED", "CHROME_OWNED"]
     assert state["Health"] is None
+    assert s.slot.slots == 1
     assert s.requests == [] and s.ticks == [] and not s.path.exists()
 
 

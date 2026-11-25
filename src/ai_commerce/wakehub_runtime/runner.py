@@ -660,14 +660,37 @@ def _supervised_desktop(session: int, sid: str) -> str:
     return _desktop_logon(session, sid)
 
 
-def _unlocked_logon(session: int | None = None) -> tuple[int, str, str]:
-    """Read the one unlocked WTS logon independently of the caller's desktop."""
+def _wts_sessions() -> list[tuple[int, int]]:
     _require(os.name == "nt", "WINDOWS_INTERACTIVE_REQUIRED")
     import ctypes
     from ctypes import wintypes as w
 
     class Session(ctypes.Structure):
         _fields_ = [("id", w.DWORD), ("station", w.LPWSTR), ("state", ctypes.c_int)]
+
+    wts = ctypes.WinDLL("wtsapi32", use_last_error=True)
+    free = wts.WTSFreeMemory
+    free.argtypes, free.restype = [ctypes.c_void_p], None
+    enumerate_sessions = wts.WTSEnumerateSessionsW
+    enumerate_sessions.argtypes = [
+        w.HANDLE, w.DWORD, w.DWORD, ctypes.POINTER(ctypes.POINTER(Session)), ctypes.POINTER(w.DWORD),
+    ]
+    enumerate_sessions.restype = w.BOOL
+    rows, count = ctypes.POINTER(Session)(), w.DWORD()
+    _require(enumerate_sessions(None, 0, 1, ctypes.byref(rows), ctypes.byref(count)),
+             "WINDOWS_INTERACTIVE_REQUIRED")
+    try:
+        _require(count.value <= 256 and (not count.value or bool(rows)), "WINDOWS_INTERACTIVE_REQUIRED")
+        return [(rows[i].id, rows[i].state) for i in range(count.value)]
+    finally:
+        if rows:
+            free(rows)
+
+
+def _wts_logon(session: int) -> tuple[str, str, bool] | None:
+    """Read logon identity and the WTS readiness hint independently."""
+    import ctypes
+    from ctypes import wintypes as w
 
     class SessionInfo(ctypes.Structure):
         _fields_ = [
@@ -684,25 +707,6 @@ def _unlocked_logon(session: int | None = None) -> tuple[int, str, str]:
     wts = ctypes.WinDLL("wtsapi32", use_last_error=True)
     free = wts.WTSFreeMemory
     free.argtypes, free.restype = [ctypes.c_void_p], None
-    enumerate_sessions = wts.WTSEnumerateSessionsW
-    enumerate_sessions.argtypes = [
-        w.HANDLE, w.DWORD, w.DWORD, ctypes.POINTER(ctypes.POINTER(Session)), ctypes.POINTER(w.DWORD),
-    ]
-    enumerate_sessions.restype = w.BOOL
-    rows, count = ctypes.POINTER(Session)(), w.DWORD()
-    _require(enumerate_sessions(None, 0, 1, ctypes.byref(rows), ctypes.byref(count)),
-             "WINDOWS_INTERACTIVE_REQUIRED")
-    try:
-        _require(bool(rows) and 0 < count.value <= 256, "WINDOWS_INTERACTIVE_REQUIRED")
-        active = [rows[i].id for i in range(count.value) if rows[i].state == 0]  # WTSActive
-        _require(bool(active) or session is not None, "WINDOWS_INTERACTIVE_REQUIRED")
-        _require(len(active) == 1 and (session is None or active[0] == session),
-                 "CHROME_INTERACTIVE_SESSION_CONFLICT")
-        session = active[0]
-        _require(session > 0, "WINDOWS_INTERACTIVE_REQUIRED")
-    finally:
-        free(rows)
-
     query = wts.WTSQuerySessionInformationW
     query.argtypes = [w.HANDLE, w.DWORD, ctypes.c_int,
                       ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(w.DWORD)]
@@ -715,17 +719,27 @@ def _unlocked_logon(session: int | None = None) -> tuple[int, str, str]:
                  "WINDOWS_INTERACTIVE_REQUIRED")
         info = SessionInfoEx.from_address(raw.value)
         data = info.data
-        _require(info.level == 1 and data.id == session and data.state == 0 and data.flags == 1
-                 and data.user and data.domain and 0 < data.logon <= data.current,
+        _require(info.level == 1 and data.id == session and 0 <= data.state <= 9 and data.state != 6,
                  "WINDOWS_INTERACTIVE_REQUIRED")
-        return session, data.domain + "\\" + data.user, digest([session, data.logon])
+        if not data.user and not data.domain and data.logon == 0:
+            return None
+        _require(data.user and data.domain and 0 < data.logon <= data.current,
+                 "WINDOWS_INTERACTIVE_REQUIRED")
+        return data.domain + "\\" + data.user, digest([session, data.logon]), data.state == 0 and data.flags == 1
     finally:
         free(raw)
 
 
 def _desktop_logon(session: int, sid: str) -> str:
     """Pin the unlocked logon and attest this process's real Windows desktop."""
-    _, name, desktop = _unlocked_logon(session)
+    sessions = _wts_sessions()
+    _require(bool(sessions), "WINDOWS_INTERACTIVE_REQUIRED")
+    _require([session_id for session_id, state in sessions if state == 0] == [session],
+             "CHROME_INTERACTIVE_SESSION_CONFLICT")
+    _require(session > 0, "WINDOWS_INTERACTIVE_REQUIRED")
+    logon = _wts_logon(session)
+    _require(logon is not None and logon[2], "WINDOWS_INTERACTIVE_REQUIRED")
+    name, desktop, _ = logon
     from ai_commerce.wakehub.native_authority import _attest_desktop_identity
 
     try:
@@ -3358,18 +3372,26 @@ _SUPERVISOR_DESKTOP_HOLDS = frozenset({
 })
 
 
-def _supervisor_owner_session() -> tuple[tuple[Path, int, str], str]:
-    """Bind the HostOps owner token and profile to the unlocked Windows logon."""
+def _supervisor_owner_session() -> tuple[tuple[Path, int, str], str | None, bool]:
+    """Verify the owner profile and any sole logon, without desktop access."""
     import ctypes as c
     from ctypes import wintypes as w
 
     from ai_commerce.hostops_v3.security import windows_identity
 
+    _require(os.name == "nt", "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
     sid, elevated = windows_identity()
-    _require(not elevated and re.fullmatch(r"S-1-(?:\d+-){1,14}\d+", sid)
-             and sid not in {"S-1-5-18", "S-1-5-19", "S-1-5-20"},
+    # Local/domain and Entra user SID families exclude system and virtual service principals.
+    _require(not elevated and re.fullmatch(r"S-1-(?:5-21|12-1)(?:-[0-9]{1,10}){4}", sid),
              "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
-    session, name, desktop = _unlocked_logon()
+    local = chrome_acquisition._native_local_app_data()
+    sessions = [(session, _wts_logon(session)) for session, state in _wts_sessions()
+                if session > 0 and state != 6]  # Exclude Session 0 and WTSListen.
+    logged_on = [(session, logon) for session, logon in sessions if logon is not None]
+    _require(len(logged_on) <= 1, "CHROME_INTERACTIVE_SESSION_CONFLICT")
+    if not logged_on:
+        return (local, 0, sid), None, False
+    session, (name, logon_pin, unlocked) = logged_on[0]
     secur = c.WinDLL("secur32", use_last_error=True)
     secur.GetUserNameExW.argtypes = [c.c_int, w.LPWSTR, c.POINTER(w.DWORD)]
     secur.GetUserNameExW.restype = w.BOOL
@@ -3377,7 +3399,7 @@ def _supervisor_owner_session() -> tuple[tuple[Path, int, str], str]:
     current_name = c.create_unicode_buffer(size.value)
     _require(secur.GetUserNameExW(2, current_name, c.byref(size))
              and current_name.value == name, "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
-    return (chrome_acquisition._native_local_app_data(), session, sid), desktop
+    return (local, session, sid), logon_pin, unlocked
 
 
 def _supervisor_active() -> bool:

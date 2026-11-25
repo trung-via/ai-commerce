@@ -3248,6 +3248,7 @@ class PersonalCdp9444ConfigRegistryTests(unittest.TestCase):
             ("SUPERVISOR_START_UNKNOWN", "HOLD"),
             ("SUPERVISOR_TASK_CONFLICT", "HOLD"),
             ("SUPERVISOR_START_NOT_ATTEMPTED", "HOLD"),
+            ("SUPERVISOR_TASK_INSTALLED_WAIT_SESSION", "HOLD"),
             ("LOCAL_CONFIG_REQUIRED", "HOLD"),
             ("LOCAL_CONFIG_STALE", "HOLD"),
             ("LOCAL_CONFIG_AMBIGUOUS", "HOLD"),
@@ -3351,6 +3352,7 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.instance = "8c7770e8-3c62-4163-9c9f-d75621d3ca52"
         self.nonce = "e" * 32
         self.state = "MISSING"
+        self.install_readback = "READY"
         self.modes = []
         clock = count()
         self.mock(hostops, "time", new=SimpleNamespace(monotonic=lambda: next(clock), sleep=Mock()))
@@ -3362,7 +3364,8 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.mock(hostops, "_persistent_clean_source", return_value=self.source)
         self.mock(acquisition, "_native_operator", side_effect=AssertionError("HostOps has no desktop"))
         self.desktop_read = self.mock(runner, "_desktop_logon", side_effect=AssertionError("HostOps has no desktop"))
-        self.owner_session = self.mock(runner, "_supervisor_owner_session", return_value=(self.owner, self.desktop))
+        self.session_snapshot = (self.owner, self.desktop, True)
+        self.owner_session = self.mock(runner, "_supervisor_owner_session", return_value=self.session_snapshot)
         self.user_config = self.mock(runner, "_user_runtime_config", return_value=None)
         self.config_read = self.mock(runner, "_observe_only_config", return_value=(None, self.config_pin))
         self.active = self.mock(runner, "_supervisor_active", return_value=False)
@@ -3380,12 +3383,20 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         return self.stack.enter_context(patch.object(obj, name, **kwargs))
 
     def task_transport(self, argv, *, env, **kwargs):
-        self.assertIn("AI-Commerce-WakeHub-Supervisor", argv[-1])
-        self.assertIn("TASK_LOGON_INTERACTIVE_TOKEN", argv[-1])
-        self.assertIn("$task.RunEx($nonce, 12, $session, $sid)", argv[-1])
-        self.assertNotIn("AI-Commerce-WakeHub-9444-Clean", argv[-1])
+        script = argv[-1]
+        for fixed in (
+            "$name = 'AI-Commerce-WakeHub-Supervisor'", "$expected.Principal.UserId = $sid",
+            "$expected.Principal.LogonType = 3", "$expected.Principal.RunLevel = 0",
+            "$expected.Settings.MultipleInstances = 2", "$expected.Settings.AllowDemandStart = $true",
+            "$definition.Triggers.Count -ne 0", "$definition.Actions.Count -ne 1",
+            "$folder.RegisterTaskDefinition($name, $expected, 50, $sid, $null, 3, $sddl)",
+            "$task = Read-Registration", "if (!(Test-Registration $task))", "'RestartCount'",
+            "$task.State -ne 3 -or $instances.Count -ne 0", "$task.RunEx($nonce, 12, $session, $sid)",
+        ):
+            self.assertIn(fixed, script)
+        self.assertNotIn("AI-Commerce-WakeHub-9444-Clean", script)
         self.assertEqual(env["AI_COMMERCE_SUPERVISOR_SID"], self.owner[2])
-        self.assertEqual(env["AI_COMMERCE_SUPERVISOR_SESSION"], "7")
+        self.assertEqual(env["AI_COMMERCE_SUPERVISOR_SESSION"], str(self.owner_session.return_value[0][1]))
         self.assertEqual(env["AI_COMMERCE_SUPERVISOR_IMAGE"], str(self.executable))
         action = env["AI_COMMERCE_SUPERVISOR_ARGUMENTS"]
         self.assertTrue(action.endswith(" $(Arg0)"))
@@ -3394,7 +3405,7 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.modes.append(mode)
         if mode == "install":
             self.assertEqual(self.state, "MISSING")
-            self.state = "READY"
+            self.state = self.install_readback
         if mode == "start":
             nonce = env["AI_COMMERCE_SUPERVISOR_NONCE"]
             self.assertEqual(json.loads(self.values["StartPending"]), self.intent(nonce))
@@ -3463,6 +3474,8 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.user_config.assert_called_once_with(self.owner[0])
         self.assertEqual(self.modes, [])
         self.env["AI_COMMERCE_WAKEHUB_CONFIG"] = str(self.config)
+        self.config_read.side_effect = ValueError("PRIVATE invalid config")
+        self.assertEqual(self.dispatch()["code"], "LOCAL_CONFIG_INVALID")
         self.config_read.side_effect = self.runtime.RuntimeHold("LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED")
         self.assertEqual(self.dispatch()["code"], "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED")
         self.config_read.side_effect = [(None, self.config_pin), (None, "f" * 64)]
@@ -3515,14 +3528,25 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_ACTIVE_UNVERIFIED")
         self.assertEqual(set(self.modes), {"inspect"})
 
-    def test_pre_start_desktop_failure_reports_only_closed_codes(self):
+    def test_unlock_during_proof_check_requires_health_newer_than_the_lock(self):
+        self.state = self.instance
+        self.values["Run"] = json.dumps({**self.intent(self.nonce), "instance": self.instance})
+        self.publish_health()
+        self.owner_session.side_effect = [(self.owner, self.desktop, False), self.session_snapshot]
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_ACTIVE_UNVERIFIED")
+        self.owner_session.side_effect = [(self.owner, self.desktop, False), self.session_snapshot]
+        self.publish_health(observed_ns=100_000_000_000)
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_REUSED_HEALTH_OBSERVED")
+        self.launch.assert_not_called()
+
+    def test_pre_start_session_failure_reports_only_closed_codes(self):
         hold = self.runtime.RuntimeHold
         for code, expected in (
             ("WINDOWS_INTERACTIVE_REQUIRED", "WINDOWS_INTERACTIVE_REQUIRED"),
             ("CHROME_INTERACTIVE_SESSION_CONFLICT", "CHROME_INTERACTIVE_SESSION_CONFLICT"),
             ("PRIVATE native desktop detail", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"),
         ):
-            for before_recheck in ([], [(self.owner, self.desktop)]):
+            for before_recheck in ([], [self.session_snapshot]):
                 with self.subTest(expected=expected, recheck=bool(before_recheck)):
                     self.owner_session.side_effect = [*before_recheck, hold(code)]
                     receipt = self.dispatch()
@@ -3532,6 +3556,36 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.assertNotIn("install", self.modes)
         self.assertNotIn("start", self.modes)
         self.assertEqual(self.values, {})
+
+    def test_no_session_installs_only_with_readback_then_allows_an_approved_start(self):
+        no_session = (self.owner[0], 0, self.owner[2])
+        self.owner_session.return_value = (no_session, None, False)
+        self.install_readback = "MISSING"
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_ACTIVE_UNVERIFIED")
+        self.install_readback = "READY"
+        self.modes.clear()
+        receipt = self.dispatch()
+        self.assertEqual((receipt["status"], receipt["code"]),
+                         ("HOLD", "SUPERVISOR_TASK_INSTALLED_WAIT_SESSION"))
+        self.assertEqual(self.modes, ["inspect", "install"])
+        self.assertEqual(self.dispatch(), receipt)
+        self.assertEqual(self.modes, ["inspect", "install", "inspect"])
+        self.assertEqual(self.values, {})
+        self.launch.assert_not_called()
+        self.desktop_read.assert_not_called()
+
+        self.owner_session.return_value = self.session_snapshot
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_STARTED_HEALTH_OBSERVED")
+        self.assertEqual(self.modes.count("install"), 1)
+        self.launch.assert_called_once()
+
+    def test_logon_change_before_start_keeps_the_task_idle(self):
+        self.owner_session.side_effect = [self.session_snapshot, self.session_snapshot,
+                                          (self.owner, "f" * 64, False)]
+        self.assertEqual(self.dispatch()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+        self.assertEqual(self.modes, ["inspect", "install"])
+        self.assertEqual(self.values, {})
+        self.launch.assert_not_called()
 
     def test_noninteractive_hostops_starts_and_reuses_the_canonical_task(self):
         receipt = self.dispatch()
@@ -3602,16 +3656,27 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.assertIsNone(self.values["StartPending"])
         self.launch.assert_called_once()
 
-    def test_child_desktop_hold_preserves_pending_until_health(self):
+    def test_locked_session_starts_once_and_child_hold_preserves_pending_until_health(self):
         def launch(nonce):
             self.state = self.instance
             self.publish_health(nonce=nonce, health="WINDOWS_INTERACTIVE_REQUIRED")
             return self.instance
 
         self.launch.side_effect = launch
+        locked = (self.owner, self.desktop, False)
+        self.owner_session.return_value = locked
+        self.owner_session.side_effect = [locked, self.session_snapshot, locked, locked]
         self.assertEqual(self.dispatch()["code"], "WINDOWS_INTERACTIVE_REQUIRED")
-        nonce = json.loads(self.values["StartPending"])["nonce"]
+        self.assertEqual(self.modes.count("install"), 1)
+        self.owner_session.side_effect = None
+        pending = self.values["StartPending"]
+        nonce = json.loads(pending)["nonce"]
+        self.assertEqual(self.dispatch()["code"], "WINDOWS_INTERACTIVE_REQUIRED")
         self.publish_health(nonce=nonce)
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_START_UNKNOWN")
+        self.assertEqual(self.values["StartPending"], pending)
+        self.owner_session.return_value = self.session_snapshot
+        self.publish_health(nonce=nonce, observed_ns=100_000_000_000)
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_STARTED_HEALTH_OBSERVED")
         self.launch.assert_called_once()
 
