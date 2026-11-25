@@ -148,6 +148,11 @@ def _validate_anchor_material(anchor):
 
 def _desktop_identity(target):
     windows_only()
+    _attest_desktop_identity(target)
+
+
+def _attest_desktop_identity(target):
+    """Read desktop identity after the caller has enforced its Windows policy."""
     if _windows_process_sid() != target.user_sid or _interactive_session() != target.session_id:
         deny()
     # A usable input desktop in a disconnected RDP session is insufficient.

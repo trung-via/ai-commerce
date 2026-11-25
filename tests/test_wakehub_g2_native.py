@@ -639,6 +639,20 @@ def test_non_windows_denies_before_loading_any_native_api(monkeypatch):
         auth.windows_only()
 
 
+@pytest.mark.parametrize("key", ["CI", "GITHUB_ACTIONS", "GITHUB_RUN_ID", "TF_BUILD", "BUILD_BUILDID"])
+def test_native_desktop_entry_keeps_local_only_gate(monkeypatch, key):
+    calls = []
+    monkeypatch.setattr(auth, "_attest_desktop_identity", calls.append)
+    monkeypatch.setattr(auth, "os", SimpleNamespace(name="nt", environ={key: "false"}))
+    with pytest.raises(jn.NativeDenied):
+        auth._desktop_identity(TARGET)
+    assert calls == []
+
+    monkeypatch.setattr(auth, "os", SimpleNamespace(name="nt", environ={}))
+    auth._desktop_identity(TARGET)
+    assert calls == [TARGET]
+
+
 def test_durable_outcome_proof_is_reverified_after_reopen(enrolled):
     g = grant()
     lease = enrolled.storage.journal.reserve(op.PrivateIntent(g), T)
@@ -695,8 +709,10 @@ def test_owner_admission_and_existing_consumer_closure():
         "tests/test_wakehub_native_inventory.py",
     }
     # HostOps personal reaches native authority through the WakeHub runtime runner.
-    assert set(impact.selected_groups) == wakehub_groups | {"hostops-personal"}
-    assert set(impact.selected_tests) == wakehub_tests | {"tests/test_hostops_personal.py"}
+    closure_groups = wakehub_groups | {"hostops-personal"}
+    closure_tests = wakehub_tests | {"tests/test_hostops_personal.py"}
+    assert set(impact.selected_groups) == closure_groups
+    assert set(impact.selected_tests) == closure_tests
     assert "ONBOARD_CONSUMER_OWNER_CLOSURE" in impact.reason_codes
     profiles = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text())
     candidate = minimum_test.file_hashes(ROOT)
@@ -705,10 +721,9 @@ def test_owner_admission_and_existing_consumer_closure():
         base_files=base, candidate_files=candidate, changed_paths=changed, required_acs=data["acs"],
         fallback_argv=profiles["mt01-component-onboarding"], groups=groups,
         registered_profiles=profiles, allowed_paths=changed)
-    # The registered plan narrows imports to the symbol delta against TASK_PARENT.
-    # The runtime's _desktop_identity import falls outside that delta.
-    assert plan["selected_groups"] == sorted(wakehub_groups)
-    assert set(plan["impact_v21"]["selected_tests"]) == wakehub_tests
+    # The runtime now imports the new attestation symbol in the TASK_PARENT delta.
+    assert plan["selected_groups"] == sorted(closure_groups)
+    assert set(plan["impact_v21"]["selected_tests"]) == closure_tests
     assert not plan["unknown_acs"]
     assert all(g["execute"] for g in plan["groups"]), plan["reason_codes"]
     for selected in plan["groups"]:

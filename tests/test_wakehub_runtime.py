@@ -2614,6 +2614,109 @@ class FixtureStop:
         return self.stopped
 
 
+@pytest.mark.parametrize("desktop_state", ["unlocked", "wts_locked", "secure_input_desktop"])
+def test_protected_desktop_logon_attests_windows_wts_under_actions(monkeypatch, desktop_state):
+    import ctypes
+    from ctypes import wintypes as w
+    from unittest.mock import Mock
+
+    from ai_commerce.wakehub import native_authority as auth
+
+    class SessionRow(ctypes.Structure):
+        _fields_ = [("session_id", w.DWORD), ("station", w.LPWSTR), ("state", ctypes.c_int)]
+
+    class SessionData(ctypes.Structure):
+        _fields_ = [
+            ("session_id", w.DWORD), ("state", ctypes.c_int), ("flags", w.LONG),
+            ("station", w.WCHAR * 33), ("username", w.WCHAR * 21), ("domain", w.WCHAR * 18),
+            ("times", ctypes.c_longlong * 5), ("counters", w.DWORD * 6),
+        ]
+
+    class SessionInfoEx(ctypes.Structure):
+        _fields_ = [("level", w.DWORD), ("data", SessionData)]
+
+    session, sid = 7, "S-1-5-21-101-202-303-1001"
+    rows = (SessionRow * 1)(SessionRow(session, "Console", 0))
+    info = SessionInfoEx(level=1)
+    info.data.session_id = session
+    info.data.flags = 0 if desktop_state == "wts_locked" else 1
+    info.data.username, info.data.domain = "FixtureOwner", "FixtureHost"
+    info.data.times[0], info.data.times[4] = 1234, 2000
+    active = w.DWORD(0)
+
+    def enumerate_sessions(server, reserved, version, out, count):
+        assert (server, reserved, version) == (None, 0, 1)
+        ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.addressof(rows)
+        ctypes.cast(count, ctypes.POINTER(w.DWORD))[0] = len(rows)
+        return True
+
+    def query_session(server, session_id, info_class, out, size):
+        assert (server, session_id) == (None, session)
+        value = {25: info, 8: active}[info_class]
+        ctypes.cast(out, ctypes.POINTER(ctypes.c_void_p))[0] = ctypes.addressof(value)
+        ctypes.cast(size, ctypes.POINTER(w.DWORD))[0] = ctypes.sizeof(value)
+        return True
+
+    def user_name(format_id, output, size):
+        assert format_id == 2
+        output.value = r"FixtureHost\FixtureOwner"
+        return True
+
+    def object_name(handle, index, output, size, required):
+        assert index == 2
+        input_desktop = "Winlogon" if desktop_state == "secure_input_desktop" else "Default"
+        output.value = {1: "WinSta0", 2: "Default", 3: input_desktop}[handle]
+        return True
+
+    wts = SimpleNamespace(WTSEnumerateSessionsW=enumerate_sessions, WTSQuerySessionInformationW=query_session,
+                          WTSFreeMemory=Mock())
+    user = SimpleNamespace(GetProcessWindowStation=Mock(return_value=1), GetThreadDesktop=Mock(return_value=2),
+                           OpenInputDesktop=Mock(return_value=3), CloseDesktop=Mock(),
+                           GetUserObjectInformationW=object_name)
+    libraries = {
+        "wtsapi32": wts, "user32": user, "kernel32": SimpleNamespace(GetCurrentThreadId=Mock(return_value=4)),
+        "advapi32": SimpleNamespace(GetUserNameW=Mock()), "secur32": SimpleNamespace(GetUserNameExW=user_name),
+    }
+    load = Mock(side_effect=lambda name, *, use_last_error: libraries[name])
+    actions = SimpleNamespace(name="nt", environ={"GITHUB_ACTIONS": "true", "GITHUB_RUN_ID": "123"})
+    monkeypatch.setattr(r, "os", actions)
+    monkeypatch.setattr(auth, "os", actions)
+    monkeypatch.setattr(auth, "_windows_process_sid", lambda: sid)
+    monkeypatch.setattr(auth, "_interactive_session", lambda: session)
+    monkeypatch.setattr(ctypes, "WinDLL", load, raising=False)
+
+    with pytest.raises(r.RuntimeHold, match="^LOCAL_OPERATOR_ONLY$"):
+        r._supervised_desktop(session, sid)
+    load.assert_not_called()
+    if desktop_state == "unlocked":
+        assert r._desktop_logon(session, sid) == digest([session, 1234])
+    else:
+        with pytest.raises(r.RuntimeHold, match="^WINDOWS_INTERACTIVE_REQUIRED$"):
+            r._desktop_logon(session, sid)
+
+    if desktop_state == "wts_locked":
+        user.OpenInputDesktop.assert_not_called()
+        assert wts.WTSFreeMemory.call_count == 2
+    else:
+        user.OpenInputDesktop.assert_called_once_with(0, False, 1)
+        user.CloseDesktop.assert_called_once_with(3)
+        assert wts.WTSFreeMemory.call_count == 3
+
+
+@pytest.mark.parametrize("key", ["TF_BUILD", "BUILD_BUILDID", "AI_COMMERCE_GIT_GUARD_TEST"])
+def test_local_supervisor_rejects_automation_before_desktop_logon(monkeypatch, key):
+    monkeypatch.setattr(r, "os", SimpleNamespace(name="nt", environ={key: "true"}))
+    monkeypatch.setattr(r, "_desktop_logon", lambda *args: pytest.fail("unexpected desktop logon"))
+    with pytest.raises(r.RuntimeHold, match="^LOCAL_OPERATOR_ONLY$"):
+        r._supervised_desktop(7, "unused")
+
+
+def test_protected_desktop_logon_requires_windows(monkeypatch):
+    monkeypatch.setattr(r, "os", SimpleNamespace(name="posix"))
+    with pytest.raises(r.RuntimeHold, match="^WINDOWS_INTERACTIVE_REQUIRED$"):
+        r._desktop_logon(7, "unused")
+
+
 @pytest.fixture
 def supervisor(native_ingress, monkeypatch):
     """Run the real demand-task APIs with a synthetic Windows transport."""

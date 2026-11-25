@@ -944,12 +944,15 @@ def _probe_protected_clean_runtime(event=None, *, forensic=False):
 _SUPERVISOR_OBSERVED = frozenset({
     "SUPERVISOR_STARTED_HEALTH_OBSERVED", "SUPERVISOR_REUSED_HEALTH_OBSERVED",
 })
+_SUPERVISOR_DESKTOP_HOLDS = frozenset({
+    "WINDOWS_INTERACTIVE_REQUIRED", "CHROME_INTERACTIVE_SESSION_CONFLICT",
+})
 _SUPERVISOR_HOLDS = frozenset({
     "PROTECTED_HOSTOPS_ONLY", "SOURCE_CUSTODY_UNVERIFIED", "WINDOWS_OWNER_CONTEXT_UNVERIFIED",
     "LOCAL_CONFIG_REQUIRED", "LOCAL_CONFIG_INVALID", "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED",
     "LOCAL_CONFIG_CHANGED", "SUPERVISOR_RUNTIME_UNAVAILABLE", "SUPERVISOR_ACTIVE_UNVERIFIED",
     "SUPERVISOR_START_UNKNOWN",
-})
+}) | _SUPERVISOR_DESKTOP_HOLDS
 
 # Launch the canonical CLI using the exact source bytes read and hashed here.
 # The parent independently compares this hash with its protected checkout.
@@ -1044,9 +1047,20 @@ def _deploy_protected_supervisor(event):
             deny(failure)
         source = _persistent_clean_source(acquisition, sha, pin_runtime=True)
         root = ROOTS["workspace"]
+
+        def read_desktop(owner):
+            nonlocal failure
+            try:
+                return runtime._desktop_logon(owner[1], owner[2])
+            except runtime.RuntimeHold as exc:
+                code = str(exc)
+                if code in _SUPERVISOR_DESKTOP_HOLDS:
+                    failure = code
+                raise
+
         failure = "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
         owner = acquisition._native_operator()
-        desktop = runtime._desktop_logon(owner[1], owner[2])
+        desktop = read_desktop(owner)
         failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
         if runtime._supervisor_deployment_value("StartPending") is not None:
             return _supervisor_receipt("SUPERVISOR_START_UNKNOWN", issue_number, sha)
@@ -1081,7 +1095,7 @@ def _deploy_protected_supervisor(event):
             if _persistent_clean_source(acquisition, sha, pin_runtime=True) != source:
                 deny(failure)
             failure = "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
-            if acquisition._native_operator() != owner or runtime._desktop_logon(owner[1], owner[2]) != desktop:
+            if acquisition._native_operator() != owner or read_desktop(owner) != desktop:
                 deny(failure)
             failure = "LOCAL_CONFIG_CHANGED"
             if runtime._observe_only_config(config, root, owner, lambda: False)[1] != config_pin:

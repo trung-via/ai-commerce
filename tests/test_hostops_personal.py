@@ -3351,7 +3351,7 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.mock(hostops, "ROOTS", new={"workspace": self.root})
         self.mock(hostops, "_persistent_clean_source", return_value=self.source)
         self.mock(acquisition, "_native_operator", return_value=self.owner)
-        self.mock(runner, "_desktop_logon", return_value=self.desktop)
+        self.desktop_read = self.mock(runner, "_desktop_logon", return_value=self.desktop)
         self.config_read = self.mock(runner, "_observe_only_config", return_value=(None, self.config_pin))
         self.active = self.mock(runner, "_supervisor_active", return_value=False)
         self.mock(runner, "_supervisor_deployment_value", side_effect=self.values.get)
@@ -3400,6 +3400,7 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         del self.env["AI_COMMERCE_GIT_GUARD_TEST"]
         self.env["GITHUB_RUN_ATTEMPT"] = "2"
         self.assertEqual(self.dispatch()["code"], "PROTECTED_HOSTOPS_ONLY")
+        self.desktop_read.assert_not_called()
         self.config_read.assert_not_called()
         self.spawn.assert_not_called()
         self.assertEqual(self.values, {})
@@ -3432,6 +3433,22 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.values.pop("Health")
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_ACTIVE_UNVERIFIED")
         self.spawn.assert_not_called()
+
+    def test_pre_start_desktop_failure_reports_only_closed_codes(self):
+        hold = self.runtime.RuntimeHold
+        for code, expected in (
+            ("WINDOWS_INTERACTIVE_REQUIRED", "WINDOWS_INTERACTIVE_REQUIRED"),
+            ("CHROME_INTERACTIVE_SESSION_CONFLICT", "CHROME_INTERACTIVE_SESSION_CONFLICT"),
+            ("PRIVATE native desktop detail", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"),
+        ):
+            for before_recheck in ([], [self.desktop]):
+                with self.subTest(expected=expected, recheck=bool(before_recheck)):
+                    self.desktop_read.side_effect = [*before_recheck, hold(code)]
+                    receipt = self.dispatch()
+                    self.assertEqual((receipt["status"], receipt["code"], receipt["source_sha"]),
+                                     ("HOLD", expected, self.sha))
+        self.spawn.assert_not_called()
+        self.assertEqual(self.values, {})
 
     def test_start_requires_same_child_and_rechecked_health(self):
         def launch(argv, **kwargs):
@@ -3468,6 +3485,20 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
                 self.assertEqual(self.dispatch()["code"], "SUPERVISOR_START_UNKNOWN")
                 self.assertEqual(self.values["StartPending"], pending)
                 self.spawn.assert_called_once()
+
+    def test_spawn_exception_leaves_start_pending_fence(self):
+        self.spawn.side_effect = OSError("PRIVATE process creation result unknown")
+        receipt = self.dispatch()
+        self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "SUPERVISOR_START_UNKNOWN"))
+        pending = self.values["StartPending"]
+        self.assertRegex(pending, r"^[a-f0-9]{32}$")
+        self.assertEqual(self.spawn.call_args.args[0][-1], pending)
+
+        self.config_read.reset_mock()
+        self.assertEqual(self.dispatch(), receipt)
+        self.assertEqual(self.values, {"StartPending": pending})
+        self.config_read.assert_not_called()
+        self.spawn.assert_called_once()
 
 
 class PersonalClean9444AutostartTests(unittest.TestCase):
