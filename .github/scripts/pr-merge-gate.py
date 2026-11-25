@@ -747,9 +747,64 @@ def _ef02_proof_trace(stage: str) -> None:
         print("EF02_ORIGINAL_PROOF_STAGE=" + stage, flush=True)
 
 
+def _ef02_final_junit_root(archive: zipfile.ZipFile, report_name: str,
+                           action: dict, evidence: dict) -> str | None:
+    """Select the candidate-bound final Verify–Fix invocation, never mix rounds."""
+    attempt = evidence["attempt_id"]
+    action_id = evidence["action_id"]
+    if not all(isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]+", value)
+               for value in (attempt, action_id)):
+        raise ValueError("Invalid EF02 action identity")
+    root = report_name.removesuffix("/batch_result.json") + "/" + action_id + "-" + attempt + "/ef01"
+    invocations = action.get("ef01_invocations")
+    if invocations is None and "invocation_count" not in action:
+        # Historic flat archives are still supported. A modern archive must
+        # not silently downgrade to stale flat evidence if metadata is absent.
+        if any(re.fullmatch(r".+/ef01/invocations/.*", name)
+               for name in archive.namelist()):
+            raise ValueError("Missing invocation metadata")
+        return None
+    if (not isinstance(invocations, list) or not 1 <= len(invocations) <= 100
+            or type(action.get("invocation_count")) is not int
+            or action["invocation_count"] != len(invocations)):
+        raise ValueError("Invalid invocation inventory")
+    for index, invocation in enumerate(invocations):
+        if (not isinstance(invocation, dict)
+                or invocation.get("attempt_id") != attempt
+                or invocation.get("invocation_id") != f"{attempt}:invocation-{index:03d}"
+                or invocation.get("evidence_dir") != f"invocations/{index:03d}"):
+            raise ValueError("Invalid invocation identity")
+    final = invocations[-1]
+    hashes = evidence["verification"]["evidence_sha256"]
+    if (final.get("status") != "BUILD_VERIFIED_FOR_SCOPE"
+            or type(final.get("verify_exit_code")) is not int
+            or final["verify_exit_code"] != 0
+            or final.get("evidence_sha256") != hashes
+            or final.get("candidate_file_sha256") != evidence["candidate_file_sha256"]
+            or final.get("tracked_diff_sha256") != evidence.get("tracked_diff_sha256")):
+        raise ValueError("Final invocation does not match candidate")
+    final_root = root + "/" + final["evidence_dir"]
+    observed_dirs = {match.group(1) for name in archive.namelist()
+                     if (match := re.fullmatch(re.escape(root) + r"/(invocations/\d{3})/.+", name))}
+    if observed_dirs != {f"invocations/{i:03d}" for i in range(len(invocations))}:
+        raise ValueError("Incomplete or unexpected invocation directories")
+    name = final_root + "/invocation_result.json"
+    if archive.namelist().count(name) != 1 or archive.getinfo(name).file_size > 2 * 1024 * 1024:
+        raise ValueError("Missing or ambiguous invocation result")
+    if json.loads(archive.read(name)) != final:
+        raise ValueError("Invocation result mismatch")
+    files = final.get("evidence_files")
+    if not isinstance(files, dict) or any(
+            files.get(key) != final["evidence_dir"] + f"/mt01.{match.group(1)}.junit.xml"
+            for key in hashes if (match := re.fullmatch(r"mt01_(\d+)_junit", key))):
+        raise ValueError("Invalid final JUnit path mapping")
+    return final_root
+
+
 def _ef02_verified_junit_closure(archive: zipfile.ZipFile,
                                  hashes: dict[str, str],
-                                 required_tests: set[str]) -> bool:
+                                 required_tests: set[str], *,
+                                 invocation_root: str | None = None) -> bool:
     """Prove registered consumers from original hashed Windows MT-01 JUnit.
 
     EF01 may run a focused verification.argv plus a separate registered MT-01
@@ -770,7 +825,9 @@ def _ef02_verified_junit_closure(archive: zipfile.ZipFile,
         return False
     actual = {}
     for name in archive.namelist():
-        matched = re.fullmatch(r".+/ef01/mt01\.(\d+)\.junit\.xml", name)
+        pattern = (re.escape(invocation_root) + r"/mt01\.(\d+)\.junit\.xml"
+                   if invocation_root is not None else r".+/ef01/mt01\.(\d+)\.junit\.xml")
+        matched = re.fullmatch(pattern, name)
         if not matched:
             continue
         index = int(matched.group(1))
@@ -942,23 +999,28 @@ def verified_ef02_candidate(api: Callable[[str], Any], repository: str,
             if len(names) != 1 or archive.getinfo(names[0]).file_size > 2 * 1024 * 1024:
                 return False
             report = json.loads(archive.read(names[0]))
+            if (not isinstance(report, dict) or report.get("status") != "COMPLETE" or
+                    str(report.get("github_workflow_run_id")) != str(run_id) or
+                    not isinstance(report.get("actions"), list)):
+                return False
+            _ef02_proof_trace("BATCH_REPORT_VERIFIED")
+            matching = [a for a in report["actions"] if isinstance(a, dict) and
+                        a.get("attempt_id") == evidence["attempt_id"] and
+                        a.get("action_id") == evidence["action_id"]]
+            verified = (len(matching) == 1 and matching[0].get("status") == "CANDIDATE_READY"
+                        and matching[0].get("candidate_sha") == head
+                        and matching[0].get("candidate_evidence") == evidence)
+            if not verified:
+                _ef02_proof_trace("FINAL_EVIDENCE_MISMATCH")
+                return False
             if not set(required_tests) <= set(argv):
+                invocation_root = _ef02_final_junit_root(archive, names[0], matching[0], evidence)
                 if not _ef02_verified_junit_closure(
-                        archive, verify["evidence_sha256"], set(required_tests)):
+                        archive, verify["evidence_sha256"], set(required_tests),
+                        invocation_root=invocation_root):
                     _ef02_proof_trace("REQUIRED_CONSUMER_JUNIT_UNPROVEN")
                     return False
                 _ef02_proof_trace("REQUIRED_CONSUMER_JUNIT_VERIFIED")
-        if (not isinstance(report, dict) or report.get("status") != "COMPLETE" or
-                str(report.get("github_workflow_run_id")) != str(run_id) or
-                not isinstance(report.get("actions"), list)):
-            return False
-        _ef02_proof_trace("BATCH_REPORT_VERIFIED")
-        matching = [a for a in report["actions"] if isinstance(a, dict) and
-                    a.get("attempt_id") == evidence["attempt_id"] and
-                    a.get("action_id") == evidence["action_id"]]
-        verified = (len(matching) == 1 and matching[0].get("status") == "CANDIDATE_READY"
-                and matching[0].get("candidate_sha") == head
-                and matching[0].get("candidate_evidence") == evidence)
         _ef02_proof_trace("FINAL_EXACT_EVIDENCE_MATCH" if verified else "FINAL_EVIDENCE_MISMATCH")
         return verified
     except urllib.error.HTTPError as exc:
