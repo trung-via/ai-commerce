@@ -147,6 +147,9 @@ class GitHubRestArtifactAuthority:
                     matches[0]["id"] <= 0 or matches[0].get("expired") is not False):
                 return False
             item = matches[0]
+            if (provenance.artifact_id is not None and
+                    (type(provenance.artifact_id) is not int or provenance.artifact_id != item["id"])):
+                return False
             if (isinstance(item.get("workflow_run"), dict) and
                     item["workflow_run"].get("id") != provenance.run_id):
                 return False

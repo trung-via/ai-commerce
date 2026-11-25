@@ -2711,18 +2711,17 @@ def test_protected_desktop_logon_attests_windows_wts_under_actions(monkeypatch, 
     monkeypatch.setattr(security, "windows_identity", lambda: (sid, False))
     monkeypatch.setattr(r.chrome_acquisition, "_native_local_app_data", lambda: native_local)
     user.OpenInputDesktop.reset_mock()
-    if desktop_state == "wts_locked":
-        with pytest.raises(r.RuntimeHold, match="^WINDOWS_INTERACTIVE_REQUIRED$"):
-            r._supervisor_owner_session()
-    else:
-        assert r._supervisor_owner_session() == ((native_local, session, sid), digest([session, 1234]))
+    assert r._supervisor_owner_session() == ((native_local, session, sid), digest([session, 1234]))
+    with monkeypatch.context() as local:
+        local.setattr(r, "os", SimpleNamespace(name="nt", environ={}))
+        assert r._supervised_desktop(session, sid) == digest([session, 1234])
     user.OpenInputDesktop.assert_not_called()
 
 
 @pytest.mark.parametrize("key", ["TF_BUILD", "BUILD_BUILDID", "AI_COMMERCE_GIT_GUARD_TEST"])
 def test_local_supervisor_rejects_automation_before_desktop_logon(monkeypatch, key):
     monkeypatch.setattr(r, "os", SimpleNamespace(name="nt", environ={key: "true"}))
-    monkeypatch.setattr(r, "_desktop_logon", lambda *args: pytest.fail("unexpected desktop logon"))
+    monkeypatch.setattr(r, "_active_logon", lambda *args: pytest.fail("unexpected WTS logon"))
     with pytest.raises(r.RuntimeHold, match="^LOCAL_OPERATOR_ONLY$"):
         r._supervised_desktop(7, "unused")
 
@@ -2827,8 +2826,8 @@ def supervisor(native_ingress, monkeypatch):
         return r.run_supervisor(i["config_path"], i["root"], max_ticks=max_ticks,
                                 idle_seconds=2, max_backoff_seconds=5, **kwargs)
 
-    def operator(*, attended=True):
-        assert not attended
+    def operator(*, attended=True, protocol_only=False):
+        assert not attended and protocol_only
         return owner()
 
     monkeypatch.setattr(acq, "_enrollment_operator", operator)
@@ -3015,7 +3014,7 @@ def test_observe_only_emits_private_source_bound_health_under_slot(observe_only,
     assert writes == [] and s.slot.pending and not s.path.exists()
 
 
-def test_scheduled_observe_only_waits_for_its_unlocked_desktop(observe_only, monkeypatch):
+def test_scheduled_observe_only_replaces_missing_session_health(observe_only, monkeypatch):
     s = observe_only
     session, sid = s.owner()[1:]
     desktop = r._supervised_desktop(session, sid)
@@ -3023,11 +3022,11 @@ def test_scheduled_observe_only_waits_for_its_unlocked_desktop(observe_only, mon
     deployment = {"source_sha": "a" * 40, "source_digest": "b" * 64, "config_digest": pin,
                   "desktop": desktop, "nonce": "c" * 32, "session": session, "sid": sid}
     state, reports = {}, []
-    unlocked = False
+    session_active = False
 
     def desktop_check(actual_session, actual_sid):
         assert (actual_session, actual_sid) == (session, sid)
-        if not unlocked:
+        if not session_active:
             raise r.RuntimeHold("WINDOWS_INTERACTIVE_REQUIRED")
         return desktop
 
@@ -3037,16 +3036,16 @@ def test_scheduled_observe_only_waits_for_its_unlocked_desktop(observe_only, mon
         if raw is not None:
             reports.append(json.loads(raw)["health"])
 
-    def unlock(_):
-        nonlocal unlocked
+    def resume_session(_):
+        nonlocal session_active
         assert reports == ["WINDOWS_INTERACTIVE_REQUIRED"]
-        unlocked = True
+        session_active = True
 
     monkeypatch.setattr(r, "_supervised_desktop", desktop_check)
     monkeypatch.setattr(r, "_supervisor_process", lambda pid, exe, owner: 123456)
     monkeypatch.setattr(r, "_supervisor_deployment_value", state.get)
     monkeypatch.setattr(r, "_store_supervisor_deployment_value", store)
-    s.clock.on_wait = unlock
+    s.clock.on_wait = resume_session
     result = s.run(max_ticks=2, observe_only=True, _deployment=deployment)
     assert result.chrome_health == "CHROME_OWNED"
     assert reports == ["WINDOWS_INTERACTIVE_REQUIRED", "CHROME_OWNED"]
@@ -3204,7 +3203,7 @@ def test_flat02_request_stays_unresolved_after_logon_change(supervisor, new_sess
     ("task_pending", "CHROME_DEMAND_TASK_UNRESOLVED"),
     ("task_migration", "CHROME_DEMAND_TASK_UNPROVEN"),
     ("task_duplicate", "CHROME_DEMAND_TASK_UNPROVEN"),
-    ("locked", "WINDOWS_INTERACTIVE_REQUIRED"),
+    ("no_active_session", "WINDOWS_INTERACTIVE_REQUIRED"),
     ("session_conflict", "CHROME_INTERACTIVE_SESSION_CONFLICT"),
     ("profile_lock", "PROFILE_LOCK_HOLD"),
     ("ownership", "BROWSER_OWNERSHIP_UNPROVEN"),
@@ -3240,10 +3239,10 @@ def test_flat02_supervisor_holds_without_acquisition(supervisor, monkeypatch, fa
         s.slot.journal = "ROLLBACK_ONLY"
     if fault == "task_duplicate":
         s.slot.task = "MULTIPLE_CANDIDATES"
-    if fault == "locked":
-        def locked(**kwargs):
+    if fault == "no_active_session":
+        def no_active_session(**kwargs):
             raise acq._EnrollmentHold("WINDOWS_INTERACTIVE_REQUIRED")
-        monkeypatch.setattr(acq, "_enrollment_operator", locked)
+        monkeypatch.setattr(acq, "_enrollment_operator", no_active_session)
     if fault == "session_conflict":
         def conflict(*args):
             raise r.RuntimeHold("CHROME_INTERACTIVE_SESSION_CONFLICT")
@@ -3793,7 +3792,7 @@ def test_flat03_issue_created_acceptance_and_edit_dedup_are_source_only(ingress,
                         "GITHUB_ISSUE_AUTHENTICATED")
     assert main(args) == 2
     assert json.loads(capsys.readouterr().out) == asdict(expected)
-    assert f.calls == [issue.url, f.root_url, issue.url] and i["calls"] == []
+    assert f.calls == [f.root_url, issue.url] and i["calls"] == []
 
     issue.issue.update(title="An edit", body="New body", updated_at="2026-11-19T00:00:00Z")
     issue.issue["user"]["login"] = "renamed-creator"
@@ -3819,7 +3818,6 @@ def test_flat03_issue_created_acceptance_and_edit_dedup_are_source_only(ingress,
     ("foreign-actor", "ISSUE_CREATION_UNPROVEN"),
     ("changed-creation", "ISSUE_CREATION_UNPROVEN"),
     ("no-creation", "ISSUE_CREATION_INVALID"),
-    ("mismatched-reread", "ISSUE_CREATION_UNPROVEN"),
     ("missing", "GITHUB_READ_REJECTED"),
     ("transient", "GITHUB_READ_RETRY_EXHAUSTED"),
     ("budget", "READ_COUNT_EXHAUSTED"),
@@ -3847,9 +3845,6 @@ def test_flat03_issue_source_requires_exact_independent_proof(ingress, monkeypat
         issue.issue["created_at"] = "2026-11-17T00:00:00Z"
     elif fault == "no-creation":
         issue.issue.pop("created_at")
-    elif fault == "mismatched-reread":
-        values = iter([issue.issue, {**issue.issue, "user": {"id": 999, "type": "User"}}])
-        f.responses[issue.url] = lambda: next(values)
     elif fault == "missing":
         f.responses[issue.url] = HTTPError(issue.url, 404, "missing fixture", {}, None)
     elif fault == "transient":
@@ -3865,9 +3860,9 @@ def test_flat03_issue_source_requires_exact_independent_proof(ingress, monkeypat
         i["save"](issue.path, invalid)
     if fault == "budget":
         runner = r.compose_read_only(i["config_path"], i["root"], target_index=1)
-        runner.source.read_budget = r.GitHubReadBudget(max_reads=2, max_attempts=1)
+        runner.source.read_budget = r.GitHubReadBudget(max_reads=1, max_attempts=1)
         result = runner.run_once()
-        assert f.calls == [issue.url, f.root_url]
+        assert f.calls == [f.root_url]
     else:
         result = r.run_read_only(i["config_path"], i["root"], target_index=1)
     assert result.status == "HOLD" and result.code == code
@@ -3880,15 +3875,57 @@ def test_flat03_issue_source_rechecks_private_target_after_api_reads(ingress, mo
     issue = f.add(1317)
 
     def change_registration():
-        if f.calls.count(issue.url) == 2:
-            i["save"](issue.path, asdict(replace(issue.target, local_source_sha="b" * 40)))
+        i["save"](issue.path, asdict(replace(issue.target, local_source_sha="b" * 40)))
         return issue.issue
 
     f.responses[issue.url] = change_registration
     result = r.run_read_only(i["config_path"], i["root"], target_index=1)
-    assert result.code == "LOCAL_AUTHORITY_DRIFT" and f.calls == [issue.url, f.root_url, issue.url]
+    assert result.code == "LOCAL_AUTHORITY_DRIFT" and f.calls == [f.root_url, issue.url]
     with sqlite3.connect(i["config"]["journal"]) as db:
         assert db.execute("SELECT COUNT(*) FROM events").fetchone() == (0,)
+
+
+def test_standing_issue_discovers_owner_creation_without_a_registration_file(ingress, monkeypatch):
+    i = ingress
+    fixture = issue_fixture(i, monkeypatch)
+    issue = fixture.add(1317)
+    issue.path.unlink()
+    fixture.repo["owner"] = {"id": 711}
+    scope = {"repository_id": 3101, "creator_id": 711, "title_prefix": "[WAKEHUB PROJECT] ",
+             "not_before": "2026-11-15T00:00:00Z", "account_id": "fixture-account"}
+    i["config"].pop("registered_targets")
+    consent = {"schema": "WakeHubLocalUIDelivery.v3", "transport": "playwright",
+               "route_marker": i["registration"].marker, "registration_id": "a" * 32,
+               "marker_digest": "b" * 64, "grants": [], "standing_issue": scope}
+    i["config"]["ui_delivery"] = consent
+    i["config"]["future_metadata"] = True
+    i["save"](i["config_path"], i["config"])
+    issue.issue["title"] = scope["title_prefix"] + "fixture event"
+    query = r.urlencode({"state": "all", "sort": "created", "direction": "asc",
+                         "since": scope["not_before"], "per_page": 5, "page": 1})
+    listing = f"{fixture.root_url}/issues?{query}"
+    fixture.responses[listing] = [
+        {**issue.issue, "user": {"id": 42, "type": "User"}},
+        {**issue.issue, "created_at": "2026-11-14T00:00:00Z"},
+        {**issue.issue, "pull_request": {}},
+        issue.issue,
+    ]
+    fixture.responses[issue.url] = {**issue.issue, "created_at": "2026-11-17T00:00:00Z"}
+    assert r.compose_read_only(i["config_path"], i["root"]).run_once().code == "ISSUE_CREATION_UNPROVEN"
+    assert not r.Path(i["config"]["journal"]).exists()
+    fixture.responses[issue.url] = issue.issue
+    fixture.calls.clear()
+
+    runner = r.compose_read_only(i["config_path"], i["root"])
+    result = runner.run_once()
+    assert result.code == "LOCAL_CHAT_REGISTRATION_REQUIRED"
+    assert fixture.calls == [fixture.root_url, listing, issue.url]
+    again = r.compose_read_only(i["config_path"], i["root"]).run_once()
+    assert again.code == result.code and again.replayed
+    replay = r.compose_read_only(i["config_path"], i["root"])
+    consent["standing_issue"] = {**scope, "account_id": "new-account"}
+    i["save"](i["config_path"], i["config"])
+    assert replay.run_once().code == "LOCAL_AUTHORITY_DRIFT"
 
 
 @pytest.mark.parametrize("after_commit", [False, True])
@@ -3930,7 +3967,7 @@ def test_flat03_one_supervisor_progresses_after_source_holds_and_reordering(supe
     assert proof.code == "EXACT_CHAT_CANDIDATE_ACCOUNT_MARKER_UNATTESTED"
     assert [tick.code for tick, _ in s.ticks] == [
         "GITHUB_READ_RETRY_EXHAUSTED", "ISSUE_CREATED_ROUTE_AUTHORITY_UNAVAILABLE", proof.code]
-    assert f.calls == [stalled.url, healthy.url, f.root_url, healthy.url]
+    assert f.calls == [f.root_url, stalled.url, f.root_url, healthy.url]
     assert len(i["calls"]) == 6 and i["browser"].reads == 1
     with sqlite3.connect(s.path) as db:
         before = db.execute("SELECT * FROM events ORDER BY event_key").fetchall()
@@ -4274,7 +4311,7 @@ def flat04(supervisor, monkeypatch):
     monkeypatch.setattr(r.cdp_doorbell, "_PlaywrightInventory", _PlaywrightInventory)
     monkeypatch.setattr(_PlaywrightInventory, "_browser", attach)
     monkeypatch.setattr(r.cdp_doorbell, "_is_windows", lambda: True)
-    monkeypatch.setattr(r.chrome_acquisition, "_enrollment_operator", lambda *, attended=True: s.owner())
+    monkeypatch.setattr(r.chrome_acquisition, "_enrollment_operator", lambda **_: s.owner())
     s.set_owned(True)
 
     def prepare():
@@ -4673,7 +4710,7 @@ def flat05(flat04, r3a_ingress, monkeypatch):
     # The fake browser provides neither an account identifier nor a session reference.
     f.ui = SimpleNamespace(clock=12345, target="a" * 32, context="b" * 32,
                            outbound={}, draft="", inserts=0, clicks=0, observations=0,
-                           fail_at=None, on_stage={}, ref_mode=None, blocked=None)
+                           fail_at=None, on_stage={}, ref_mode=None, blocked=None, account_id=None)
     ui = f.ui
     adapter = r.cdp_doorbell
 
@@ -4704,7 +4741,7 @@ def flat05(flat04, r3a_ingress, monkeypatch):
         if script == adapter._PRE_STAGE_REFS:
             return list(ui.outbound)
         if script == adapter._AGY_SURFACE_READY:
-            return ui.blocked is None and not ui.draft
+            return ui.blocked is None and not ui.draft and args.get("account_id") == ui.account_id
         if script == adapter._EXISTING_USER_TURN:
             ui.observations += 1
             assert any(row["status"] == "UNKNOWN_EFFECT" for row in rows().values())
@@ -4712,7 +4749,8 @@ def flat05(flat04, r3a_ingress, monkeypatch):
                 ui.on_stage["observe"]()
             refs = [ref for ref, content in ui.outbound.items() if content == text]
             if (len(refs) == 1 and refs[0] not in args["priorRefs"] and not ui.draft
-                    and ui.blocked is None and f.exact.surface == "CANDIDATE_READY"):
+                    and ui.blocked is None and f.exact.surface == "CANDIDATE_READY"
+                    and args.get("account_id") == ui.account_id):
                 return refs[0]
             return False
         phase = {adapter._CHECK: "check", adapter._INSERT: "insert", adapter._READY: "ready",
@@ -4728,6 +4766,8 @@ def flat05(flat04, r3a_ingress, monkeypatch):
         if phase == "check":
             if ui.fail_at == phase:
                 raise SimulatedWakeHubCrash()
+            if args.get("account_id") != ui.account_id:
+                return "ACCOUNT_UNPROVEN"
             if ui.blocked is not None:
                 return ui.blocked
             return "OUTBOUND_ALREADY_PRESENT" if text in ui.outbound.values() else "READY"
@@ -4744,6 +4784,8 @@ def flat05(flat04, r3a_ingress, monkeypatch):
                 return False
             assert ui.draft == text and text not in ui.outbound.values()
             prior = list(ui.outbound)
+            if "standbyRefs" in args and sorted(prior) != args["standbyRefs"]:
+                return False
             ui.clicks += 1
             if ui.ref_mode != "missing":
                 ui.outbound[f"turn-{ui.clicks}"] = text
@@ -4837,22 +4879,240 @@ def dual_route(flat05, monkeypatch):
         "executable": str(f.i["config_path"].with_name("agy.exe")), "executable_sha256": "a" * 64,
         "workspace": str(f.i["config_path"].parent), "skill_sha256": "b" * 64,
     }
+    f.ui.account_id = "fixture-account"
+    for grant in f.consent["grants"]:
+        grant["account_id"] = f.ui.account_id
     f.agy = SimpleNamespace(calls=[], effect=lambda request: "AGY_REPORTED_SEND")
 
-    def launcher(runtime, config, request, marker_digest, surface, expires_ms, stop, revalidate):
+    def launcher(runtime, config, request, marker_digest, surface, expires_ms, stop, revalidate, *,
+                 account_id, revalidate_running):
         row = f.rows()[request.event_id]
         reservation = row["evidence"]["local_send"]
         assert row["status"] == "RESERVED" and reservation["phase"] == "STAGING"
         assert reservation["transport"] == "agy" and reservation["surface"]["document"] == surface.document
         assert reservation["doorbell_sha256"] == hashlib.sha256(request.canonical_bytes).hexdigest()
         assert marker_digest == f.consent["marker_digest"] and not stop()
+        assert account_id == f.ui.account_id
+        assert r.time.time_ns() // 1_000_000 < expires_ms <= r.time.time_ns() // 1_000_000 + 180_000
         revalidate()
+        revalidate_running()
         f.agy.calls.append(request)
         return r._AgyOutcome(f.agy.effect(request), 37)
 
     monkeypatch.setattr(r, "_launch_agy", launcher)
     f.save()
     return f
+
+
+@pytest.fixture
+def standing_ef02(flat05):
+    f = flat05
+    i = f.i
+    api = f.sources.root_url
+    scope = {"repository_id": 3101, "creator_id": 711, "workflow_id": 19,
+             "title_prefix": "[EF02] [PROJECT] ", "batch_prefix": "fixture-",
+             "not_before": "2026-11-15T00:00:00Z", "account_id": "fixture-account"}
+    f.sources.targets.clear()
+    f.consent.update(grants=[], standing_ef02=scope)
+    f.ui.account_id = scope["account_id"]
+    f.save()
+    for name in ("contracts/RemoteActionBatch.v1.schema.json", ".github/ef02/verify-profiles.json",
+                 ".github/ef02/approved-candidates.v1.json"):
+        target = i["root"] / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((r._CODE_ROOT / name).read_bytes())
+    repo = {"id": 3101, "full_name": r.REPOSITORY, "default_branch": "main",
+            "owner": {"id": 711, "login": "trung-via", "type": "User"}}
+    path = ".github/workflows/issue-ingress.yml"
+    workflow_url = api + "/actions/workflows/19"
+    i["responses"].update({api: repo, workflow_url: {"id": 19, "path": path, "state": "active"}})
+    pages = {page: {"workflow_runs": []} for page in (1, 2)}
+    for page, rows in pages.items():
+        i["responses"][f"{workflow_url}/runs?per_page=10&page={page}"] = rows
+
+    def archive(run_id, artifact_id, name, files):
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w") as out:
+            for filename, data in files.items():
+                out.writestr(filename, json.dumps(data))
+        raw = stream.getvalue()
+        i["archives"][api + f"/actions/artifacts/{artifact_id}/zip"] = raw
+        return {"id": artifact_id, "name": name, "expired": False,
+                "workflow_run": {"id": run_id}, "digest": "sha256:" + hashlib.sha256(raw).hexdigest()}
+
+    def add(run_id, source_sha, *, page=1):
+        number = run_id + 6
+        batch = f"fixture-{run_id}"
+        title = scope["title_prefix"] + str(number)
+        run = {"id": run_id, "run_attempt": 1, "workflow_id": 19, "event": "issues", "status": "completed",
+               "path": path, "repository": repo, "head_repository": repo, "head_branch": "main",
+               "head_sha": "a" * 40, "created_at": "2026-11-16T03:00:00Z", "display_title": title,
+               "actor": repo["owner"], "triggering_actor": repo["owner"],
+               "referenced_workflows": [{"path": r.REPOSITORY + "/.github/workflows/ef02-batch.yml@refs/heads/main",
+                                         "sha": "a" * 40}]}
+        pages[page]["workflow_runs"].append(dict(run))
+        request = {"kind": "AI_COMMERCE_REMOTE_ACTION_BATCH", "version": 1, "batch_id": batch,
+                   "source_sha": source_sha, "actor": "HUMAN", "authorization_ref": "fixture-approval",
+                   "actions": [{"action_id": "fixture-action", "attempt_id": "fixture-attempt",
+                                "executor": "codex", "model": "gpt-6.1-sol", "effort": "max",
+                                "instruction": "Fixture only", "allowed_paths": ["src/ai_commerce/remote"],
+                                "verification_profile": "project-tests", "depends_on": []}]}
+        issue = {"number": number, "html_url": f"https://github.com/{r.REPOSITORY}/issues/{number}",
+                 "title": title, "user": repo["owner"], "body": json.dumps(request)}
+        _, report = github_candidate()
+        report.update(batch_id=batch, source_sha=source_sha, github_workflow_run_id=str(run_id),
+                      github_issue_number=number)
+        event = build_completion_event(report, repository=r.REPOSITORY, run_id=run_id,
+                                       run_attempt=1, issue_number=number)
+        report["wake_event_id"] = event["event_id"]
+        result = archive(run_id, run_id * 10 + 2, f"ef02-results-{run_id}-1",
+                         {f"{batch}/completion_event.json": event, f"{batch}/batch_result.json": report})
+        snapshot = archive(run_id, run_id * 10 + 1, f"ef02-request-{number}", {"request.json": request})
+        i["responses"].update({
+            api + f"/issues/{number}": issue,
+            api + f"/actions/runs/{run_id}": run,
+            api + f"/actions/runs/{run_id}/artifacts?per_page=100": {
+                "total_count": 2, "artifacts": [snapshot, result]},
+        })
+        return SimpleNamespace(event=event, run=run, issue=issue, result=result)
+
+    f.standing = SimpleNamespace(add=add, pages=pages)
+    return f
+
+
+def test_standing_ef02_reopens_cursor_and_delivers_later_source_without_a_run_file(standing_ef02):
+    f = standing_ef02
+    first = f.standing.add(17, "b" * 40)
+    later = f.standing.add(18, "c" * 40, page=2)
+    first_page = f.standing.pages[1]["workflow_runs"]
+    first_page.extend({**first.run, "id": run_id, "status": "queued"} for run_id in range(31, 40))
+    observed = "LOCAL_UI_OWNER_AUTHORIZED_TURN_OBSERVED"
+    assert f.s.run().code == observed
+    first_row = f.rows()[first.event["event_id"]]
+    assert f.s.run().code == "NO_EVENT"
+    with sqlite3.connect(f.s.path) as db:
+        cursor = json.loads(db.execute("SELECT record FROM standing_ef02_cursor").fetchone()[0])
+    assert (cursor["page"], cursor["offset"]) == (2, 0)
+    assert f.s.run().code == observed
+    rows = f.rows()
+    assert rows[first.event["event_id"]] == first_row
+    assert [rows[event["event_id"]]["event"]["source_sha"] for event in (first.event, later.event)] == [
+        "b" * 40, "c" * 40]
+    assert f.s.run(3).code == "NO_EVENT"
+    assert f.rows() == rows and f.ui.clicks == 2
+
+
+@pytest.mark.parametrize(("fault", "code"), [
+    ("workflow", "EF02_REUSABLE_WORKFLOW_UNPROVEN"),
+    ("attempt", "RUN_IDENTITY_MISMATCH"),
+    ("run", "RUN_IDENTITY_MISMATCH"),
+    ("issuer", "ISSUE_CREATOR_UNPROVEN"),
+    ("project", "ISSUE_IDENTITY_MISMATCH"),
+    ("source", "REQUEST_IDENTITY_MISMATCH"),
+    ("artifact", "ARTIFACT_DIGEST_INVALID"),
+])
+def test_standing_ef02_rejects_drift_before_dispatch(standing_ef02, fault, code):
+    f = standing_ef02
+    selected = f.standing.add(17, "b" * 40)
+    if fault == "workflow":
+        selected.run["referenced_workflows"] = []
+    elif fault == "attempt":
+        selected.run["run_attempt"] = 2
+    elif fault == "run":
+        selected.run["id"] = 19
+    elif fault == "issuer":
+        selected.issue["user"] = {**selected.issue["user"], "id": 12}
+    elif fault == "project":
+        selected.issue["title"] = "[EF02] [OTHER] visible title"
+    elif fault == "source":
+        selected.issue["body"] = json.dumps({**json.loads(selected.issue["body"]), "source_sha": "d" * 40})
+    elif fault == "artifact":
+        selected.result["digest"] = "sha256:" + "f" * 64
+    assert f.s.run().code == code
+    assert f.rows() == {} and f.ui.clicks == 0
+
+
+def test_standing_ef02_pause_and_revocation_withhold_delivery(standing_ef02):
+    f = standing_ef02
+    f.standing.add(17, "b" * 40)
+    f.i["config"]["chrome_lifecycle"] = "paused"
+    f.save()
+    assert f.s.run().code == "PAUSED_BY_HUMAN"
+    assert f.ui.clicks == 0
+    f.i["config"]["chrome_lifecycle"] = "observe"
+    del f.i["config"]["ui_delivery"]
+    f.save()
+    assert f.s.run().code == "REGISTERED_TARGETS_INVALID"
+    assert f.ui.clicks == 0
+
+
+def test_standing_agy_observes_expired_preparation_as_persistent_enrollment(dual_route):
+    f = dual_route
+    f.sources.targets.clear()
+    f.sources.repo["owner"] = {"id": 711}
+    scope = {"repository_id": 3101, "creator_id": 711, "title_prefix": "[WAKEHUB PROJECT] ",
+             "not_before": "2026-11-15T00:00:00Z", "account_id": f.ui.account_id}
+    f.consent.update(standing_issue=scope, grants=[])
+    f.issue.issue["title"] = scope["title_prefix"] + "fixture"
+    query = r.urlencode({"state": "all", "sort": "created", "direction": "asc",
+                         "since": scope["not_before"], "per_page": 5, "page": 1})
+    f.sources.responses[f"{f.sources.root_url}/issues?{query}"] = [f.issue.issue]
+    f.i["config"]["registration_lease_seconds"] = 60 * 24 * 3600
+    f.save()
+    origin = f.origin()
+    origin.update(issued_ms=1_000_000, expires_ms=1_000_000 + 30 * 24 * 3600 * 1000)
+    with sqlite3.connect(f.s.path) as db:
+        db.execute("UPDATE local_origin SET record=?", (json.dumps(origin),))
+
+    def sent(request):
+        f.ui.outbound["turn-standing"] = request.canonical_bytes.decode()
+        return "AGY_REPORTED_SEND"
+
+    f.agy.effect = sent
+    result = f.s.run()
+    assert result.code == "LOCAL_UI_EXISTING_TURN_RECONCILED"
+    assert len(f.agy.calls) == f.ui.observations == 1 and f.ui.clicks == 0
+    assert f.s.run().replayed and len(f.agy.calls) == 1
+
+
+@pytest.mark.parametrize("account_id", [None, "foreign-account"])
+def test_agy_blocks_missing_or_foreign_account_before_launch(dual_route, account_id):
+    f = dual_route
+    f.select("github-issue-created")
+    f.ui.account_id = account_id
+    assert f.s.run().code == "ACCOUNT_UNPROVEN"
+    assert f.agy.calls == [] and f.ui.clicks == 0
+
+
+def test_agy_report_with_foreign_account_remains_unknown_until_independent_witness(dual_route):
+    f = dual_route
+    f.select("ef02-completion")
+
+    def reported(request):
+        f.ui.outbound["turn-agy"] = request.canonical_bytes.decode()
+        f.ui.account_id = "foreign-account"
+        return "AGY_REPORTED_SEND"
+
+    f.agy.effect = reported
+    assert f.s.run().status == "UNKNOWN_EFFECT"
+    assert f.s.run().status == "UNKNOWN_EFFECT"
+    assert len(f.agy.calls) == 1 and f.ui.clicks == 0
+    f.ui.account_id = "fixture-account"
+    assert f.s.run().code == "LOCAL_UI_EXISTING_TURN_RECONCILED"
+    assert len(f.agy.calls) == 1 and f.ui.clicks == 0
+
+
+def test_agy_standby_revalidates_prior_turn_inventory(dual_route):
+    f = dual_route
+    f.select("ef02-completion")
+
+    def unattempted(_):
+        f.ui.outbound["changed-ref"] = "Other turn"
+        return "AGY_WINDOWS_PROCESS_QUOTA"
+
+    f.agy.effect = unattempted
+    assert f.s.run().code == "AGY_STANDBY_SURFACE_CHANGED"
+    assert len(f.agy.calls) == 1 and f.ui.clicks == f.ui.inserts == 0
 
 
 def test_dual_route_default_uses_fixed_doorbell_and_independent_witness(dual_route):
@@ -4877,7 +5137,7 @@ def test_dual_route_default_uses_fixed_doorbell_and_independent_witness(dual_rou
     assert len(f.agy.calls) == f.ui.observations == 1 and f.ui.inserts == f.ui.clicks == 0
 
 
-@pytest.mark.parametrize("code", ["AGY_LAUNCH_NOT_ATTEMPTED", "AGY_PREINVOCATION_QUOTA"])
+@pytest.mark.parametrize("code", ["AGY_LAUNCH_NOT_ATTEMPTED", "AGY_WINDOWS_PROCESS_QUOTA"])
 @pytest.mark.parametrize("ready", [True, False])
 def test_dual_route_fallback_requires_trusted_no_invocation_and_ready_standby(dual_route, code, ready):
     f = dual_route
@@ -4947,6 +5207,7 @@ def test_dual_route_unknown_reconciles_only_with_independent_user_turn(dual_rout
     (b"quota exhausted", "AGY_RECEIPT_UNPROVEN"),
     (b"x" * (r._AGY_OUTPUT_LIMIT + 1), "AGY_OUTPUT_LIMIT"),
     (None, "AGY_REPORTED_SEND"),
+    ("launch-quota", "AGY_WINDOWS_PROCESS_QUOTA"),
 ])
 def test_dual_route_powershell_launch_uses_fixed_argv_and_bounded_receipt(flat05, monkeypatch, output, expected):
     from ai_commerce.remote import worker
@@ -4966,17 +5227,26 @@ def test_dual_route_powershell_launch_uses_fixed_argv_and_bounded_receipt(flat05
     def popen(argv, *, cwd, env, shell, stdin, **kwargs):
         effects.append("launch")
         assert argv[1:] == ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", r._AGY_POWERSHELL]
-        assert "--model gemini-4-hydrogen-low --effort low" in argv[-1]
+        assert "--model $model --effort $effort" in argv[-1]
+        assert env["AI_COMMERCE_WAKE_AGY_MODEL"] == "gemini-4-hydrogen-low"
+        assert env["AI_COMMERCE_WAKE_AGY_EFFORT"] == "low"
         assert request.binding.chat_url not in argv[-1]
         assert cwd == workspace and shell is False and stdin == subprocess.DEVNULL
         assert env["AI_COMMERCE_WAKE_AGY_EXE"] == str(executable) and "GH_TOKEN" not in env
         header, body = env["AI_COMMERCE_WAKE_AGY_PROMPT"].split("\n", 1)
         assert header.startswith("/wakehub-executor ")
-        assert json.loads(body)["message"].encode() == request.canonical_bytes
+        payload = json.loads(body)
+        assert payload["message"].encode() == request.canonical_bytes
+        assert payload["account_id"] == "fixture-account" and payload["prior_refs"] == []
+        if output == "launch-quota":
+            error = OSError("fixture native CreateProcess quota refusal")
+            error.winerror = 1816
+            raise error
         report = json.dumps({"conversation_id": "fake-conversation", "status": "SUCCESS", "response": json.dumps({
             "event_key": request.event_key, "outcome": "SEND_ATTEMPTED",
         })}).encode()
-        return SimpleNamespace(stdout=io.BytesIO(report if output is None else output), stderr=io.BytesIO(),
+        return SimpleNamespace(stdout=io.BytesIO(report if output is None else output),
+                               stderr=io.BytesIO(b"fixture warning"),
                                poll=lambda: 0, returncode=0)
 
     monkeypatch.setenv("GH_TOKEN", "synthetic-token-not-for-agy")
@@ -4986,9 +5256,11 @@ def test_dual_route_powershell_launch_uses_fixed_argv_and_bounded_receipt(flat05
     monkeypatch.setattr(worker, "_windows_diagnostic_job", lambda: SimpleNamespace(
         attach=lambda child: effects.append("attach"), close=lambda: effects.append("close")))
     result = r._launch_agy(runtime, {}, request, f.consent["marker_digest"], surface,
-                           grant["expires_ms"], lambda: False, lambda: effects.append("validate"))
+                           grant["expires_ms"], lambda: False, lambda: effects.append("validate"),
+                           account_id="fixture-account", revalidate_running=lambda: None)
     assert result.code == expected and result.elapsed_ms >= 0
-    assert effects == ["validate", "launch", "attach", "close"]
+    assert effects == (["validate", "launch", "close"] if output == "launch-quota"
+                       else ["validate", "launch", "attach", "close"])
 
 
 @pytest.mark.parametrize("fault, expected", [
@@ -5253,7 +5525,7 @@ def test_flat06_inconclusive_observation_preserves_unknown(flat05, monkeypatch, 
         f.exact.turns.clear()
     elif fault == "owner":
         owner = f.s.owner()
-        monkeypatch.setattr(r.chrome_acquisition, "_enrollment_operator", lambda *, attended=True: owner)
+        monkeypatch.setattr(r.chrome_acquisition, "_enrollment_operator", lambda **_: owner)
         f.i["process"]["OwnerSid"] = "S-1-5-21-111-222-333-1002"
     elif fault == "profile":
         argv = f.i["environment"].command()
@@ -5382,7 +5654,7 @@ def test_flat06_reconciliation_rejects_reference_owned_by_another_source(flat05)
     assert f.ui.inserts == f.ui.clicks == 2
 
 
-def test_flat06_full_journal_preserves_prior_dedup_and_unknown(flat05):
+def test_flat06_journal_grows_and_preserves_prior_dedup_and_unknown(flat05):
     f = flat05
     assert f.s.run().code == "LOCAL_UI_OWNER_AUTHORIZED_TURN_OBSERVED"
     ef02, issue = f.sources.targets
@@ -5415,14 +5687,17 @@ def test_flat06_full_journal_preserves_prior_dedup_and_unknown(flat05):
     new = f.sources.targets[-1]
     f.sources.targets[:] = [new, ef02, issue]
     f.save()
-    assert f.s.run().code == "JOURNAL_FULL"
+    assert f.s.run().code == "LOCAL_UI_DELIVERY_GRANT_REQUIRED"
+    grown = raw_rows()
+    assert len(grown[0]) == 129 and len(grown[1]) == 3
+    assert set(before[0]) <= set(grown[0]) and set(before[1]) <= set(grown[1])
     f.sources.targets[:] = [ef02, issue]
     f.save()
     assert f.s.run().code == "LOCAL_UI_OWNER_AUTHORIZED_TURN_OBSERVED"
     f.sources.targets.reverse()
     f.save()
     assert f.s.run().status == "UNKNOWN_EFFECT"
-    assert raw_rows() == before and f.ui.inserts == f.ui.clicks == 2
+    assert raw_rows() == grown and f.ui.inserts == f.ui.clicks == 2
 
 
 @pytest.mark.parametrize("fault,expected,clicks", [

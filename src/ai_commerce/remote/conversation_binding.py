@@ -86,6 +86,11 @@ def resolve_binding(event: dict, *, route_id: str, registry_path: Path,
         registry = _decode_unique(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise BindingError("REGISTRY_UNAVAILABLE") from exc
+    return _match_registry(event, route_id, registry)
+
+
+def _match_registry(event: dict, route_id: str, registry: object) -> ResolvedBinding:
+    """Match a validated event against the caller's already-read registry."""
     if (not isinstance(registry, dict) or set(registry) != {"version", "routes", "claims"}
             or type(registry["version"]) is not int or registry["version"] != 1):
         raise BindingError("REGISTRY_INVALID")

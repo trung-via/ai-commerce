@@ -6,7 +6,7 @@ workflow's immutable request archive AND its exact completion artifact/event.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import io
 import re
@@ -18,6 +18,7 @@ import zipfile
 from ._private_state import PrivateJsonState, PrivateStateError
 from .conversation_binding import _decode_unique
 from .github_artifact_authority import _API, _MAX_JSON, _MAX_ZIP, _json_from_archive
+from .reuse import load_approved_candidates
 from .validation import fingerprint, validate_batch, verify_registry
 
 REPOSITORY = "trung-via/ai-commerce"
@@ -142,7 +143,7 @@ class IssueRunRegistrar:
     def _json(self, path):
         return self.reader.read_json(_ROOT + path, self.reader.credential())
 
-    def _request(self, request):
+    def _request(self, request, *, approved_reuse=None):
         intent = self.intent
         if (not isinstance(request, dict) or fingerprint(request) != intent.request_fingerprint or
                 request.get("actor") != intent.actor or request.get("batch_id") != intent.batch_id or
@@ -152,7 +153,7 @@ class IssueRunRegistrar:
             validate_batch(request, schema=self.repository_root / "contracts/RemoteActionBatch.v1.schema.json",
                            registry=verify_registry(self.repository_root / ".github/ef02/verify-profiles.json"),
                            issuer_login=intent.issuer_login, owner_login="trung-via",
-                           brain_issuers=self.brain_issuers)
+                           brain_issuers=self.brain_issuers, approved_reuse=approved_reuse)
         except Exception:
             raise RegistrationBlocked("REQUEST_AUTHORIZATION_INVALID") from None
         return request
@@ -173,20 +174,28 @@ class IssueRunRegistrar:
                 workflow["id"] != intent.workflow_id or workflow.get("state") != "active" or
                 workflow.get("path") != ".github/workflows/ef02-batch.yml"):
             raise RegistrationBlocked("WORKFLOW_IDENTITY_MISMATCH")
+        self._issue_request()
+
+    def _issue_request(self, *, creator_id=None, title_prefix="[EF02]", approved_reuse=None):
+        intent = self.intent
         issue = self._json(f"/issues/{intent.issue_number}")
         if (not isinstance(issue, dict) or type(issue.get("number")) is not int or
                 issue["number"] != intent.issue_number or "pull_request" in issue or
                 issue.get("html_url") != f"https://github.com/{REPOSITORY}/issues/{intent.issue_number}" or
                 not isinstance(issue.get("user"), dict) or
                 issue["user"].get("login") != intent.issuer_login or
-                not isinstance(issue.get("title"), str) or not issue["title"].startswith("[EF02]") or
+                not isinstance(issue.get("title"), str) or not issue["title"].startswith(title_prefix) or
                 not isinstance(issue.get("body"), str) or
                 len(issue["body"].encode("utf-8")) > _MAX_JSON):
             raise RegistrationBlocked("ISSUE_IDENTITY_MISMATCH")
+        if creator_id is not None and (
+                type(issue["user"].get("id")) is not int or issue["user"]["id"] != creator_id or
+                issue["user"].get("type") != "User"):
+            raise RegistrationBlocked("ISSUE_CREATOR_UNPROVEN")
         text = issue["body"].strip()
         if text.startswith("~~~json") and text.endswith("~~~"):
             text = text[7:-3].strip()
-        self._request(_decode_unique(text))
+        return self._request(_decode_unique(text), approved_reuse=approved_reuse)
 
     def _run(self, run_id):
         intent = self.intent
@@ -206,8 +215,9 @@ class IssueRunRegistrar:
             raise RegistrationBlocked("RUN_STATUS_INVALID")
         return run
 
-    def _artifacts(self, run_id):
-        listing = self._json(f"/actions/runs/{run_id}/artifacts?per_page=100")
+    @staticmethod
+    def _artifacts(read_json, run_id):
+        listing = read_json(f"/actions/runs/{run_id}/artifacts?per_page=100")
         arts = listing.get("artifacts") if isinstance(listing, dict) else None
         if (not isinstance(arts, list) or type(listing.get("total_count")) is not int or
                 not 0 <= listing["total_count"] <= 100 or listing["total_count"] != len(arts) or
@@ -226,7 +236,7 @@ class IssueRunRegistrar:
         run = self._run(run_id)
         if run["status"] != "completed":
             return None  # Even an unfinished competitor prevents adoption.
-        artifacts = self._artifacts(run_id)
+        artifacts = self._artifacts(self._json, run_id)
         snapshots = [a for a in artifacts if re.fullmatch(r"ef02-request-[1-9][0-9]*", a["name"])]
         if not snapshots:
             return None  # Upload/validation may not have produced the snapshot yet.
@@ -237,16 +247,23 @@ class IssueRunRegistrar:
             if explicit:
                 raise RegistrationBlocked("REQUEST_ISSUE_MISMATCH")
             return False  # Authenticated workflow snapshot belongs to another Issue.
+        request, digest = self._request_archive(self.reader, item)
+        return self._completion(run_id, self._request(request), item["id"], digest)
+
+    @staticmethod
+    def _request_archive(reader, item, *, require_digest=False):
         if item.get("expired") is not False:
             raise RegistrationBlocked("REQUEST_ARTIFACT_INVALID")
-        raw = self.reader.read_archive(_ROOT + f"/actions/artifacts/{item['id']}/zip", self.reader.credential())
+        raw = reader.read_archive(_ROOT + f"/actions/artifacts/{item['id']}/zip", reader.credential())
         if not isinstance(raw, bytes) or len(raw) > _MAX_ZIP:
             raise RegistrationBlocked("REQUEST_ZIP_INVALID")
         digest = hashlib.sha256(raw).hexdigest()
-        if item.get("digest") is not None and item["digest"] != "sha256:" + digest:
+        if (require_digest or item.get("digest") is not None) and item.get("digest") != "sha256:" + digest:
             raise RegistrationBlocked("REQUEST_DIGEST_MISMATCH")
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
-            request = self._request(_json_from_archive(archive, "request.json"))
+            return _json_from_archive(archive, "request.json"), digest
+
+    def _completion(self, run_id, request, request_artifact_id, digest):
         result = self.reader.candidate(self.intent.target(run_id))
         if result is None:
             return None
@@ -255,9 +272,98 @@ class IssueRunRegistrar:
                 (a["action_id"], a["attempt_id"]) for a in event["actions"]):
             raise RegistrationBlocked("REQUEST_ACTIONS_MISMATCH")
         record = {"version": 1, "intent": asdict(self.intent), "run_id": run_id,
-                  "event_id": event["event_id"], "request_artifact_id": item["id"],
+                  "event_id": event["event_id"], "request_artifact_id": request_artifact_id,
                   "request_digest": digest}
         return record, event, report
+
+    @classmethod
+    def resolve_standing(cls, *, reader, repository_root, scope, repository, workflow_path,
+                         run_id, attempt):
+        """Derive exact selectors from the authenticated run's immutable request archive."""
+        def read_json(path):
+            return reader.read_json(_ROOT + path, reader.credential())
+
+        run = read_json(f"/actions/runs/{run_id}")
+        owner_id = scope["creator_id"]
+
+        def same_owner(actor):
+            return (type(actor) is dict and type(actor.get("id")) is int and actor["id"] == owner_id
+                    and actor.get("login") == "trung-via")
+
+        def same_repository(repo):
+            return (type(repo) is dict and type(repo.get("id")) is int
+                    and repo["id"] == scope["repository_id"] and repo.get("full_name") == REPOSITORY)
+
+        created = run.get("created_at") if type(run) is dict else None
+        if (type(run) is not dict or type(run.get("id")) is not int or run["id"] != run_id
+                or type(run.get("run_attempt")) is not int or run["run_attempt"] != attempt
+                or type(run.get("workflow_id")) is not int or run["workflow_id"] != scope["workflow_id"]
+                or run.get("path") != workflow_path or run.get("event") != "issues"
+                or run.get("status") != "completed" or not same_repository(run.get("repository"))
+                or not same_repository(run.get("head_repository"))
+                or run.get("head_branch") != repository["default_branch"]
+                or not same_owner(run.get("actor")) or not same_owner(run.get("triggering_actor"))
+                or _timestamp(created) < _timestamp(scope["not_before"])):
+            raise RegistrationBlocked("RUN_IDENTITY_MISMATCH")
+
+        if workflow_path == ".github/workflows/issue-ingress.yml":
+            references = run.get("referenced_workflows")
+            branch = repository["default_branch"]
+            expected_ref = "refs/heads/" + branch
+            workflow = REPOSITORY + "/.github/workflows/ef02-batch.yml"
+            head = run.get("head_sha")
+
+            def matches_reference(ref):
+                if type(ref) is not dict or ref.get("sha") != head:
+                    return False
+                return (ref.get("path") in (workflow + "@" + expected_ref, workflow + "@" + branch,
+                                           workflow + "@" + head)
+                        or (ref.get("path") == workflow and ref.get("ref") == expected_ref))
+
+            if (type(head) is not str or not _SHA.fullmatch(head) or type(references) is not list
+                    or sum(matches_reference(ref) for ref in references) != 1):
+                raise RegistrationBlocked("EF02_REUSABLE_WORKFLOW_UNPROVEN")
+
+        artifacts = cls._artifacts(read_json, run_id)
+        snapshots = [(a, re.fullmatch(r"ef02-request-([1-9][0-9]*)", a["name"])) for a in artifacts]
+        snapshots = [(a, match) for a, match in snapshots if match is not None]
+        if not snapshots:
+            return None
+        if len(snapshots) != 1:
+            raise RegistrationBlocked("REQUEST_ARTIFACT_AMBIGUOUS")
+        item, match = snapshots[0]
+        result_name = f"ef02-results-{run_id}-{attempt}"
+        results = [a for a in artifacts if a["name"] == result_name]
+        if not results:
+            return None
+        if len(results) != 1 or results[0].get("expired") is not False:
+            raise RegistrationBlocked("ARTIFACT_LIST_INVALID")
+        result = results[0]
+        result_digest = result.get("digest")
+        if type(result_digest) is not str or not re.fullmatch(r"sha256:[0-9a-f]{64}", result_digest):
+            raise RegistrationBlocked("ARTIFACT_DIGEST_INVALID")
+
+        request, archive_digest = cls._request_archive(reader, item, require_digest=True)
+        batch = request.get("batch_id")
+        if type(batch) is not str or not batch.startswith(scope["batch_prefix"]):
+            return None
+        intent = RegistrationIntent(
+            REPOSITORY, int(match.group(1)), batch, request.get("source_sha"), scope["workflow_id"],
+            attempt, "trung-via", request.get("actor"), fingerprint(request), created,
+            (datetime.fromtimestamp(_timestamp(created), timezone.utc) + timedelta(seconds=1))
+            .strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+        registrar = cls(reader=reader, intent=intent, store=None, repository_root=repository_root)
+        approved = load_approved_candidates(repository_root / ".github/ef02/approved-candidates.v1.json")
+        validated = registrar._issue_request(creator_id=owner_id, title_prefix=scope["title_prefix"],
+                                             approved_reuse=approved)
+        # The current issue must match the immutable request fingerprint.
+        selected = registrar._completion(run_id, validated, item["id"], archive_digest)
+        if selected is None:
+            return None
+        record, event, report = selected
+        _record_valid(record, intent)
+        return intent.target(run_id), event, report, result["id"], result_digest
 
     def resolve(self, *, run_id=None):
         """One snapshot per poll. Identity failures escape; they never restart discovery."""

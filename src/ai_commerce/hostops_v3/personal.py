@@ -463,18 +463,19 @@ def _clean_autostart_receipt(code, *, operation=_CLEAN_AUTOSTART):
     return result
 
 
-def _require_protected_clean_runner(event_name: str):
+def _require_protected_clean_runner(event_name: str, *, reconcile: bool = False):
     # main() has already validated the exact authenticated event. This narrows
     # the non-TTY bridge to the protected main workflow's dedicated runner.
     expected = {
         "GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": event_name,
         "GITHUB_REPOSITORY": REPO, "GITHUB_REPOSITORY_OWNER": OWNER,
         "GITHUB_ACTOR": OWNER, "GITHUB_TRIGGERING_ACTOR": OWNER,
-        "GITHUB_REF": "refs/heads/main", "GITHUB_RUN_ATTEMPT": "1",
+        "GITHUB_REF": "refs/heads/main",
         "GITHUB_WORKFLOW_REF": REPO + "/.github/workflows/issue-ingress.yml@refs/heads/main",
         "RUNNER_ENVIRONMENT": "self-hosted", "RUNNER_NAME": "AI-COMMERCE-HOSTOPS-01",
     }
     if (os.name != "nt" or any(os.environ.get(key) != value for key, value in expected.items())
+            or not re.fullmatch(r"[1-9][0-9]*" if reconcile else "1", os.environ.get("GITHUB_RUN_ATTEMPT", ""))
             or any(key.startswith("AI_COMMERCE_GIT_GUARD_") for key in os.environ)):
         deny("PROTECTED_HOSTOPS_ONLY")
 
@@ -522,7 +523,10 @@ def _persistent_clean_source(acquisition, sha, *, pin_runtime=False):
                 or _git("config", "--get", "remote.origin.url").strip() not in TRUSTED_ORIGIN_URLS
                 or _git("rev-parse", "HEAD", "refs/remotes/origin/main").splitlines() != [sha, sha]):
             deny("LOCAL_MAIN_SYNC_REQUIRED")
-        status_lines = [line for line in _git("status", "--porcelain=v1", "--untracked-files=all").splitlines()
+        # The supervisor loads source from this isolated src tree. Unrelated
+        # untracked operator data cannot affect its source custody.
+        status = (("--untracked-files=all", "--", "src") if pin_runtime else ("--untracked-files=all",))
+        status_lines = [line for line in _git("status", "--porcelain=v1", *status).splitlines()
                         if line.strip()]
     except (OSError, ValueError, Denied):
         deny("LOCAL_MAIN_SYNC_REQUIRED")
@@ -1167,7 +1171,7 @@ def _deploy_protected_supervisor(event):
     failure = "PROTECTED_HOSTOPS_ONLY"
     _supervisor_receipt(failure, issue_number)  # Check projection before native access.
     try:
-        _require_protected_clean_runner("issue_comment")
+        _require_protected_clean_runner("issue_comment", reconcile=True)
         sha = _protected_clean_workflow_sha(write=True)
         failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
         from ai_commerce.remote import chrome_acquisition as acquisition
@@ -1178,6 +1182,10 @@ def _deploy_protected_supervisor(event):
         if Path(runtime.__file__).absolute() != workflow_runtime:
             deny(failure)
         source = _persistent_clean_source(acquisition, sha, pin_runtime=True)
+        rerun = os.environ["GITHUB_RUN_ATTEMPT"] != "1"
+        if (rerun and runtime._supervisor_deployment_value("StartPending") is None
+                and runtime._supervisor_deployment_value("Run") is None):
+            return _supervisor_receipt("PROTECTED_HOSTOPS_ONLY", issue_number)
         root = ROOTS["workspace"]
 
         def read_owner():
@@ -1215,11 +1223,12 @@ def _deploy_protected_supervisor(event):
             str(root), str(dependencies), "$(Arg0)",
         ])
 
-        def recheck():
+        def recheck(*, check_source=False):
             nonlocal failure
-            failure = "SOURCE_CUSTODY_UNVERIFIED"
-            if _persistent_clean_source(acquisition, sha, pin_runtime=True) != source:
-                deny(failure)
+            if check_source:
+                failure = "SOURCE_CUSTODY_UNVERIFIED"
+                if _persistent_clean_source(acquisition, sha, pin_runtime=True) != source:
+                    deny(failure)
             failure = "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
             if read_owner() != (owner, desktop):
                 deny(failure)
@@ -1284,6 +1293,11 @@ def _deploy_protected_supervisor(event):
                 return _supervisor_receipt("SUPERVISOR_TASK_CONFLICT", issue_number, sha)
             if state == "BUSY" or runtime._supervisor_active():
                 return _supervisor_receipt("SUPERVISOR_ACTIVE_UNVERIFIED", issue_number, sha)
+            if rerun:
+                # Only a fresh dispatch can reserve a start or install the task.
+                if runtime._supervisor_deployment_value("Run") is None:
+                    return _supervisor_receipt("PROTECTED_HOSTOPS_ONLY", issue_number)
+                return _supervisor_receipt("SUPERVISOR_START_NOT_ATTEMPTED", issue_number, sha)
 
             recheck()
             failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
@@ -1293,7 +1307,7 @@ def _deploy_protected_supervisor(event):
                 return _supervisor_receipt("SUPERVISOR_TASK_CONFLICT", issue_number, sha)
             if state != "READY" or runtime._supervisor_active():
                 return _supervisor_receipt("SUPERVISOR_ACTIVE_UNVERIFIED", issue_number, sha)
-            recheck()
+            recheck(check_source=True)
             failure = "SUPERVISOR_START_UNKNOWN"
             intent = {**intent_pins, "nonce": secrets.token_hex(16)}
             pending = json.dumps(intent)
