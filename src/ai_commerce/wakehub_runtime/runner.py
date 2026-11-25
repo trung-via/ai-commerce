@@ -4015,7 +4015,10 @@ def _resolve_runtime_config(repository_root: Path, *, owner: tuple[Path, int, st
         if owner is None:
             return None
         if observe_only:
-            return _observe_only_config(path, repository_root, owner, lambda: False, protected=protected)[1]
+            chrome, pin = _observe_only_config(path, repository_root, owner, lambda: False, protected=protected)
+            if protected and isinstance(chrome, NativeChrome9444) and chrome.environment.config_path == path:
+                chrome_acquisition._verify_google_chrome(chrome.environment)
+            return pin
         runtime = _read_runtime_config(path, repository_root, registration_only=registration_only)
         _validate_config_references(runtime, owner[2])
         if "chrome_config" in runtime.raw:
@@ -4046,64 +4049,22 @@ def _resolve_runtime_config(repository_root: Path, *, owner: tuple[Path, int, st
             except FileNotFoundError:
                 continue
             raw = _read_owned_json(path, repository_root)
-            if raw.keys() == {"version", "executable", "user_data_dir", "profile_directory",
-                              "cdp_endpoint", "allow_launch", "exclusive_user_data"}:
+            if raw.keys() == chrome_acquisition._CHROME_CONFIG_FIELDS:
                 continue
             found.append((path, validate(path)))
+        if not found and observe_only and protected:
+            env, pin = _legacy_health_config(repository_root, owner)
+            chrome_acquisition._verify_google_chrome(env)
+            return env.config_path, pin
         _require(found, "LOCAL_CONFIG_REQUIRED")
         _require(len(found) == 1, "LOCAL_CONFIG_AMBIGUOUS")
         return found[0]
     except (OSError, ValueError, TypeError, KeyError, RecursionError, PrivateStateError) as exc:
-        if isinstance(exc, RuntimeHold) and str(exc) in {
+        if isinstance(exc, (RuntimeHold, chrome_acquisition._EnrollmentHold)) and str(exc) in {
             "LOCAL_CONFIG_REQUIRED", "LOCAL_CONFIG_STALE", "LOCAL_CONFIG_AMBIGUOUS",
-            "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED",
+            "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED", "LOCAL_CONFIG_CHANGED",
         }:
-            raise
-        raise RuntimeHold("LOCAL_CONFIG_INVALID") from None
-
-
-def _bootstrap_supervisor_config(repository_root: Path, owner: tuple[Path, int, str]) -> None:
-    """Publish initial health configuration after protected deployment checks for existing config."""
-    local, _, sid = owner
-    try:
-        env = chrome_acquisition._supervisor_9444_environment(local, repository_root, sid)
-        _require(env is not None, "LOCAL_CONFIG_REQUIRED")
-        chrome_acquisition._verify_google_chrome(env)
-        base = local / "AI-Commerce"
-        path = base / _RUNTIME_CONFIG_LOCATIONS[0]
-        _require(_private_identity(base) == sid and chrome_acquisition._no_links(path),
-                 "LOCAL_CONFIG_INVALID")
-        path.parent.mkdir(mode=0o700, exist_ok=True)
-        with _private_access(path, repository_root) as (principal, files):
-            _require(principal == sid, "LOCAL_CONFIG_INVALID")
-            if path.exists():
-                return
-            name = path.name + "." + token_hex(16) + ".part"
-            temporary = path.with_name(name)
-            fd = files.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                    json.dump({"schema": _CHROME_HEALTH_SCHEMA, "chrome_config": str(env.config_path)}, stream)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                _require(_private_identity(temporary) == sid, "LOCAL_CONFIG_INVALID")
-                try:
-                    if os.name == "nt":
-                        os.rename(temporary, path)  # Windows rename fails if the destination exists.
-                    else:
-                        os.link(name, path.name, src_dir_fd=files.directory_fd, dst_dir_fd=files.directory_fd)
-                except FileExistsError:
-                    pass  # Deployment resolves and validates the winning file.
-            finally:
-                with suppress(FileNotFoundError):
-                    temporary.unlink()
-            if os.name != "nt":
-                os.fsync(files.directory_fd)
-    except (RuntimeHold, chrome_acquisition._EnrollmentHold) as exc:
-        if str(exc) in {"LOCAL_CONFIG_REQUIRED", "LOCAL_CONFIG_AMBIGUOUS"}:
             raise RuntimeHold(str(exc)) from None
-        raise RuntimeHold("LOCAL_CONFIG_INVALID") from None
-    except (OSError, ValueError, TypeError):
         raise RuntimeHold("LOCAL_CONFIG_INVALID") from None
 
 
@@ -4131,10 +4092,30 @@ def _validate_config_references(runtime: _RuntimeConfig, owner: str) -> list[dic
     return registrations
 
 
+def _legacy_health_config(repository_root: Path, owner: tuple[Path, int, str], *,
+                          path: Path | None = None, raw: dict | None = None,
+                          ) -> tuple[chrome_acquisition.ChromeEnvironment, str]:
+    """Pin the sole existing 9444 enrollment for health-only use."""
+    local, _, sid = owner
+    env = chrome_acquisition._supervisor_9444_environment(local, repository_root, sid)
+    _require(env is not None, "LOCAL_CONFIG_REQUIRED")
+    _require(path is None or env.config_path == path, "LOCAL_CONFIG_INVALID")
+    config = _read_owned_json(env.config_path, repository_root, limit=8192) if raw is None else raw
+    _require(chrome_acquisition._environment_from_value(
+        config, env.config_path, repository_root, local_app_data=local) == env, "LOCAL_CONFIG_CHANGED")
+    # Installing the canonical runtime config invalidates a running health-only pin.
+    canonical = local / "AI-Commerce" / _RUNTIME_CONFIG_LOCATIONS[0]
+    _require(chrome_acquisition._no_links(canonical), "LOCAL_CONFIG_INVALID")
+    return env, digest([str(env.config_path), config, canonical.exists()])
+
+
 def _observe_only_config(config_path: Path, repository_root: Path, owner: tuple[Path, int, str],
                          stop: Callable[[], bool], *,
                          protected: bool = False) -> tuple[_SupervisorChrome | NativeChrome9444, str]:
     raw = _read_owned_json(config_path, repository_root)
+    if protected and raw.keys() == chrome_acquisition._CHROME_CONFIG_FIELDS:
+        env, pin = _legacy_health_config(repository_root, owner, path=config_path, raw=raw)
+        return NativeChrome9444(repository_root, env, supervised=True), pin
     if raw.get("schema") == _CHROME_HEALTH_SCHEMA:
         _require(raw.keys() == {"schema", "chrome_config"} and _private_identity(config_path) == owner[2],
                  "LOCAL_CONFIG_INVALID")

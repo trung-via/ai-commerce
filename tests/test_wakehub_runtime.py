@@ -2953,32 +2953,41 @@ def test_runtime_config_discovery_checks_only_known_private_runtime_files(observ
     ("locked_profile", "PROFILE_LOCK_HOLD"),
     ("foreign_port", "WINDOWS_PROBE_INVALID"),
 ])
-def test_bootstrap_health_uses_existing_9444_without_route_or_journal(observe_only, monkeypatch, fault, expected):
+@pytest.mark.parametrize("wrapper", [False, True])
+def test_health_uses_existing_9444_without_route_or_journal(observe_only, monkeypatch, fault, expected, wrapper):
     s = observe_only
     local = s.owner()[0]
     monkeypatch.delenv("AI_COMMERCE_WAKEHUB_CONFIG", raising=False)
     monkeypatch.setattr(r, "_user_runtime_config", lambda _: None)
     cfg = r.Path(s.i["config"]["chrome_config"])
     chrome_bytes = cfg.read_bytes()
-    r._bootstrap_supervisor_config(s.i["root"], s.owner())
+    canonical = local / "AI-Commerce" / "WakeHub" / "runtime-config.json"
+    if wrapper:
+        canonical.parent.mkdir()
+        s.i["save"](canonical, {"schema": r._CHROME_HEALTH_SCHEMA, "chrome_config": str(cfg)})
+    before = {item: item.read_bytes() for item in (canonical, cfg) if item.exists()}
     path, pin = r._resolve_runtime_config(s.i["root"], owner=s.owner(), observe_only=True, protected=True)
-    assert path == local / "AI-Commerce" / "WakeHub" / "runtime-config.json"
-    assert json.loads(path.read_bytes()) == {"schema": r._CHROME_HEALTH_SCHEMA, "chrome_config": str(cfg)}
-    before = path.stat()
-    r._bootstrap_supervisor_config(s.i["root"], s.owner())
-    assert path.stat().st_mtime_ns == before.st_mtime_ns
+    assert path == (canonical if wrapper else cfg)
     assert r._resolve_runtime_config(s.i["root"], owner=s.owner(), observe_only=True, protected=True) == (path, pin)
-    assert cfg.read_bytes() == chrome_bytes
+    assert canonical.parent.exists() is wrapper
 
     if fault == "locked_profile":
         (s.i["environment"].user_data_dir / "Default" / r.chrome_acquisition._MARKERS[0]).touch()
     elif fault == "foreign_port":
         s.i["inventory"]["listeners"][0]["LocalPort"] = 9333
-    result = r.run_supervisor(path, s.i["root"], max_ticks=1, observe_only=True)
+    session, sid = s.owner()[1:]
+    deployment = {"config_digest": pin, "session": session, "sid": sid,
+                  "desktop": r._supervised_desktop(session, sid)}
+    published = []
+    monkeypatch.setattr(r, "_deployment_health", lambda _, *, health_only: (published.append, lambda: None))
+    result = r.run_supervisor(path, s.i["root"], max_ticks=1, observe_only=True, _deployment=deployment)
     assert result.code == expected
+    assert published == [expected]
     assert s.i["native_calls"].count("protocol") == (2 if fault is None else 0)
     assert not s.path.exists() and s.i["browser"].reads == 0
     assert s.requests == [] and s.ticks == []
+    assert cfg.read_bytes() == chrome_bytes
+    assert {item: item.read_bytes() for item in (canonical, cfg) if item.exists()} == before
 
 
 @pytest.mark.parametrize("change", ["demand-start", "preload", "delivery", "missing", "observe"])
@@ -4375,13 +4384,16 @@ def flat04(supervisor, monkeypatch):
                            prepare=prepare, observe=observe, enroll=enroll)
 
 
-def test_bootstrap_transition_requires_exact_enrollment_and_preserves_existing_journal(flat04, monkeypatch):
+def test_legacy_health_transition_requires_exact_enrollment_and_preserves_existing_journal(flat04, monkeypatch):
     f = flat04
     i, s = f.i, f.s
     local = s.owner()[0]
     monkeypatch.setattr(r, "_private_identity", lambda _: s.owner()[2])
-    r._bootstrap_supervisor_config(i["root"], s.owner())
+    monkeypatch.delenv("AI_COMMERCE_WAKEHUB_CONFIG", raising=False)
+    monkeypatch.setattr(r, "_user_runtime_config", lambda _: None)
     canonical = local / "AI-Commerce" / "WakeHub" / "runtime-config.json"
+    legacy, pin = r._resolve_runtime_config(i["root"], owner=s.owner(), observe_only=True, protected=True)
+    assert legacy == r.Path(i["config"]["chrome_config"])
     prepared = f.prepare()
     scope = {"repository_id": 3101, "creator_id": 711, "title_prefix": "[WAKEHUB PROJECT] ",
              "not_before": "2026-11-15T00:00:00Z", "account_id": "fixture-account"}
@@ -4419,10 +4431,15 @@ def test_bootstrap_transition_requires_exact_enrollment_and_preserves_existing_j
 
     def complete(code):
         assert code == "CHROME_OWNED"
+        canonical.parent.mkdir()
         i["save"](canonical, i["config"])
 
-    result = r.run_supervisor(canonical, i["root"], max_ticks=2, observe_only=True,
-                              idle_seconds=2, on_health=complete)
+    session, sid = s.owner()[1:]
+    deployment = {"config_digest": pin, "session": session, "sid": sid,
+                  "desktop": r._supervised_desktop(session, sid)}
+    monkeypatch.setattr(r, "_deployment_health", lambda _, *, health_only: (lambda code: None, lambda: None))
+    result = r.run_supervisor(legacy, i["root"], max_ticks=2, observe_only=True,
+                              idle_seconds=2, on_health=complete, _deployment=deployment)
     assert result.code == "LOCAL_CONFIG_CHANGED" and not s.slot.active
     chrome, _ = setup(canonical)
     assert chrome.runtime.journal.path == s.path

@@ -2028,6 +2028,74 @@ def test_supervisor_adopts_only_a_valid_sole_d5_config(monkeypatch, tmp_path, fa
     assert d5.read_bytes() == before and events == []
 
 
+@pytest.mark.parametrize(("fault", "code"), [
+    (None, None),
+    ("missing", "LOCAL_CONFIG_REQUIRED"),
+    ("duplicate", "LOCAL_CONFIG_AMBIGUOUS"),
+    ("invalid", "LOCAL_CONFIG_INVALID"),
+    ("invalid_runtime", "LOCAL_CONFIG_INVALID"),
+    ("chrome_parent_acl", "LOCAL_CONFIG_INVALID"),
+    ("unsigned", "LOCAL_CONFIG_INVALID"),
+    ("stale_user_config", "LOCAL_CONFIG_STALE"),
+])
+def test_protected_supervisor_resolves_sole_d5_without_wakehub_acl_or_writes(monkeypatch, tmp_path, fault, code):
+    from ai_commerce.remote import local_completion_handoff as handoff
+    from ai_commerce.wakehub_runtime import runner
+
+    legacy_run = ca.run
+    env, repo, home, _, events = logon_fixture(monkeypatch, tmp_path, allow_launch=True)
+    private = home / "AI-Commerce"
+    d5 = private / "D5-Isolated-9444-Trial" / "config.json"
+    d5.parent.mkdir()
+    wakehub = private / "WakeHub"
+    wakehub.mkdir()
+    if fault != "missing":
+        d5.write_bytes(b"{}" if fault == "invalid" else env.config_path.read_bytes())
+    if fault != "duplicate":
+        env.config_path.unlink()
+    if fault == "invalid_runtime":
+        (wakehub / "runtime-config.json").write_text("{}", encoding="utf-8")
+
+    def identity(path):
+        aces = (("allow", _OPERATOR_SID), ("allow", "S-1-5-18"))
+        if path == wakehub or (path == d5.parent and fault == "chrome_parent_acl"):
+            aces += (("allow", "S-1-5-32-545"),)  # BUILTIN\Users
+        handoff._check_windows_acl(_OPERATOR_SID, aces, _OPERATOR_SID)
+        return _OPERATOR_SID
+
+    if fault == "unsigned":
+        def unsigned(_):
+            raise ca.AcquisitionBlocked("CHROME_EXECUTABLE_UNTRUSTED")
+        monkeypatch.setattr(ca, "_verify_google_chrome", unsigned)
+    monkeypatch.setattr(handoff, "_private_identity", identity)
+    monkeypatch.setattr(runner, "_private_identity", identity)
+    monkeypatch.delenv(runner._RUNTIME_CONFIG_ENV, raising=False)
+    monkeypatch.setattr(runner, "_user_runtime_config",
+                        lambda _: str(wakehub / "missing.json") if fault == "stale_user_config" else None)
+    owner = home, 1, _OPERATOR_SID
+
+    def resolve():
+        return runner._resolve_runtime_config(repo, owner=owner, observe_only=True, protected=True)
+
+    before = {path: path.read_bytes() if path.is_file() else None for path in private.rglob("*")}
+    if code is None:
+        legacy = ca.load_environment(d5, repo, local_app_data=home)
+        assert legacy_run(legacy, launch=False, opt_in=False)["status"] == "NOT_RUNNING"
+        with pytest.raises(handoff.HandoffBlocked, match="^HANDOFF_PERMISSIONS_INVALID$"):
+            identity(wakehub)
+        path, pin = resolve()
+        assert path == d5 and resolve() == (path, pin)
+        chrome, child_pin = runner._observe_only_config(d5, repo, owner, lambda: False, protected=True)
+        assert isinstance(chrome, runner.NativeChrome9444)
+        assert chrome.environment == legacy and child_pin == pin
+        assert events == ["signature", "inventory", "signature", "signature"]
+    else:
+        with pytest.raises(runner.RuntimeHold, match=f"^{code}$"):
+            resolve()
+        assert events == []
+    assert {path: path.read_bytes() if path.is_file() else None for path in private.rglob("*")} == before
+
+
 @pytest.mark.parametrize("running,listener,cdp_ok,state,code", [
     (False, False, False, "OFF_CLEAN_ENROLLED", "PROCESS_AND_LOCK_ABSENT"),
     (True, False, False, "RUNNING_CDP_FAULT", "CDP_LISTENER_MISSING"),
