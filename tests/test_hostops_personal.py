@@ -3490,46 +3490,68 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.assertEqual({call.args[0] for call in self.config_read.call_args_list}, {self.config})
         self.assertEqual(self.modes.count("start"), 1)
 
-    def test_bootstrap_starts_and_reuses_one_health_only_task(self):
+    def test_legacy_config_starts_and_reuses_one_health_only_task(self):
+        from ai_commerce.remote import chrome_acquisition as acquisition
+
         self.env.pop("AI_COMMERCE_WAKEHUB_CONFIG")
-        self.config = self.owner[0] / "AI-Commerce" / "WakeHub" / "runtime-config.json"
-        chrome_config = self.config.parent.parent / "D5-Isolated-9444-Trial" / "config.json"
+        local = self.owner[0]
+        private = local / "AI-Commerce"
+        self.config = private / "D5-Isolated-9444-Trial" / "config.json"
+        profile = self.config.parent / "UserData"
+        (profile / "Default").mkdir(parents=True)
+        executable = local / "chrome.exe"
+        executable.touch()
+        value = {"version": 1, "executable": str(executable), "user_data_dir": str(profile),
+                 "profile_directory": "Default", "cdp_endpoint": "http://127.0.0.1:9444",
+                 "allow_launch": True, "exclusive_user_data": True}
+        self.config.write_text(json.dumps(value), encoding="utf-8")
+        env = acquisition.load_environment(self.config, self.workspace, local_app_data=local)
+        before = self.config.read_bytes()
+        runtime_config = private / "WakeHub" / "runtime-config.json"
 
-        def create(root, owner):
-            self.assertEqual((root, owner), (self.workspace, self.owner))
-            self.config.parent.mkdir(parents=True)
-            self.config.write_text(json.dumps({
-                "schema": self.runtime._CHROME_HEALTH_SCHEMA, "chrome_config": str(chrome_config),
-            }), encoding="utf-8")
-
-        def read_config(path, root):
-            self.assertEqual((path, root), (self.config, self.workspace))
-            return json.loads(path.read_text(encoding="utf-8"))
+        def read_config(path, root, *, limit=131072):
+            self.assertIn(path, {self.config, runtime_config})
+            self.assertEqual(root, self.workspace)
+            raw = path.read_bytes()
+            self.assertLessEqual(len(raw), limit)
+            return json.loads(raw)
 
         def start(nonce):
             self.state = self.instance
             self.publish_health(nonce=nonce, mode=self.runtime._CHROME_HEALTH_ONLY, health="CDP_PROTOCOL_UNAVAILABLE")
             return self.instance
 
-        bootstrap = self.mock(self.runtime, "_bootstrap_supervisor_config", side_effect=create)
+        selected = self.mock(acquisition, "_supervisor_9444_environment", return_value=env)
+        verify = self.mock(acquisition, "_verify_google_chrome")
         self.mock(self.runtime, "_read_owned_json", side_effect=read_config)
+        self.config_pin = self.runtime._legacy_health_config(self.workspace, self.owner)[1]
         self.launch.side_effect = start
         held = self.dispatch()
         self.assertEqual((held["status"], held["code"]), ("HOLD", "CDP_PROTOCOL_UNAVAILABLE"))
         self.assertIsNone(self.values["StartPending"])
-        nonce = json.loads(self.values["Run"])["nonce"]
+        intent = json.loads(self.values["Run"])
+        self.assertEqual(intent["config"], str(self.config))
+        nonce = intent["nonce"]
         self.publish_health(nonce=nonce, mode=self.runtime._CHROME_HEALTH_ONLY)
         receipt = self.dispatch()
         self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED"))
         self.assertFalse(receipt["wake_sent"])
         self.assertFalse(receipt["exact_chat_verified"])
         self.assertEqual(self.dispatch(), receipt)
-        bootstrap.assert_called_once()
+        self.assertEqual({call.args for call in selected.call_args_list},
+                         {(local, self.workspace, self.owner[2])})
+        verify.assert_called_with(env)
+        self.config_read.assert_not_called()
+        self.assertFalse(runtime_config.parent.exists())
+        self.assertEqual(self.config.read_bytes(), before)
         self.assertEqual(self.modes.count("install"), 1)
         self.assertEqual(self.modes.count("start"), 1)
 
         # A completed config has a new pin. Wait for the old instance to release
         # the receiver, then start the same task without reinstalling it.
+        runtime_config.parent.mkdir()
+        runtime_config.write_text('{"schema":"WakeHubRuntimeR1.v1"}', encoding="utf-8")
+        self.config = runtime_config
         self.config_pin = "f" * 64
         self.config_read.return_value = (None, self.config_pin)
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_ACTIVE_UNVERIFIED")

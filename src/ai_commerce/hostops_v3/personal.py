@@ -1284,17 +1284,7 @@ def _deploy_protected_supervisor(event):
         with runtime._supervisor_slot(runtime._SUPERVISOR_DEPLOY_MUTEX):
             pending = runtime._supervisor_deployment_value("StartPending")
             try:
-                try:
-                    config, config_pin = resolve_config()
-                except runtime.RuntimeHold as exc:
-                    if str(exc) != "LOCAL_CONFIG_REQUIRED" or rerun or pending is not None:
-                        raise
-                    if runtime._supervisor_active():
-                        deny("SUPERVISOR_ACTIVE_UNVERIFIED")
-                    if read_owner() != (owner, desktop):
-                        deny("WINDOWS_OWNER_CONTEXT_UNVERIFIED")
-                    runtime._bootstrap_supervisor_config(root, owner)
-                    config, config_pin = resolve_config()
+                config, config_pin = resolve_config()
             except (runtime.RuntimeHold, Denied) as exc:
                 failure = "SUPERVISOR_START_UNKNOWN" if pending is not None else str(exc)
                 raise

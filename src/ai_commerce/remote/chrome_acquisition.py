@@ -122,6 +122,12 @@ def load_environment(config_path: Path, checkout: Path, *, local_app_data: Path)
         raise AcquisitionBlocked("CONFIG_INVALID") from None
 
 
+_CHROME_CONFIG_FIELDS = frozenset({
+    "version", "executable", "user_data_dir", "profile_directory", "cdp_endpoint",
+    "allow_launch", "exclusive_user_data",
+})
+
+
 def _environment_from_value(value, config_path: Path, checkout: Path, *,
                             local_app_data: Path) -> ChromeEnvironment:
     """Shared closed schema/path validation; this helper never creates a config.
@@ -131,9 +137,7 @@ def _environment_from_value(value, config_path: Path, checkout: Path, *,
     profile rules without weakening that existing-file requirement.
     """
     try:
-        if (not isinstance(value, dict) or set(value) != {
-                "version", "executable", "user_data_dir", "profile_directory",
-                "cdp_endpoint", "allow_launch", "exclusive_user_data"}
+        if (not isinstance(value, dict) or value.keys() != _CHROME_CONFIG_FIELDS
                 or type(value["version"]) is not int or value["version"] != 1
                 or type(value["allow_launch"]) is not bool
                 or value["exclusive_user_data"] is not True
