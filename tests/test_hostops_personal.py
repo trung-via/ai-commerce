@@ -3367,7 +3367,7 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.config_read = self.mock(runner, "_observe_only_config", return_value=(None, self.config_pin))
         self.active = self.mock(runner, "_supervisor_active", return_value=False)
         self.mock(runner, "_supervisor_deployment_value", side_effect=self.values.get)
-        self.mock(runner, "_store_supervisor_deployment_value", side_effect=self.values.__setitem__)
+        self.store = self.mock(runner, "_store_supervisor_deployment_value", side_effect=self.values.__setitem__)
         self.mock(runner, "_supervisor_slot", side_effect=lambda _: nullcontext())
         self.live_process = self.mock(runner, "_supervisor_process", side_effect=lambda pid, *_: 456 if pid == 123 else 999)
         self.mock(runner, "monotonic_ns", return_value=100_000_000_000)
@@ -3446,11 +3446,16 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.assertEqual(self.dispatch()["code"], "PROTECTED_HOSTOPS_ONLY")
         del self.env["AI_COMMERCE_GIT_GUARD_TEST"]
         self.env["GITHUB_RUN_ATTEMPT"] = "2"
-        self.assertEqual(self.dispatch()["code"], "PROTECTED_HOSTOPS_ONLY")
+        for state in ("MISSING", "READY"):
+            with self.subTest(state=state):
+                self.state = state
+                self.assertEqual(self.dispatch()["code"], "PROTECTED_HOSTOPS_ONLY")
         self.desktop_read.assert_not_called()
         self.owner_session.assert_not_called()
         self.config_read.assert_not_called()
         self.spawn.assert_not_called()
+        self.launch.assert_not_called()
+        self.store.assert_not_called()
         self.assertEqual(self.modes, [])
         self.assertEqual(self.values, {})
 
@@ -3550,6 +3555,24 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_STARTED_HEALTH_OBSERVED")
         self.assertNotIn("install", self.modes)
 
+    def test_protected_rerun_reconciles_live_task_and_preserves_a_stopped_run(self):
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_STARTED_HEALTH_OBSERVED")
+        values = self.values.copy()
+        self.modes.clear()
+        self.store.reset_mock()
+        self.env["GITHUB_RUN_ATTEMPT"] = "2"
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_REUSED_HEALTH_OBSERVED")
+        self.active.return_value = False
+        for state in ("READY", "MISSING"):
+            with self.subTest(state=state):
+                self.state = state
+                self.assertEqual(self.dispatch()["code"], "SUPERVISOR_START_NOT_ATTEMPTED")
+        self.assertEqual(self.values, values)
+        self.assertEqual(set(self.modes), {"inspect"})
+        self.store.assert_not_called()
+        self.spawn.assert_not_called()
+        self.launch.assert_called_once()
+
     def test_conflicting_task_is_never_repurposed(self):
         self.state = "CONFLICT"
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_TASK_CONFLICT")
@@ -3590,6 +3613,9 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         receipt = self.dispatch()
         self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "SUPERVISOR_START_UNKNOWN"))
         pending = self.values["StartPending"]
+        self.modes.clear()
+        self.store.reset_mock()
+        self.env["GITHUB_RUN_ATTEMPT"] = "2"
         self.assertEqual(self.dispatch(), receipt)
         self.assertEqual(self.values, {"StartPending": pending})
         nonce = json.loads(pending)["nonce"]
@@ -3597,9 +3623,13 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.state = self.instance
         self.publish_health()
         self.assertEqual(self.dispatch(), receipt)
+        self.store.assert_not_called()
         self.publish_health(nonce=nonce)
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_STARTED_HEALTH_OBSERVED")
         self.assertIsNone(self.values["StartPending"])
+        self.assertEqual(json.loads(self.values["Run"]), {**self.intent(nonce), "instance": self.instance})
+        self.assertEqual(set(self.modes), {"inspect"})
+        self.spawn.assert_not_called()
         self.launch.assert_called_once()
 
     def test_child_desktop_hold_preserves_pending_until_health(self):
@@ -4664,6 +4694,7 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
             ("config", "--get", "remote.origin.url"): "https://github.com/trung-via/ai-commerce.git",
             ("rev-parse", "HEAD", "refs/remotes/origin/main"): f"{self.sha}\n{self.sha}\n",
             ("status", "--porcelain=v1", "--untracked-files=all"): "",
+            ("status", "--porcelain=v1", "--untracked-files=all", "--", "src"): "",
             ("ls-files", "-v", "-z", "--", "src"): "\0".join(tracked_entries) + "\0",
         }
         return root, workflow, source, peer, git
@@ -4677,12 +4708,38 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
         manifest = sorted([path.relative_to(root / "src").as_posix(), hashlib.sha256(path.read_bytes()).hexdigest()]
                           for path in paths)
         expected = hashlib.sha256(json.dumps(manifest, separators=(",", ":")).encode("ascii")).hexdigest()
+        full_status = ("status", "--porcelain=v1", "--untracked-files=all")
+        scoped_status = (*full_status, "--", "src")
+        (root / "notes.md").write_bytes(b"untracked operator notes\n")
+        git[full_status] = "?? notes.md\n"
         with patch.dict(hostops.ROOTS, workspace=root), patch.dict(self.env, GITHUB_WORKSPACE=str(workflow)), \
                 patch.object(hostops, "__file__", workflow / "src/ai_commerce/hostops_v3/personal.py"), \
-                patch.object(self.acq, "__file__", peer), patch.object(hostops, "_git", side_effect=lambda *a: git[a]):
+                patch.object(self.acq, "__file__", peer), \
+                patch.object(hostops, "_git", side_effect=lambda *args: git[args]) as git_call:
             self.assertEqual(self.real_source(self.acq, self.sha, pin_runtime=True), expected)
+            self.assertEqual([call.args for call in git_call.call_args_list if call.args[0] == "status"],
+                             [scoped_status])
+            git_call.reset_mock()
+            with self.assertRaisesRegex(hostops.Denied, "SOURCE_UNTRACKED_FILE"):
+                self.real_source(self.acq, self.sha)
+            git_call.assert_called_with(*full_status)
+
             (root / runtime).write_bytes(b"reviewed_runtime = False\r\n")
+            git[scoped_status] = f" M {runtime}\n"
+            with self.assertRaisesRegex(hostops.Denied, "LOCAL_MAIN_SYNC_REQUIRED"):
+                self.real_source(self.acq, self.sha, pin_runtime=True)
+            git[scoped_status] = ""
             with self.assertRaisesRegex(hostops.Denied, "SOURCE_BYTES_MISMATCH"):
+                self.real_source(self.acq, self.sha, pin_runtime=True)
+            (root / runtime).write_bytes(raw)
+
+            untracked = "src/ai_commerce/wakehub_runtime/extra.py"
+            (root / untracked).write_bytes(b"untracked_runtime = True\n")
+            git[scoped_status] = f"?? {untracked}\n"
+            with self.assertRaisesRegex(hostops.Denied, "SOURCE_UNTRACKED_FILE"):
+                self.real_source(self.acq, self.sha, pin_runtime=True)
+            git[scoped_status] = ""
+            with self.assertRaisesRegex(hostops.Denied, "SOURCE_UNTRACKED_FILE"):
                 self.real_source(self.acq, self.sha, pin_runtime=True)
 
     def test_persistent_source_allows_crlf_equivalence_for_recognized_text_suffixes_and_reaches_runtime(self):

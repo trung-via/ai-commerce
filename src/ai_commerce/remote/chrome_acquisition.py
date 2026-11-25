@@ -618,7 +618,7 @@ def evaluate(env: ChromeEnvironment, inventory: dict, *, parse=_commandline_argv
         raise AcquisitionBlocked("WINDOWS_PROBE_INVALID") from None
 
 
-def _interactive_session() -> int:
+def _interactive_session(*, protocol_only: bool = False) -> int:
     if os.name != "nt":
         raise AcquisitionBlocked("WINDOWS_INTERACTIVE_REQUIRED")
     import ctypes
@@ -632,16 +632,16 @@ def _interactive_session() -> int:
     session = wintypes.DWORD()
     if not kernel.ProcessIdToSessionId(kernel.GetCurrentProcessId(), ctypes.byref(session)) or not session.value:
         raise AcquisitionBlocked("WINDOWS_INTERACTIVE_REQUIRED")
-    # A session ID alone does not imply a usable interactive input desktop.
-    user32 = ctypes.WinDLL("user32", use_last_error=True)
-    user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-    user32.OpenInputDesktop.restype = wintypes.HANDLE
-    user32.CloseDesktop.argtypes = [wintypes.HANDLE]
-    user32.CloseDesktop.restype = wintypes.BOOL
-    desktop = user32.OpenInputDesktop(0, False, 0x0001)
-    if not desktop:
-        raise AcquisitionBlocked("WINDOWS_INTERACTIVE_REQUIRED")
-    user32.CloseDesktop(desktop)
+    if not protocol_only:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.OpenInputDesktop.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        user32.OpenInputDesktop.restype = wintypes.HANDLE
+        user32.CloseDesktop.argtypes = [wintypes.HANDLE]
+        user32.CloseDesktop.restype = wintypes.BOOL
+        desktop = user32.OpenInputDesktop(0, False, 0x0001)
+        if not desktop:
+            raise AcquisitionBlocked("WINDOWS_INTERACTIVE_REQUIRED")
+        user32.CloseDesktop(desktop)
     # TokenElevation=20; do not launch a browser with an elevated admin token.
     adv = ctypes.WinDLL("advapi32", use_last_error=True)
     adv.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
@@ -786,7 +786,8 @@ def _native_local_app_data() -> Path:
     return _native_known_folder("F1B32785-6FBA-4FCF-9D55-7B8E7F157091")
 
 
-def _enrollment_operator(*, attended: bool = True) -> tuple[Path, int, str]:
+def _enrollment_operator(*, attended: bool = True,
+                         protocol_only: bool = False) -> tuple[Path, int, str]:
     # Nothing at this entrypoint can turn an Issue/runner request into enrollment.
     if os.name != "nt":
         raise _EnrollmentHold("WINDOWS_INTERACTIVE_REQUIRED")
@@ -794,12 +795,14 @@ def _enrollment_operator(*, attended: bool = True) -> tuple[Path, int, str]:
         raise _EnrollmentHold("LOCAL_OPERATOR_ONLY")
     if attended and (sys.stdin is None or not sys.stdin.isatty()):
         raise _EnrollmentHold("WINDOWS_INTERACTIVE_REQUIRED")
+    if not attended and protocol_only:
+        return _native_operator(protocol_only=True)
     return _native_operator()
 
 
-def _native_operator() -> tuple[Path, int, str]:
-    """Native token and desktop attestation only. Callers supply effect authority."""
-    session = _interactive_session()
+def _native_operator(*, protocol_only: bool = False) -> tuple[Path, int, str]:
+    """Bind the real process token and session. Callers supply effect authority."""
+    session = _interactive_session(protocol_only=True) if protocol_only else _interactive_session()
     from .local_wake_entry import _windows_process_sid
     sid = _windows_process_sid()
     if (type(session) is not int or session <= 0 or not isinstance(sid, str)
