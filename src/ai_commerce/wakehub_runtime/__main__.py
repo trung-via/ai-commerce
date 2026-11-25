@@ -2,13 +2,12 @@
 import argparse
 from dataclasses import asdict
 import json
-import os
 from pathlib import Path
 import sys
 
 from .runner import (
-    Result, RuntimeHold, _CODE_ROOT, diagnostic, register_local_chat, run_native_source_only, run_read_only,
-    run_supervisor,
+    Result, RuntimeHold, _CODE_ROOT, _resolve_runtime_config, diagnostic, register_local_chat,
+    run_native_source_only, run_read_only, run_supervisor,
 )
 
 
@@ -72,12 +71,23 @@ def main(argv: list[str] | None = None) -> int:
     for command in (run, supervisor, prepare, observe):
         command.add_argument("--repository-root", type=Path, help="Checkout excluded from private journal storage.")
         command.add_argument("--config", type=Path,
-                             help="Existing private WakeHubRuntimeR1.v1 local config; never an Issue payload.")
+                             help="Existing private WakeHubRuntimeR1.v1 config with the owner's source registration "
+                                  "and, for supervise, the enrolled Chrome 9444 config. Defaults to the local process "
+                                  "or Windows User setting AI_COMMERCE_WAKEHUB_CONFIG, then the WakeHub directories "
+                                  "under the owner's LOCALAPPDATA/AI-Commerce.")
     args = parser.parse_args(argv)
+    root = args.repository_root or _CODE_ROOT
+    config = args.config
+    if args.command == "run" and args.journal is not None and not (args.diagnostic or args.dry_run):
+        run.error("--journal is diagnostic-only; R1 uses the private local config")
+    if config is None and not (getattr(args, "diagnostic", False) or getattr(args, "dry_run", False)):
+        try:
+            config, _ = _resolve_runtime_config(root, observe_only=getattr(args, "observe_only", False))
+        except RuntimeHold as exc:
+            print(json.dumps(Result("HOLD", str(exc), "SOURCE_ONLY").to_dict(), sort_keys=True))
+            return 2
     if args.command == "register":
-        configured = os.environ.get("AI_COMMERCE_WAKEHUB_CONFIG")
-        config = args.config if args.config is not None else Path(configured) if configured else None
-        result = register_local_chat(config, args.repository_root or _CODE_ROOT,
+        result = register_local_chat(config, root,
                                      registration_id=getattr(args, "registration_id", None))
         if not isinstance(result, Result):
             print(json.dumps({"code": "LOCAL_CHAT_MARKER_PREPARED", **asdict(result)}, sort_keys=True))
@@ -85,14 +95,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result.to_dict(), sort_keys=True))
         return 0 if result.code == "LOCAL_CHAT_REGISTERED_UI_EVIDENCE" else 2
     if args.command == "supervise":
-        configured = os.environ.get("AI_COMMERCE_WAKEHUB_CONFIG")
-        config = args.config if args.config is not None else Path(configured) if configured else None
-
         def report_health(code):
             if sys.stderr is not None:
                 print(json.dumps({"chrome_health": code}), file=sys.stderr, flush=True)
 
-        result = run_supervisor(config, args.repository_root or _CODE_ROOT, dry_run=args.dry_run,
+        result = run_supervisor(config, root, dry_run=args.dry_run,
                                 max_ticks=args.max_ticks, idle_seconds=args.idle_seconds,
                                 max_backoff_seconds=args.max_backoff_seconds,
                                 on_health=report_health,
@@ -117,12 +124,8 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError):
             result = Result("HOLD", "DIAGNOSTIC_JOURNAL_UNAVAILABLE", "SYNTHETIC_FIXTURE")
     else:
-        if args.journal is not None and not args.dry_run:
-            run.error("--journal is diagnostic-only; R1 uses the private local config")
-        configured = os.environ.get("AI_COMMERCE_WAKEHUB_CONFIG")
-        config = args.config if args.config is not None else Path(configured) if configured else None
         run_mode = run_native_source_only if args.native_source_only else run_read_only
-        result = run_mode(config, args.repository_root or _CODE_ROOT, dry_run=args.dry_run,
+        result = run_mode(config, root, dry_run=args.dry_run,
                           target_index=0 if args.target_index is None else args.target_index)
     print(json.dumps(result.to_dict(), sort_keys=True))
     return 0 if (result.status == "ACK" and result.code == "CONSUMER_RECEIPT_RECORDED"

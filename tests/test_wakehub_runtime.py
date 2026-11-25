@@ -809,8 +809,10 @@ def test_diagnostic_reopens_real_journal_and_labels_synthetic(composition):
     assert result.evidence_type == "SYNTHETIC_FIXTURE" and result.replayed
 
 
-def test_cli_help_dry_run_and_default_never_claim_success(capsys, monkeypatch):
+def test_cli_help_dry_run_and_default_never_claim_success(capsys, monkeypatch, tmp_path):
     monkeypatch.delenv("AI_COMMERCE_WAKEHUB_CONFIG", raising=False)
+    monkeypatch.setattr(r.chrome_acquisition, "_enrollment_operator", lambda **_: (tmp_path, 7, "test-owner"))
+    monkeypatch.setattr(r, "_user_runtime_config", lambda local: None)
     with pytest.raises(SystemExit) as exc:
         main(["run", "--help"])
     assert exc.value.code == 0
@@ -818,7 +820,7 @@ def test_cli_help_dry_run_and_default_never_claim_success(capsys, monkeypatch):
     assert main(["run", "--dry-run"]) == 2
     assert json.loads(capsys.readouterr().out)["code"] == "DRY_RUN_NO_EFFECTS"
     assert main(["run"]) == 2
-    assert json.loads(capsys.readouterr().out)["code"] == "LOCAL_AUTHORITY_MISSING"
+    assert json.loads(capsys.readouterr().out)["code"] == "LOCAL_CONFIG_REQUIRED"
 
 
 def github_candidate():
@@ -2872,9 +2874,10 @@ def observe_only(supervisor, monkeypatch):
 
 
 @pytest.mark.parametrize("owned", [False, True])
-def test_observe_only_cli_reads_actual_health_without_journal_or_source(observe_only, capsys, owned):
+def test_observe_only_cli_reads_actual_health_without_journal_or_source(observe_only, capsys, monkeypatch, owned):
     s = observe_only
     s.set_owned(owned)
+    monkeypatch.setenv("AI_COMMERCE_WAKEHUB_CONFIG", "ignored-by-explicit-config")
     assert main(["supervise", "--observe-only", "--config", str(s.i["config_path"]),
                  "--repository-root", str(s.i["root"]), "--max-ticks", "1"]) == 2
     health = "CHROME_OWNED" if owned else "CHROME_ABSENT"
@@ -2883,6 +2886,67 @@ def test_observe_only_cli_reads_actual_health_without_journal_or_source(observe_
     assert json.loads(captured.err) == {"chrome_health": health}
     assert s.i["browser"].reads == 0 and s.requests == [] and s.ticks == []
     assert not s.path.exists()
+
+
+def test_observe_only_cli_reuses_persisted_owner_config(observe_only, monkeypatch, capsys):
+    s = observe_only
+    monkeypatch.delenv("AI_COMMERCE_WAKEHUB_CONFIG", raising=False)
+    local, _, _ = s.owner()
+    config = local / "AI-Commerce" / "WakeHub" / "config.json"
+    config.parent.mkdir()
+    s.i["save"](config, s.i["config"])
+
+    @contextmanager
+    def open_key(hive, name, *, access):
+        assert (hive, name, access) == (1, "Environment", 2)
+        yield 3
+
+    def query(key, name):
+        assert (key, name) == (3, "AI_COMMERCE_WAKEHUB_CONFIG")
+        return "%LOCALAPPDATA%/AI-Commerce/WakeHub/config.json", 5
+
+    monkeypatch.setitem(sys.modules, "winreg", SimpleNamespace(
+        OpenKey=open_key, QueryValueEx=query, HKEY_CURRENT_USER=1, KEY_QUERY_VALUE=2, REG_SZ=4, REG_EXPAND_SZ=5))
+    assert main(["supervise", "--observe-only", "--repository-root", str(s.i["root"]), "--max-ticks", "1"]) == 2
+    assert json.loads(capsys.readouterr().out)["chrome_health"] == "CHROME_OWNED"
+    assert s.requests == [] and s.i["calls"] == [] and not s.path.exists()
+
+
+def test_runtime_config_discovery_checks_only_known_private_runtime_files(observe_only, monkeypatch):
+    s = observe_only
+    monkeypatch.delenv("AI_COMMERCE_WAKEHUB_CONFIG", raising=False)
+    root = s.owner()[0] / "AI-Commerce"
+    chrome = root / "WakeHub" / "config.json"
+    config = root / "WakeHub" / "runtime-config.json"
+    config.parent.mkdir()
+    s.i["save"](chrome, s.i["chrome"])
+    monkeypatch.setattr(r, "_user_runtime_config", lambda local: None)
+
+    def resolve():
+        return r._resolve_runtime_config(s.i["root"], owner=s.owner(), observe_only=True)
+
+    with pytest.raises(r.RuntimeHold, match="^LOCAL_CONFIG_REQUIRED$"):
+        resolve()
+    s.i["save"](config, s.i["config"])
+    assert resolve()[0] == config
+    s.i["save"](chrome, s.i["config"])
+    with pytest.raises(r.RuntimeHold, match="^LOCAL_CONFIG_AMBIGUOUS$"):
+        resolve()
+    monkeypatch.setattr(r, "_user_runtime_config", lambda local: str(root / "missing.json"))
+    with pytest.raises(r.RuntimeHold, match="^LOCAL_CONFIG_STALE$"):
+        resolve()
+    monkeypatch.setenv("AI_COMMERCE_WAKEHUB_CONFIG", str(config))
+    assert resolve()[0] == config
+    s.i["save"](config, {**s.i["config"], "chrome_lifecycle": "demand-start"})
+    with pytest.raises(r.RuntimeHold, match="^LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED$"):
+        resolve()
+    for invalid in ({"registered_source": str(root / "missing.json")},
+                    {"journal": str(s.i["root"] / "journal.sqlite3")},
+                    {"chrome_config": str(root / "missing.json")}):
+        s.i["save"](config, {**s.i["config"], **invalid})
+        with pytest.raises(r.RuntimeHold, match="^LOCAL_CONFIG_INVALID$"):
+            resolve()
+    assert s.requests == [] and s.i["calls"] == [] and not s.path.exists()
 
 
 @pytest.mark.parametrize("change", ["demand-start", "preload", "delivery", "missing", "observe"])
