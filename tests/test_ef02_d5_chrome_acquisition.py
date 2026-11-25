@@ -1997,14 +1997,24 @@ def test_l1a_registry_is_finite_and_legacy_duplicates_hold(monkeypatch, tmp_path
     assert events == []
 
 
-@pytest.mark.parametrize(("fault", "code"), [
-    (None, None),
-    ("duplicate", "LOCAL_CONFIG_AMBIGUOUS"),
-    ("wrong_port", "CONFIG_UNTRUSTED"),
-    ("invalid", "CONFIG_INVALID"),
-    ("foreign_owner", "CONFIG_UNTRUSTED"),
+@pytest.mark.parametrize(("fault", "code", "check"), [
+    (None, None, None),
+    ("duplicate", "LOCAL_CONFIG_AMBIGUOUS", "LEGACY_REGISTRY_AMBIGUOUS"),
+    ("registry_path", "ENROLLMENT_PATH_UNSAFE", "LEGACY_REGISTRY_DISCOVERY"),
+    ("wrong_port", "CONFIG_UNTRUSTED", "CONFIG_SCHEMA"),
+    ("invalid", "CONFIG_INVALID", "CONFIG_SCHEMA"),
+    ("invalid_path", "CHROME_PATH_INVALID", "CONFIG_PATH"),
+    ("malformed_json", "CONFIG_INVALID", "CONFIG_JSON"),
+    ("file_read", "CONFIG_INVALID", "CONFIG_FILE_READ"),
+    ("foreign_owner", "CONFIG_UNTRUSTED", "CONFIG_ROOT_CUSTODY"),
+    ("root_acl", "HANDOFF_PERMISSIONS_INVALID", "CONFIG_ROOT_CUSTODY"),
+    ("parent_acl", "HANDOFF_PERMISSIONS_INVALID", "CONFIG_PARENT_CUSTODY"),
+    ("file_acl", "HANDOFF_PERMISSIONS_INVALID", "CONFIG_FILE_CUSTODY"),
+    ("profile_acl", "OPERATOR_OWNERSHIP_UNPROVEN", "PROFILE_CUSTODY"),
 ])
-def test_supervisor_adopts_only_a_valid_sole_d5_config(monkeypatch, tmp_path, fault, code):
+def test_supervisor_adopts_only_a_valid_sole_d5_config(monkeypatch, tmp_path, fault, code, check):
+    from ai_commerce.remote import local_completion_handoff as handoff
+
     env, repo, home, _, events = logon_fixture(monkeypatch, tmp_path, allow_launch=True)
     d5 = home / "AI-Commerce" / "D5-Isolated-9444-Trial" / "config.json"
     d5.parent.mkdir()
@@ -2018,13 +2028,48 @@ def test_supervisor_adopts_only_a_valid_sole_d5_config(monkeypatch, tmp_path, fa
         d5.write_text(json.dumps(value), encoding="utf-8")
     elif fault == "invalid":
         d5.write_text("{}", encoding="utf-8")
+    elif fault == "invalid_path":
+        value = json.loads(d5.read_bytes())
+        value["executable"] = "private-invalid.exe"
+        d5.write_text(json.dumps(value), encoding="utf-8")
+    elif fault == "malformed_json":
+        d5.write_text('{"private":', encoding="utf-8")
+    elif fault == "file_read":
+        read_text = Path.read_text
+
+        def unreadable(path, *args, **kwargs):
+            if path == d5:
+                raise OSError("private read error")
+            return read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", unreadable)
+    elif fault == "registry_path":
+        no_links = ca._no_links
+        monkeypatch.setattr(ca, "_no_links", lambda path: path != env.config_path and no_links(path))
+
+    failed_custody = {"root_acl": home / "AI-Commerce", "parent_acl": d5.parent, "file_acl": d5,
+                      "profile_acl": env.user_data_dir}
+
+    def identity(path):
+        if path == failed_custody.get(fault):
+            raise handoff.HandoffBlocked("HANDOFF_PERMISSIONS_INVALID")
+        return _OPERATOR_SID
+
+    monkeypatch.setattr(handoff, "_private_identity", identity)
     sid = "S-1-5-21-11-22-33-1002" if fault == "foreign_owner" else _OPERATOR_SID
     before = d5.read_bytes()
-    if code is None:
-        assert ca._supervisor_9444_environment(home, repo, sid) == ca.replace(env, config_path=d5)
-    else:
-        with pytest.raises((ca._EnrollmentHold, ca.AcquisitionBlocked), match=f"^{code}$"):
-            ca._supervisor_9444_environment(home, repo, sid)
+    checks = []
+    observer = ca._supervisor_config_failure
+    token = observer.set(checks.append)
+    try:
+        if code is None:
+            assert ca._supervisor_9444_environment(home, repo, sid) == ca.replace(env, config_path=d5)
+        else:
+            with pytest.raises((ca._EnrollmentHold, ca.AcquisitionBlocked, handoff.HandoffBlocked), match=f"^{code}$"):
+                ca._supervisor_9444_environment(home, repo, sid)
+    finally:
+        observer.reset(token)
+    assert [item.name for item in checks] == ([] if check is None else [check])
     assert d5.read_bytes() == before and events == []
 
 

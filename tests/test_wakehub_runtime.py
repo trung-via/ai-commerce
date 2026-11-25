@@ -2948,6 +2948,189 @@ def test_runtime_config_discovery_checks_only_known_private_runtime_files(observ
     assert s.requests == [] and s.i["calls"] == [] and not s.path.exists()
 
 
+@pytest.fixture
+def supervisor_config_probe(observe_only, monkeypatch):
+    s = observe_only
+    local, _, _ = s.owner()
+    owned = local / "AI-Commerce"
+    canonical = owned / "WakeHub" / "runtime-config.json"
+    chrome = r.Path(s.i["config"]["chrome_config"])
+    state = SimpleNamespace(user=None, ancestor_failure=False, read_failure=False, handles=[])
+
+    @contextmanager
+    def open_key(hive, name, *, access):
+        assert (hive, name, access) == (1, "Environment", 2)
+        yield 3
+
+    def query(key, name):
+        assert (key, name) == (3, r._RUNTIME_CONFIG_ENV)
+        if isinstance(state.user, Exception):
+            raise state.user
+        if state.user is None:
+            raise FileNotFoundError
+        return state.user
+
+    def open_ancestor(path, flags, *, directory):
+        assert directory and flags == 0 and path.is_dir()
+        if state.ancestor_failure and path == chrome.parent:
+            raise r.PrivateStateError("private ancestor handle rejected")
+        state.handles.append(path)
+
+        def close(handle):
+            assert state.handles.pop() == handle
+
+        return path, close
+
+    def open_file(transaction, name, flags):
+        path = transaction.state.path
+        assert flags == os.O_RDONLY and name == path.name and state.handles[-1] == path.parent
+        if state.read_failure and path == chrome:
+            raise OSError("private safe file read rejected")
+        return os.open(path, flags | getattr(os, "O_BINARY", 0))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("config probe attempted a task, registry effect, Chrome access or enrollment")
+
+    monkeypatch.delenv(r._RUNTIME_CONFIG_ENV, raising=False)
+    monkeypatch.setitem(sys.modules, "winreg", SimpleNamespace(
+        OpenKey=open_key, QueryValueEx=query, HKEY_CURRENT_USER=1, KEY_QUERY_VALUE=2, REG_SZ=4, REG_EXPAND_SZ=5))
+    monkeypatch.setattr(r, "os", SimpleNamespace(name="nt", environ=os.environ, O_RDONLY=os.O_RDONLY, fdopen=os.fdopen))
+    monkeypatch.setattr(r, "_windows_handle", open_ancestor)
+    monkeypatch.setattr(r._Transaction, "open", open_file)
+    monkeypatch.setattr(r, "_store_supervisor_deployment_value", forbidden)
+    monkeypatch.setattr(r, "_supervisor_slot", forbidden)
+    monkeypatch.setattr(r.chrome_acquisition, "enroll_existing_9444", forbidden)
+    monkeypatch.setattr(r.chrome_acquisition, "_query_windows", forbidden)
+    monkeypatch.setattr(r.chrome_acquisition, "_probe_cdp", forbidden)
+
+    def probe():
+        def snapshot():
+            return {path: path.read_bytes() if path.is_file() else None for path in s.path.parent.rglob("*")}
+
+        before = snapshot()
+        result = r._probe_supervisor_config(s.i["root"], s.owner())
+        assert snapshot() == before and state.handles == []
+        assert not s.path.exists() and s.requests == [] and s.i["calls"] == [] and s.i["browser"].reads == 0
+        return result
+
+    return SimpleNamespace(s=s, state=state, canonical=canonical, chrome=chrome, owned=owned, probe=probe)
+
+
+@pytest.mark.parametrize(("process", "user", "expected"), [
+    ("relative", OSError("private registry read"), "PROCESS_OVERRIDE_OVERRIDE_PATH"),
+    ("missing", None, "PROCESS_OVERRIDE_OVERRIDE_MISSING"),
+    (None, OSError("private registry read"), "USER_OVERRIDE_USER_ENV_READ"),
+    (None, ("%PRIVATE%/config.json", 5), "USER_OVERRIDE_USER_ENV_VALUE"),
+    (None, ("relative", 4), "USER_OVERRIDE_OVERRIDE_PATH"),
+    (None, ("%LOCALAPPDATA%/missing.json", 5), "USER_OVERRIDE_OVERRIDE_MISSING"),
+])
+def test_supervisor_config_probe_reports_override_failures(supervisor_config_probe, monkeypatch, process, user, expected):
+    f = supervisor_config_probe
+    f.state.user = user
+    if process:
+        value = str(f.owned / "missing.json") if process == "missing" else process
+        monkeypatch.setenv(r._RUNTIME_CONFIG_ENV, value)
+    assert f.probe() == (None, expected)
+
+
+def test_supervisor_config_probe_reports_selected_precedence(supervisor_config_probe, monkeypatch):
+    f = supervisor_config_probe
+    s = f.s
+    legacy, code = f.probe()
+    assert legacy[0] == f.chrome and code == "LEGACY_9444_VERIFIED"
+    f.canonical.parent.mkdir()
+    s.i["save"](f.canonical, {"schema": r._CHROME_HEALTH_SCHEMA, "chrome_config": str(f.chrome)})
+    resolved, code = f.probe()
+    assert resolved[0] == f.canonical and code == "FIXED_HEALTH_WRAPPER_VERIFIED"
+    s.i["save"](f.canonical, s.i["config"])
+    resolved, code = f.probe()
+    assert resolved[0] == f.canonical and code == "FIXED_RUNTIME_VERIFIED"
+    f.state.user = ("%LOCALAPPDATA%/AI-Commerce/chrome.json", 5)
+    resolved, code = f.probe()
+    assert resolved[0] == f.chrome and code == "USER_OVERRIDE_VERIFIED"
+    monkeypatch.setenv(r._RUNTIME_CONFIG_ENV, str(f.canonical))
+    resolved, code = f.probe()
+    assert resolved[0] == f.canonical and code == "PROCESS_OVERRIDE_VERIFIED"
+
+
+@pytest.mark.parametrize(("fault", "expected"), [
+    ("discovery", "FIXED_RUNTIME_DISCOVERY_PATH"),
+    ("json", "FIXED_RUNTIME_CONFIG_JSON"),
+    ("schema", "FIXED_RUNTIME_RUNTIME_SCHEMA_OR_PATH"),
+    ("owner", "FIXED_RUNTIME_RUNTIME_OWNER"),
+    ("reference", "FIXED_RUNTIME_RUNTIME_REFERENCES"),
+    ("chrome_reference", "FIXED_RUNTIME_RUNTIME_CHROME_REFERENCE"),
+    ("wrapper_schema", "FIXED_HEALTH_WRAPPER_WRAPPER_SCHEMA"),
+    ("wrapper_reference", "FIXED_HEALTH_WRAPPER_WRAPPER_REFERENCE"),
+    ("ambiguous", "FIXED_RUNTIME_RUNTIME_AMBIGUOUS"),
+    ("private_path", "PROCESS_OVERRIDE_CONFIG_PRIVATE_PATH"),
+])
+def test_supervisor_config_probe_reports_fixed_config_failures(supervisor_config_probe, monkeypatch, fault, expected):
+    f = supervisor_config_probe
+    s = f.s
+    f.canonical.parent.mkdir()
+    value = dict(s.i["config"])
+    if fault == "discovery":
+        no_links = r.chrome_acquisition._no_links
+        monkeypatch.setattr(r.chrome_acquisition, "_no_links", lambda p: p != f.canonical and no_links(p))
+    elif fault == "schema":
+        value["schema"] = "private-invalid-schema"
+    elif fault == "owner":
+        monkeypatch.setenv("LOCALAPPDATA", str(f.owned))
+    elif fault == "reference":
+        value["registered_targets"] = [{"kind": "private-invalid-target"}]
+    elif fault == "chrome_reference":
+        del value["chrome_config"]
+    elif fault == "wrapper_schema":
+        value = {"schema": r._CHROME_HEALTH_SCHEMA}
+    elif fault == "wrapper_reference":
+        value = {"schema": r._CHROME_HEALTH_SCHEMA, "chrome_config": str(f.owned / "missing.json")}
+    elif fault == "ambiguous":
+        s.i["save"](f.canonical.with_name("config.json"), value)
+    elif fault == "private_path":
+        path = s.i["root"] / "invalid-private.json"
+        path.touch()
+        monkeypatch.setenv(r._RUNTIME_CONFIG_ENV, str(path))
+    s.i["save"](f.canonical, value)
+    if fault == "json":
+        f.canonical.write_bytes(b'{"private":')
+    assert f.probe() == (None, expected)
+
+
+@pytest.mark.parametrize(("fault", "expected"), [
+    ("empty", "LEGACY_REGISTRY_EMPTY"),
+    ("ambiguous", "LEGACY_REGISTRY_AMBIGUOUS"),
+    ("ancestor", "CONFIG_ANCESTOR_HANDLE"),
+    ("read", "CONFIG_FILE_READ"),
+    ("json", "CONFIG_JSON"),
+    ("pin", "CONFIG_PIN_CHANGED"),
+    ("signature", "CHROME_SIGNATURE"),
+])
+def test_supervisor_config_probe_reports_legacy_resolution_failures(supervisor_config_probe, monkeypatch, fault, expected):
+    f = supervisor_config_probe
+    acq = r.chrome_acquisition
+    if fault == "empty":
+        f.chrome.unlink()
+    elif fault == "ambiguous":
+        duplicate = f.owned / "Chrome-Acquisition" / "config.json"
+        duplicate.parent.mkdir()
+        duplicate.write_bytes(f.chrome.read_bytes())
+    elif fault == "ancestor":
+        f.state.ancestor_failure = True
+    elif fault == "read":
+        f.state.read_failure = True
+    elif fault == "json":
+        f.chrome.write_bytes(b'{"private":')
+    elif fault == "pin":
+        f.s.i["save"](f.chrome, {**f.s.i["chrome"], "allow_launch": True})
+    elif fault == "signature":
+        def unsigned(_):
+            raise acq.AcquisitionBlocked("private signature detail")
+
+        monkeypatch.setattr(acq, "_verify_google_chrome", unsigned)
+    assert f.probe() == (None, f"LEGACY_9444_{expected}")
+
+
 @pytest.mark.parametrize(("fault", "expected"), [
     (None, "CHROME_OWNED"),
     ("locked_profile", "PROFILE_LOCK_HOLD"),
