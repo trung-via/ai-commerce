@@ -660,13 +660,11 @@ def _supervised_desktop(session: int, sid: str) -> str:
     return _desktop_logon(session, sid)
 
 
-def _desktop_logon(session: int, sid: str) -> str:
-    """Pin the live, unlocked Windows logon, even if its session ID is reused."""
+def _unlocked_logon(session: int | None = None) -> tuple[int, str, str]:
+    """Read the one unlocked WTS logon independently of the caller's desktop."""
     _require(os.name == "nt", "WINDOWS_INTERACTIVE_REQUIRED")
     import ctypes
     from ctypes import wintypes as w
-
-    from ai_commerce.wakehub.native_authority import _attest_desktop_identity
 
     class Session(ctypes.Structure):
         _fields_ = [("id", w.DWORD), ("station", w.LPWSTR), ("state", ctypes.c_int)]
@@ -697,7 +695,11 @@ def _desktop_logon(session: int, sid: str) -> str:
     try:
         _require(bool(rows) and 0 < count.value <= 256, "WINDOWS_INTERACTIVE_REQUIRED")
         active = [rows[i].id for i in range(count.value) if rows[i].state == 0]  # WTSActive
-        _require(active == [session], "CHROME_INTERACTIVE_SESSION_CONFLICT")
+        _require(bool(active) or session is not None, "WINDOWS_INTERACTIVE_REQUIRED")
+        _require(len(active) == 1 and (session is None or active[0] == session),
+                 "CHROME_INTERACTIVE_SESSION_CONFLICT")
+        session = active[0]
+        _require(session > 0, "WINDOWS_INTERACTIVE_REQUIRED")
     finally:
         free(rows)
 
@@ -716,15 +718,22 @@ def _desktop_logon(session: int, sid: str) -> str:
         _require(info.level == 1 and data.id == session and data.state == 0 and data.flags == 1
                  and data.user and data.domain and 0 < data.logon <= data.current,
                  "WINDOWS_INTERACTIVE_REQUIRED")
-        try:
-            _attest_desktop_identity(SimpleNamespace(
-                user_sid=sid, session_id=session, user_name=data.domain + "\\" + data.user,
-                desktop=r"WinSta0\Default"))
-        except ValueError:
-            raise RuntimeHold("WINDOWS_INTERACTIVE_REQUIRED") from None
-        return digest([session, data.logon])
+        return session, data.domain + "\\" + data.user, digest([session, data.logon])
     finally:
         free(raw)
+
+
+def _desktop_logon(session: int, sid: str) -> str:
+    """Pin the unlocked logon and attest this process's real Windows desktop."""
+    _, name, desktop = _unlocked_logon(session)
+    from ai_commerce.wakehub.native_authority import _attest_desktop_identity
+
+    try:
+        _attest_desktop_identity(SimpleNamespace(
+            user_sid=sid, session_id=session, user_name=name, desktop=r"WinSta0\Default"))
+    except ValueError:
+        raise RuntimeHold("WINDOWS_INTERACTIVE_REQUIRED") from None
+    return desktop
 
 
 class NativeChrome9444:
@@ -3340,9 +3349,35 @@ def _registered_result(run: Callable[[], Result]) -> Result:
 
 
 _SUPERVISOR_MUTEX = r"Global\AI-Commerce-WakeHub-9444-Receiver-v1"
+_SUPERVISOR_DEPLOY_MUTEX = r"Global\AI-Commerce-WakeHub-Supervisor-Deploy-v1"
 _SUPERVISOR_DEPLOYMENT_KEY = r"Software\AI-Commerce\WakeHubSupervisor"
 _SUPERVISOR_HEALTH_MAX_AGE_NS = 60_000_000_000
 _OBSERVED_CHROME_HEALTH = frozenset({"CHROME_OWNED", "CHROME_ABSENT"})
+_SUPERVISOR_DESKTOP_HOLDS = frozenset({
+    "WINDOWS_INTERACTIVE_REQUIRED", "CHROME_INTERACTIVE_SESSION_CONFLICT",
+})
+
+
+def _supervisor_owner_session() -> tuple[tuple[Path, int, str], str]:
+    """Bind the HostOps owner token and profile to the unlocked Windows logon."""
+    import ctypes as c
+    from ctypes import wintypes as w
+
+    from ai_commerce.hostops_v3.security import windows_identity
+
+    sid, elevated = windows_identity()
+    _require(not elevated and re.fullmatch(r"S-1-(?:\d+-){1,14}\d+", sid)
+             and sid not in {"S-1-5-18", "S-1-5-19", "S-1-5-20"},
+             "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+    session, name, desktop = _unlocked_logon()
+    secur = c.WinDLL("secur32", use_last_error=True)
+    secur.GetUserNameExW.argtypes = [c.c_int, w.LPWSTR, c.POINTER(w.DWORD)]
+    secur.GetUserNameExW.restype = w.BOOL
+    size = w.DWORD(512)
+    current_name = c.create_unicode_buffer(size.value)
+    _require(secur.GetUserNameExW(2, current_name, c.byref(size))
+             and current_name.value == name, "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+    return (chrome_acquisition._native_local_app_data(), session, sid), desktop
 
 
 def _supervisor_active() -> bool:
@@ -3421,13 +3456,13 @@ def _store_supervisor_deployment_value(name: str, value: str | None) -> None:
             winreg.DeleteValue(key, name)
         else:
             winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
-        if name == "StartPending":
+        if name in {"StartPending", "Run"}:
             winreg.FlushKey(key)
 
 
 @contextmanager
-def _supervisor_slot():
-    """One receiver across Windows sessions, released automatically on exit."""
+def _supervisor_slot(name: str = _SUPERVISOR_MUTEX):
+    """One holder across Windows sessions, released automatically on exit."""
     if os.name != "nt":
         raise RuntimeHold("WINDOWS_INTERACTIVE_REQUIRED")
     import ctypes
@@ -3440,7 +3475,7 @@ def _supervisor_slot():
     kernel.CloseHandle.restype = wintypes.BOOL
     ctypes.set_last_error(0)
     # The existing clean-launch mutex remains owned by the acquisition command.
-    handle = kernel.CreateMutexExW(None, _SUPERVISOR_MUTEX, 0, 0x100000)
+    handle = kernel.CreateMutexExW(None, name, 0, 0x100000)
     error = ctypes.get_last_error()
     _require(bool(handle), "SUPERVISOR_SLOT_UNAVAILABLE")
     try:
@@ -3551,14 +3586,29 @@ def _observe_only_config(config_path: Path, repository_root: Path, owner: tuple[
 def _observe_only_supervisor(config_path: Path | None, repository_root: Path, *,
                              stop: SupervisorStop, max_ticks: int | None, idle_seconds: int,
                              max_backoff_seconds: int, on_health: Callable[[str], None] | None,
-                             deployment: tuple[str, str, str, str, str] | None) -> Result:
-    sha, source, config_pin, desktop_pin, nonce = deployment or (None, None, None, None, None)
+                             deployment: dict | None) -> Result:
+    config_pin = deployment["config_digest"] if deployment is not None else None
+    desktop_pin = deployment["desktop"] if deployment is not None else None
     last_health = None
 
+    def publish(code: str) -> None:
+        nonlocal last_health
+        pid = os.getpid()
+        owner = (Path(os.environ["LOCALAPPDATA"]), deployment["session"], deployment["sid"])
+        created = _supervisor_process(pid, Path(sys.executable), owner)
+        last_health = json.dumps({
+            **{key: deployment[key] for key in (
+                "source_sha", "source_digest", "config_digest", "desktop", "session", "nonce")},
+            "pid": pid, "created": created, "observed_ns": monotonic_ns(), "health": code,
+        }, separators=(",", ":"))
+        _store_supervisor_deployment_value("Health", last_health)
+
     def observe() -> Result:
-        nonlocal config_pin, desktop_pin, last_health
+        nonlocal config_pin, desktop_pin
         _require(config_path is not None, "LOCAL_CONFIG_REQUIRED")
         owner = chrome_acquisition._enrollment_operator(attended=False)
+        _require(deployment is None or (owner[1], owner[2]) == (deployment["session"], deployment["sid"]),
+                 "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
         desktop = _supervised_desktop(owner[1], owner[2])
         _require(desktop_pin is None or desktop_pin == desktop, "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
         desktop_pin = desktop
@@ -3577,18 +3627,16 @@ def _observe_only_supervisor(config_path: Path | None, repository_root: Path, *,
                  "CHROME_OBSERVATION_CHANGED")
         health = "CHROME_OWNED" if state == "OWNED" else "CHROME_ABSENT"
         if deployment is not None:
-            pid = os.getpid()
-            created = _supervisor_process(pid, Path(sys.executable), owner)
-            last_health = json.dumps({
-                "source_sha": sha, "source_digest": source, "config_digest": pin,
-                "nonce": nonce, "pid": pid, "created": created, "desktop": desktop,
-                "observed_ns": monotonic_ns(), "health": health,
-            }, separators=(",", ":"))
-            _store_supervisor_deployment_value("Health", last_health)
+            publish(health)
         return SupervisorTickResult("HOLD", health, "SOURCE_ONLY", False, chrome_health=health)
 
     def tick() -> Result:
         result = _registered_result(observe)
+        if deployment is not None and result.code in _SUPERVISOR_DESKTOP_HOLDS:
+            # A lock or disconnect can race the scheduler. Wait for the same
+            # logon under the receiver slot and replace any prior healthy proof.
+            publish(result.code)
+            return result
         _require(isinstance(result, SupervisorTickResult), result.code)
         return result
 
@@ -3606,7 +3654,7 @@ def _observe_only_supervisor(config_path: Path | None, repository_root: Path, *,
 def run_supervisor(config_path: Path | None, repository_root: Path, *, dry_run: bool = False,
                    max_ticks: int | None = None, idle_seconds: int = 30,
                    max_backoff_seconds: int = 300, on_health: Callable[[str], None] | None = None,
-                   observe_only: bool = False, _deployment: tuple[str, str, str, str, str] | None = None) -> Result:
+                   observe_only: bool = False, _deployment: dict | None = None) -> Result:
     """One Chrome health tick and at most one due source per iteration.
 
     max_ticks counts iterations, including health-only ticks while sources wait.

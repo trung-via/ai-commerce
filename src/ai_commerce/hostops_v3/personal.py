@@ -951,22 +951,128 @@ _SUPERVISOR_HOLDS = frozenset({
     "PROTECTED_HOSTOPS_ONLY", "SOURCE_CUSTODY_UNVERIFIED", "WINDOWS_OWNER_CONTEXT_UNVERIFIED",
     "LOCAL_CONFIG_REQUIRED", "LOCAL_CONFIG_INVALID", "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED",
     "LOCAL_CONFIG_CHANGED", "SUPERVISOR_RUNTIME_UNAVAILABLE", "SUPERVISOR_ACTIVE_UNVERIFIED",
-    "SUPERVISOR_START_UNKNOWN",
+    "SUPERVISOR_START_UNKNOWN", "SUPERVISOR_TASK_CONFLICT", "SUPERVISOR_START_NOT_ATTEMPTED",
 }) | _SUPERVISOR_DESKTOP_HOLDS
+
+_SUPERVISOR_TASK_SCRIPT = r"""
+$sid = $env:AI_COMMERCE_SUPERVISOR_SID
+if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -cne $sid) { throw 'Owner changed' }
+$name = 'AI-Commerce-WakeHub-Supervisor'
+$sddl = 'O:' + $sid + 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;' + $sid + ')'
+$service = New-Object -ComObject 'Schedule.Service'
+$service.Connect()
+$folder = $service.GetFolder('\')
+$expected = $service.NewTask(0)
+$expected.Principal.Id = 'WakeHubSupervisorOwner'
+$expected.Principal.UserId = $sid
+$expected.Principal.LogonType = 3 # TASK_LOGON_INTERACTIVE_TOKEN
+$expected.Principal.RunLevel = 0 # TASK_RUNLEVEL_LUA
+$expected.Settings.MultipleInstances = 2 # TASK_INSTANCES_IGNORE_NEW
+$expected.Settings.AllowDemandStart = $true
+$expected.Settings.DisallowStartIfOnBatteries = $false
+$expected.Settings.StopIfGoingOnBatteries = $false
+$expected.Settings.ExecutionTimeLimit = 'PT0S'
+$expected.Actions.Context = $expected.Principal.Id
+$action = $expected.Actions.Create(0)
+$action.Path = $env:AI_COMMERCE_SUPERVISOR_IMAGE
+$action.Arguments = $env:AI_COMMERCE_SUPERVISOR_ARGUMENTS
+$action.WorkingDirectory = $env:AI_COMMERCE_SUPERVISOR_ROOT
+
+function Read-Registration {
+    try { $folder.GetTask($name) }
+    catch {
+        if ($_.Exception.GetBaseException().HResult -ne -2147024894) { throw }
+    }
+}
+
+function Test-Registration($registered) {
+    if (!$registered.Enabled -or $registered.Path -cne ('\' + $name)) { return $false }
+    $acl = [Security.AccessControl.RawSecurityDescriptor]::new($registered.GetSecurityDescriptor(5))
+    $want = [Security.AccessControl.RawSecurityDescriptor]::new($sddl)
+    if ($acl.Owner.Value -cne $sid -or $acl.GetSddlForm('Access') -cne $want.GetSddlForm('Access')) {
+        return $false
+    }
+    $definition = $registered.Definition
+    $principal = $definition.Principal
+    $principalSid = $principal.UserId
+    if ($principalSid -ne $sid) {
+        try {
+            $principalSid = [Security.Principal.NTAccount]::new($principalSid).Translate(
+                [Security.Principal.SecurityIdentifier]).Value
+        } catch { return $false }
+    }
+    if ($principalSid -cne $sid -or $principal.Id -cne $expected.Principal.Id -or
+        $principal.LogonType -ne 3 -or $principal.RunLevel -ne 0 -or $principal.GroupId -or
+        $definition.Triggers.Count -ne 0 -or $definition.Actions.Count -ne 1 -or
+        $definition.Actions.Context -cne $expected.Actions.Context) { return $false }
+    foreach ($key in @('AllowDemandStart', 'AllowHardTerminate', 'DisallowStartIfOnBatteries',
+        'Enabled', 'ExecutionTimeLimit', 'Hidden', 'MultipleInstances', 'RestartCount', 'RestartInterval',
+        'RunOnlyIfIdle', 'RunOnlyIfNetworkAvailable', 'StartWhenAvailable',
+        'StopIfGoingOnBatteries', 'WakeToRun', 'DeleteExpiredTaskAfter', 'Compatibility', 'Priority')) {
+        if ($definition.Settings.$key -cne $expected.Settings.$key) { return $false }
+    }
+    $actual = $definition.Actions.Item(1)
+    return $actual.Type -eq 0 -and $actual.Path -ieq $action.Path -and
+        $actual.Arguments -ceq $action.Arguments -and $actual.WorkingDirectory -ieq $action.WorkingDirectory
+}
+
+$task = Read-Registration
+$mode = $env:AI_COMMERCE_SUPERVISOR_MODE
+if (!$task -and $mode -ceq 'install') {
+    # TASK_CREATE | TASK_DONT_ADD_PRINCIPAL_ACE | TASK_IGNORE_REGISTRATION_TRIGGERS.
+    try { $null = $folder.RegisterTaskDefinition($name, $expected, 50, $sid, $null, 3, $sddl) }
+    catch {
+        if ($_.Exception.GetBaseException().HResult -ne -2147024713) { throw }
+    }
+    $task = Read-Registration
+}
+if (!$task) { 'MISSING'; exit }
+if (!(Test-Registration $task)) { 'CONFLICT'; exit }
+$instances = $task.GetInstances(0)
+if ($null -eq $instances) { throw 'Instances unavailable' }
+if ($mode -ceq 'start') {
+    if ($task.State -ne 3 -or $instances.Count -ne 0) { 'NOT_ATTEMPTED'; exit }
+    $nonce = $env:AI_COMMERCE_SUPERVISOR_NONCE
+    $session = [int]$env:AI_COMMERCE_SUPERVISOR_SESSION
+    if ($nonce -cnotmatch '^[a-f0-9]{32}$' -or $session -le 0) { throw 'Invalid start request' }
+    # TASK_RUN_USE_SESSION_ID | TASK_RUN_USER_SID. The only substitution is a nonce.
+    $instance = $task.RunEx($nonce, 12, $session, $sid)
+} elseif ($task.State -eq 3 -and $instances.Count -eq 0) {
+    'READY'; exit
+} elseif ($instances.Count -eq 1 -and $instances.Item(1).State -eq 4) {
+    $instance = $instances.Item(1)
+} else {
+    'BUSY'; exit
+}
+if (!$instance -or $instance.Path -cne ('\' + $name) -or !$instance.InstanceGuid) {
+    throw 'Instance unavailable'
+}
+[Guid]::Parse($instance.InstanceGuid).ToString('D')
+"""
 
 # Launch the canonical CLI using the exact source bytes read and hashed here.
 # The parent independently compares this hash with its protected checkout.
 _SUPERVISOR_BOOTSTRAP = """\
-import hashlib, importlib.machinery, json, runpy, sys
+import hashlib, importlib.machinery, json, re, runpy, sys, winreg
 from pathlib import Path
 
-root, dependencies, config, sha, expected, config_digest, desktop, nonce = sys.argv[1:]
+root, dependencies, nonce = sys.argv[1:]
+if not re.fullmatch(r'[a-f0-9]{32}', nonce):
+    raise SystemExit(2)
+with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r'Software\\AI-Commerce\\WakeHubSupervisor') as key:
+    raw, kind = winreg.QueryValueEx(key, 'StartPending')
+if kind != winreg.REG_SZ or not 0 < len(raw) <= 2048:
+    raise SystemExit(2)
+intent = json.loads(raw)
+if intent['nonce'] != nonce:
+    raise SystemExit(2)
 source = Path(root) / 'src'
 files = {path.relative_to(source).as_posix(): path.read_bytes()
          for path in (source / 'ai_commerce').rglob('*.py')}
 manifest = [[name, hashlib.sha256(raw).hexdigest()] for name, raw in sorted(files.items())]
 observed = hashlib.sha256(json.dumps(manifest, separators=(',', ':')).encode('ascii')).hexdigest()
-if observed != expected or any(name == 'ai_commerce' or name.startswith('ai_commerce.') for name in sys.modules):
+if (observed != intent['source_digest']
+        or any(name == 'ai_commerce' or name.startswith('ai_commerce.') for name in sys.modules)):
     raise SystemExit(2)
 loader = importlib.machinery.SourceFileLoader
 default_code = loader.get_code
@@ -977,10 +1083,35 @@ def get_code(self, fullname):
     return default_code(self, fullname)
 loader.get_code = get_code
 sys.path[:0] = [str(source), dependencies]
-sys.argv = ['wakehub_runtime', 'supervise', '--observe-only', '--config', config, '--repository-root', root]
+sys.argv = ['wakehub_runtime', 'supervise', '--observe-only', '--config', intent['config'], '--repository-root', root]
 runpy.run_module('ai_commerce.wakehub_runtime', run_name='__main__', alter_sys=True,
-                 init_globals={'_PROTECTED_DEPLOYMENT': (sha, observed, config_digest, desktop, nonce)})
+                 init_globals={'_PROTECTED_DEPLOYMENT': intent})
 """
+
+_SUPERVISOR_INSTANCE = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
+
+
+def _supervisor_task(acquisition, executable, arguments, root, owner, *, mode="inspect", nonce=""):
+    # Select a verified native PowerShell without consulting a Chrome task.
+    shell = acquisition._powershell(owner_action=lambda bootstrap: bootstrap)
+    env = acquisition._child_environment()
+    env.update(
+        AI_COMMERCE_SUPERVISOR_SID=owner[2], AI_COMMERCE_SUPERVISOR_SESSION=str(owner[1]),
+        AI_COMMERCE_SUPERVISOR_IMAGE=str(executable), AI_COMMERCE_SUPERVISOR_ARGUMENTS=arguments,
+        AI_COMMERCE_SUPERVISOR_ROOT=str(root), AI_COMMERCE_SUPERVISOR_MODE=mode,
+        AI_COMMERCE_SUPERVISOR_NONCE=nonce,
+    )
+    result = subprocess.run(
+        [str(shell), "-NoProfile", "-NonInteractive", "-Command",
+         acquisition._POWERSHELL_TASK_READ_PREAMBLE + _SUPERVISOR_TASK_SCRIPT],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15, check=True, env=env,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    code = result.stdout.strip().decode("ascii")
+    if (code not in {"MISSING", "CONFLICT", "READY", "BUSY", "NOT_ATTEMPTED"}
+            and not _SUPERVISOR_INSTANCE.fullmatch(code)):
+        deny("SUPERVISOR_RUNTIME_UNAVAILABLE")
+    return code
 
 
 def _supervisor_receipt(code, issue_number, sha=None):
@@ -1002,28 +1133,28 @@ def _supervisor_receipt(code, issue_number, sha=None):
     return result
 
 
-def _read_supervisor_health(runtime, expected, executable, owner, *, child=None, nonce=None):
+def _read_supervisor_health(runtime, expected, executable, owner):
     raw = runtime._supervisor_deployment_value("Health")
     if raw is None or not runtime._supervisor_active():
-        return False
+        return None
     try:
         value = json.loads(raw, object_pairs_hook=_object_unique)
         if (type(value) is not dict or set(value) != expected.keys() | {
-                "nonce", "pid", "created", "observed_ns", "health"}
+                "pid", "created", "observed_ns", "health"}
                 or any(value[key] != pin for key, pin in expected.items())
-                or type(value["nonce"]) is not str or not re.fullmatch(r"[a-f0-9]{32}", value["nonce"])
+                or type(value["session"]) is not int
                 or type(value["pid"]) is not int or not 0 < value["pid"] < 2**32
                 or type(value["created"]) is not int or value["created"] <= 0
                 or type(value["observed_ns"]) is not int
                 or not 0 <= runtime.monotonic_ns() - value["observed_ns"] <= runtime._SUPERVISOR_HEALTH_MAX_AGE_NS
-                or value["health"] not in runtime._OBSERVED_CHROME_HEALTH):
-            return False
-        if child is not None and (value["nonce"] != nonce or value["pid"] != child.pid or child.poll() is not None):
-            return False
-        return (runtime._supervisor_process(value["pid"], executable, owner) == value["created"]
-                and runtime._supervisor_active() and runtime._supervisor_deployment_value("Health") == raw)
-    except (Denied, OSError, ValueError, TypeError, RecursionError):
-        return False
+                or value["health"] not in runtime._OBSERVED_CHROME_HEALTH | _SUPERVISOR_DESKTOP_HOLDS):
+            return None
+        if (runtime._supervisor_process(value["pid"], executable, owner) == value["created"]
+                and runtime._supervisor_active() and runtime._supervisor_deployment_value("Health") == raw):
+            return value
+    except (Denied, OSError, ValueError, TypeError, RecursionError, runtime.RuntimeHold):
+        pass
+    return None
 
 
 def _deploy_protected_supervisor(event):
@@ -1048,10 +1179,10 @@ def _deploy_protected_supervisor(event):
         source = _persistent_clean_source(acquisition, sha, pin_runtime=True)
         root = ROOTS["workspace"]
 
-        def read_desktop(owner):
+        def read_owner():
             nonlocal failure
             try:
-                return runtime._desktop_logon(owner[1], owner[2])
+                return runtime._supervisor_owner_session()
             except runtime.RuntimeHold as exc:
                 code = str(exc)
                 if code in _SUPERVISOR_DESKTOP_HOLDS:
@@ -1059,11 +1190,7 @@ def _deploy_protected_supervisor(event):
                 raise
 
         failure = "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
-        owner = acquisition._native_operator()
-        desktop = read_desktop(owner)
-        failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
-        if runtime._supervisor_deployment_value("StartPending") is not None:
-            return _supervisor_receipt("SUPERVISOR_START_UNKNOWN", issue_number, sha)
+        owner, desktop = read_owner()
         configured = os.environ.get("AI_COMMERCE_WAKEHUB_CONFIG")
         failure = "LOCAL_CONFIG_REQUIRED"
         if not configured:
@@ -1081,13 +1208,22 @@ def _deploy_protected_supervisor(event):
             if str(exc) == "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED":
                 failure = str(exc)
             raise
-        expected = {"source_sha": sha, "source_digest": source, "config_digest": config_pin, "desktop": desktop}
+        expected = {"source_sha": sha, "source_digest": source, "config_digest": config_pin,
+                    "desktop": desktop, "session": owner[1]}
+        intent_pins = {**expected, "sid": owner[2], "config": str(config)}
         failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
-        # Launch the real image so the spawn PID and observed process identity
-        # coincide even when HostOps itself runs via a venv redirector.
-        executable = Path(sys._base_executable)
-        if not executable.is_absolute() or not executable.is_file() or not acquisition._no_links(executable):
+        # Use the installed GUI-subsystem interpreter rather than a venv redirector.
+        executable = Path(sys._base_executable).with_name("pythonw.exe")
+        dependencies = Path(sys.prefix) / "Lib" / "site-packages"
+        if (not executable.is_absolute() or not executable.is_file() or not acquisition._no_links(executable)
+                or not dependencies.is_absolute() or not dependencies.is_dir() or not acquisition._no_links(dependencies)
+                or any(re.search(r'[%\r\n\x00]|\$\(', str(path)) for path in (root, executable, dependencies))):
             deny(failure)
+        bootstrap = base64.b64encode(_SUPERVISOR_BOOTSTRAP.encode("ascii")).decode("ascii")
+        arguments = subprocess.list2cmdline([
+            "-I", "-B", "-S", "-c", f"import base64;exec(base64.b64decode('{bootstrap}'))",
+            str(root), str(dependencies), "$(Arg0)",
+        ])
 
         def recheck():
             nonlocal failure
@@ -1095,53 +1231,99 @@ def _deploy_protected_supervisor(event):
             if _persistent_clean_source(acquisition, sha, pin_runtime=True) != source:
                 deny(failure)
             failure = "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
-            if acquisition._native_operator() != owner or read_desktop(owner) != desktop:
+            if read_owner() != (owner, desktop):
                 deny(failure)
             failure = "LOCAL_CONFIG_CHANGED"
             if runtime._observe_only_config(config, root, owner, lambda: False)[1] != config_pin:
                 deny(failure)
 
-        if runtime._supervisor_active():
-            failure = "SUPERVISOR_ACTIVE_UNVERIFIED"
-            if not _read_supervisor_health(runtime, expected, executable, owner):
-                deny(failure)
-            recheck()
-            failure = "SUPERVISOR_ACTIVE_UNVERIFIED"
-            if not _read_supervisor_health(runtime, expected, executable, owner):
-                deny(failure)
-            return _supervisor_receipt("SUPERVISOR_REUSED_HEALTH_OBSERVED", issue_number, sha)
+        def task(**kwargs):
+            return _supervisor_task(acquisition, executable, arguments, root, owner, **kwargs)
 
-        recheck()
-        failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
-        dependencies = Path(sys.prefix) / "Lib" / "site-packages"
-        if not dependencies.is_dir() or not acquisition._no_links(dependencies):
-            deny(failure)
-        if runtime._supervisor_active():
-            return _supervisor_receipt("SUPERVISOR_ACTIVE_UNVERIFIED", issue_number, sha)
-        nonce = secrets.token_hex(16)
-        # Fence uncertain starts across workflow invocations. Only the exact live
-        # child with verified health can clear this particular reservation.
-        failure = "SUPERVISOR_START_UNKNOWN"
-        runtime._store_supervisor_deployment_value("StartPending", nonce)
-        child = subprocess.Popen(
-            [str(executable), "-I", "-B", "-S", "-c", _SUPERVISOR_BOOTSTRAP,
-             str(root), str(dependencies), str(config), sha, source, config_pin, desktop, nonce],
-            cwd=root, env=acquisition._child_environment(), creationflags=subprocess.DETACHED_PROCESS,
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        deadline = time.monotonic() + 45
-        while child.poll() is None and time.monotonic() < deadline:
-            if _read_supervisor_health(runtime, expected, executable, owner, child=child, nonce=nonce):
-                try:
-                    recheck()
-                finally:
-                    failure = "SUPERVISOR_START_UNKNOWN"
-                if (runtime._supervisor_deployment_value("StartPending") == nonce
-                        and _read_supervisor_health(runtime, expected, executable, owner, child=child, nonce=nonce)):
-                    runtime._store_supervisor_deployment_value("StartPending", None)
-                    return _supervisor_receipt("SUPERVISOR_STARTED_HEALTH_OBSERVED", issue_number, sha)
-                break
-            time.sleep(0.25)
+        def confirmed_health(intent, instance):
+            nonlocal failure
+            # A sole live task instance must match the RunEx GUID when known.
+            # On a lost RunEx reply, its nonce is the one passed after the
+            # empty-instance precheck and persisted before the single call.
+            proof_pins = {**expected, "nonce": intent["nonce"]}
+            proof = _read_supervisor_health(runtime, proof_pins, executable, owner)
+            if proof is None or task() != instance:
+                return None
+            if proof["health"] in runtime._OBSERVED_CHROME_HEALTH:
+                proof_failure = failure
+                recheck()
+                failure = proof_failure
+            current = _read_supervisor_health(runtime, proof_pins, executable, owner)
+            if current is not None and all(current[key] == proof[key] for key in ("pid", "created", "health")):
+                if task() == instance:
+                    return current["health"]
+            return None
+
+        def finish(intent, instance, pending):
+            if runtime._supervisor_deployment_value("StartPending") != pending:
+                return "SUPERVISOR_START_UNKNOWN"
+            proven = confirmed_health(intent, instance)
+            if proven in _SUPERVISOR_DESKTOP_HOLDS:
+                return proven
+            if proven is None:
+                return None
+            if pending is not None:
+                runtime._store_supervisor_deployment_value("Run", json.dumps({**intent, "instance": instance}))
+                runtime._store_supervisor_deployment_value("StartPending", None)
+                return "SUPERVISOR_STARTED_HEALTH_OBSERVED"
+            return "SUPERVISOR_REUSED_HEALTH_OBSERVED"
+
+        with runtime._supervisor_slot(runtime._SUPERVISOR_DEPLOY_MUTEX):
+            pending = runtime._supervisor_deployment_value("StartPending")
+            if pending is not None:
+                failure = "SUPERVISOR_START_UNKNOWN"
+            state = task()
+            if pending is not None or _SUPERVISOR_INSTANCE.fullmatch(state):
+                failure = "SUPERVISOR_START_UNKNOWN" if pending is not None else "SUPERVISOR_ACTIVE_UNVERIFIED"
+                record = pending if pending is not None else runtime._supervisor_deployment_value("Run")
+                if record is None or not _SUPERVISOR_INSTANCE.fullmatch(state):
+                    deny(failure)
+                intent = json.loads(record, object_pairs_hook=_object_unique)
+                if (type(intent) is not dict or any(intent.get(key) != pin for key, pin in intent_pins.items())
+                        or not re.fullmatch(r"[a-f0-9]{32}", intent.get("nonce", ""))
+                        or (intent.get("instance") is None and pending is None)
+                        or intent.get("instance", state) != state):
+                    deny(failure)
+                return _supervisor_receipt(finish(intent, state, pending) or failure, issue_number, sha)
+            if state == "CONFLICT":
+                return _supervisor_receipt("SUPERVISOR_TASK_CONFLICT", issue_number, sha)
+            if state == "BUSY" or runtime._supervisor_active():
+                return _supervisor_receipt("SUPERVISOR_ACTIVE_UNVERIFIED", issue_number, sha)
+
+            recheck()
+            failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
+            if state == "MISSING":
+                state = task(mode="install")
+            if state == "CONFLICT":
+                return _supervisor_receipt("SUPERVISOR_TASK_CONFLICT", issue_number, sha)
+            if state != "READY" or runtime._supervisor_active():
+                return _supervisor_receipt("SUPERVISOR_ACTIVE_UNVERIFIED", issue_number, sha)
+            recheck()
+            failure = "SUPERVISOR_START_UNKNOWN"
+            intent = {**intent_pins, "nonce": secrets.token_hex(16)}
+            pending = json.dumps(intent)
+            runtime._store_supervisor_deployment_value("StartPending", pending)
+            instance = task(mode="start", nonce=intent["nonce"])
+            if instance in {"NOT_ATTEMPTED", "MISSING", "CONFLICT"}:
+                runtime._store_supervisor_deployment_value("StartPending", None)
+                code = "SUPERVISOR_TASK_CONFLICT" if instance == "CONFLICT" else "SUPERVISOR_START_NOT_ATTEMPTED"
+                return _supervisor_receipt(code, issue_number, sha)
+            if not _SUPERVISOR_INSTANCE.fullmatch(instance):
+                deny(failure)
+            intent["instance"] = instance
+            pending = json.dumps(intent)
+            runtime._store_supervisor_deployment_value("StartPending", pending)
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline:
+                code = finish(intent, instance, pending)
+                if code is not None:
+                    return _supervisor_receipt(code, issue_number, sha)
+                time.sleep(0.25)
     except Exception:
         # Exception text can include private config, paths and native diagnostics.
         pass

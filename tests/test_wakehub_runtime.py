@@ -2620,6 +2620,7 @@ def test_protected_desktop_logon_attests_windows_wts_under_actions(monkeypatch, 
     from ctypes import wintypes as w
     from unittest.mock import Mock
 
+    from ai_commerce.hostops_v3 import security
     from ai_commerce.wakehub import native_authority as auth
 
     class SessionRow(ctypes.Structure):
@@ -2701,6 +2702,19 @@ def test_protected_desktop_logon_attests_windows_wts_under_actions(monkeypatch, 
         user.OpenInputDesktop.assert_called_once_with(0, False, 1)
         user.CloseDesktop.assert_called_once_with(3)
         assert wts.WTSFreeMemory.call_count == 3
+
+    # The scheduler caller verifies the WTS owner without opening a desktop
+    # in its own process. The child check above continues to reject Winlogon.
+    native_local = r.Path.cwd()
+    monkeypatch.setattr(security, "windows_identity", lambda: (sid, False))
+    monkeypatch.setattr(r.chrome_acquisition, "_native_local_app_data", lambda: native_local)
+    user.OpenInputDesktop.reset_mock()
+    if desktop_state == "wts_locked":
+        with pytest.raises(r.RuntimeHold, match="^WINDOWS_INTERACTIVE_REQUIRED$"):
+            r._supervisor_owner_session()
+    else:
+        assert r._supervisor_owner_session() == ((native_local, session, sid), digest([session, 1234]))
+    user.OpenInputDesktop.assert_not_called()
 
 
 @pytest.mark.parametrize("key", ["TF_BUILD", "BUILD_BUILDID", "AI_COMMERCE_GIT_GUARD_TEST"])
@@ -2909,7 +2923,8 @@ def test_observe_only_emits_private_source_bound_health_under_slot(observe_only,
     root = s.i["root"]
     _, config_pin = r._observe_only_config(config, root, s.owner(), lambda: False)
     desktop = r._supervised_desktop(s.owner()[1], s.owner()[2])
-    deployment = ("a" * 40, "b" * 64, config_pin, desktop, "c" * 32)
+    deployment = {"source_sha": "a" * 40, "source_digest": "b" * 64, "config_digest": config_pin,
+                  "desktop": desktop, "nonce": "c" * 32, "session": s.owner()[1], "sid": s.owner()[2]}
     writes = []
     state = {"Health": None}
 
@@ -2925,14 +2940,54 @@ def test_observe_only_emits_private_source_bound_health_under_slot(observe_only,
     monkeypatch.setattr(r, "monotonic_ns", lambda: 123_000_000)
     result = s.run(observe_only=True, _deployment=deployment)
     assert result.chrome_health == "CHROME_OWNED"
-    assert writes == [{"source_sha": deployment[0], "source_digest": deployment[1],
-                       "config_digest": config_pin, "desktop": desktop, "nonce": deployment[4],
+    assert writes == [{"source_sha": deployment["source_sha"], "source_digest": deployment["source_digest"],
+                       "config_digest": config_pin, "desktop": desktop, "nonce": deployment["nonce"],
+                       "session": s.owner()[1],
                        "pid": os.getpid(), "created": 123456, "observed_ns": 123_000_000,
                        "health": "CHROME_OWNED"}, None]
     writes.clear()
     s.slot.pending = True
     assert s.run(observe_only=True, _deployment=deployment).code == "CHROME_LAUNCH_RECONCILE_REQUIRED"
     assert writes == [] and s.slot.pending and not s.path.exists()
+
+
+def test_scheduled_observe_only_waits_for_its_unlocked_desktop(observe_only, monkeypatch):
+    s = observe_only
+    session, sid = s.owner()[1:]
+    desktop = r._supervised_desktop(session, sid)
+    _, pin = r._observe_only_config(s.i["config_path"], s.i["root"], s.owner(), lambda: False)
+    deployment = {"source_sha": "a" * 40, "source_digest": "b" * 64, "config_digest": pin,
+                  "desktop": desktop, "nonce": "c" * 32, "session": session, "sid": sid}
+    state, reports = {}, []
+    unlocked = False
+
+    def desktop_check(actual_session, actual_sid):
+        assert (actual_session, actual_sid) == (session, sid)
+        if not unlocked:
+            raise r.RuntimeHold("WINDOWS_INTERACTIVE_REQUIRED")
+        return desktop
+
+    def store(name, raw):
+        assert s.slot.active and name == "Health"
+        state[name] = raw
+        if raw is not None:
+            reports.append(json.loads(raw)["health"])
+
+    def unlock(_):
+        nonlocal unlocked
+        assert reports == ["WINDOWS_INTERACTIVE_REQUIRED"]
+        unlocked = True
+
+    monkeypatch.setattr(r, "_supervised_desktop", desktop_check)
+    monkeypatch.setattr(r, "_supervisor_process", lambda pid, exe, owner: 123456)
+    monkeypatch.setattr(r, "_supervisor_deployment_value", state.get)
+    monkeypatch.setattr(r, "_store_supervisor_deployment_value", store)
+    s.clock.on_wait = unlock
+    result = s.run(max_ticks=2, observe_only=True, _deployment=deployment)
+    assert result.chrome_health == "CHROME_OWNED"
+    assert reports == ["WINDOWS_INTERACTIVE_REQUIRED", "CHROME_OWNED"]
+    assert state["Health"] is None
+    assert s.requests == [] and s.ticks == [] and not s.path.exists()
 
 
 def test_flat02_supervisor_acquires_once_then_reuses_owned_9444(supervisor, capsys):
