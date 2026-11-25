@@ -3513,6 +3513,38 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
             self.assertEqual(self.dispatch_config_probe()["code"], "SUPERVISOR_RUNTIME_UNAVAILABLE")
         self.assert_config_probe_has_no_effects()
 
+    def test_config_probe_verifies_legacy_9444_when_broad_root_and_parent_acl_fail(self):
+        from ai_commerce.remote import local_completion_handoff as handoff
+
+        self.env.pop("AI_COMMERCE_WAKEHUB_CONFIG")
+        local, _, sid = self.owner
+        private = local / "AI-Commerce"
+        d5 = private / "D5-Isolated-9444-Trial" / "config.json"
+        profile = d5.parent / "UserData"
+        (profile / "Default").mkdir(parents=True)
+        executable = local / "chrome.exe"
+        executable.touch()
+        value = {"version": 1, "executable": str(executable), "user_data_dir": str(profile),
+                 "profile_directory": "Default", "cdp_endpoint": "http://127.0.0.1:9444",
+                 "allow_launch": True, "exclusive_user_data": True}
+        d5.write_text(json.dumps(value), encoding="utf-8")
+        self.mock(acquisition, "_verify_google_chrome")
+        broad = {private, d5.parent}
+
+        def identity(path):
+            if path in broad:
+                raise handoff.HandoffBlocked("HANDOFF_PERMISSIONS_INVALID")
+            return sid
+
+        self.mock(handoff, "_private_identity", side_effect=identity)
+        self.mock(self.runtime, "_private_identity", side_effect=identity)
+        receipt = self.dispatch_config_probe()
+        self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "LEGACY_9444_VERIFIED"))
+        broad.add(d5)
+        held = self.dispatch_config_probe()
+        self.assertEqual((held["status"], held["code"]), ("HOLD", "LEGACY_9444_CONFIG_FILE_CUSTODY"))
+        self.assert_config_probe_has_no_effects()
+
     def test_authorization_and_parameters_are_fixed(self):
         with self.assertRaisesRegex(hostops.Denied, "READ_OPERATION_DENIED"):
             hostops.parse_event(event("read", self.op, {}), "read")
@@ -3589,7 +3621,7 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         runtime_config = private / "WakeHub" / "runtime-config.json"
 
         def read_config(path, root, *, limit=131072):
-            self.assertIn(path, {self.config, runtime_config})
+            self.assertEqual(path, runtime_config)
             self.assertEqual(root, self.workspace)
             raw = path.read_bytes()
             self.assertLessEqual(len(raw), limit)
@@ -3600,7 +3632,7 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
             self.publish_health(nonce=nonce, mode=self.runtime._CHROME_HEALTH_ONLY, health="CDP_PROTOCOL_UNAVAILABLE")
             return self.instance
 
-        selected = self.mock(acquisition, "_supervisor_9444_environment", return_value=env)
+        selected = self.mock(acquisition, "_supervisor_9444_config", return_value=(env, value))
         verify = self.mock(acquisition, "_verify_google_chrome")
         self.mock(self.runtime, "_read_owned_json", side_effect=read_config)
         self.config_pin = self.runtime._legacy_health_config(self.workspace, self.owner)[1]

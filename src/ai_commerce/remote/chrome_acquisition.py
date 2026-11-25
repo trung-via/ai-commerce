@@ -21,6 +21,7 @@ import stat
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 from typing import Callable, Literal
 from urllib.parse import urlsplit
 from urllib.request import Request, ProxyHandler, HTTPRedirectHandler, build_opener
@@ -1562,8 +1563,132 @@ def _read_9444_config(config: Path, local: Path, checkout: Path, sid: str) -> Ch
     return env
 
 
-def _supervisor_9444_environment(local: Path, checkout: Path, sid: str) -> ChromeEnvironment | None:
-    """Adopt a sole registered Chrome config for health reads without changing it."""
+def _read_pinned_legacy_json(config: Path, local: Path, checkout: Path, sid: str) -> object:
+    """Bounded, pinned, non-reparse read of one existing legacy 9444 config file.
+
+    Skips broad AI-Commerce root and intermediate parent strict ACL checks for
+    protected legacy health-only observation only. Enforces strict actual file
+    SID/ACL custody before and after reading while ancestor handles are pinned.
+    """
+    from . import _private_state
+    from .local_completion_handoff import _private_identity
+
+    real_os = _private_state.os
+    with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_PATH):
+        if (not all(p.is_absolute() for p in (config, local, checkout))
+                or ".." in config.parts or config.drive.startswith("\\\\")
+                or ":" in config.name or config.name.endswith((".", " "))
+                or not config.is_file() or not checkout.is_dir() or not local.is_dir()
+                or not _no_links(config) or not _no_links(checkout) or not _no_links(local)):
+            raise AcquisitionBlocked("CONFIG_PATH_INVALID")
+        try:
+            info = config.lstat()
+            if not _private_state._regular(info):
+                raise AcquisitionBlocked("CONFIG_PATH_INVALID")
+            resolved_checkout = checkout.resolve(strict=True)
+            resolved_config = config.resolve(strict=True)
+            owned_config_root = (local.resolve(strict=True) / "AI-Commerce").resolve()
+        except AcquisitionBlocked:
+            raise
+        except OSError:
+            raise AcquisitionBlocked("CONFIG_PATH_INVALID") from None
+        if _inside(resolved_config, resolved_checkout):
+            raise AcquisitionBlocked("CONFIG_IN_REPOSITORY")
+        if not _inside(resolved_config, owned_config_root):
+            raise AcquisitionBlocked("CONFIG_NOT_OPERATOR_OWNED")
+
+    handles = []
+    try:
+        with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_ANCESTOR_HANDLE):
+            if real_os.name == "nt":
+                for part in reversed(config.parents):
+                    handles.append(_private_state._windows_handle(part, 0, directory=True))
+                directory_fd = None
+            else:
+                directory_fd = real_os.open(
+                    config.anchor, real_os.O_RDONLY | real_os.O_DIRECTORY | real_os.O_NOFOLLOW)
+                handles.append(directory_fd)
+                for part in config.parent.parts[1:]:
+                    directory_fd = real_os.open(
+                        part, real_os.O_RDONLY | real_os.O_DIRECTORY | real_os.O_NOFOLLOW,
+                        dir_fd=directory_fd)
+                    handles.append(directory_fd)
+        with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_FILE_CUSTODY):
+            if not _no_links(config) or _private_identity(config) != sid:
+                raise _EnrollmentHold("CONFIG_UNTRUSTED")
+        with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_FILE_READ):
+            try:
+                txn = _private_state._Transaction(SimpleNamespace(path=config), directory_fd)
+                fd = txn.open(config.name, real_os.O_RDONLY)
+                with real_os.fdopen(fd, "rb") as stream:
+                    raw = stream.read(8193)
+            except (OSError, _private_state.PrivateStateError):
+                raise AcquisitionBlocked("CONFIG_INVALID") from None
+            if len(raw) > 8192:
+                raise AcquisitionBlocked("CONFIG_INVALID")
+
+        def unique(pairs):
+            obj = {}
+            for key, value in pairs:
+                if key in obj:
+                    raise AcquisitionBlocked("CONFIG_DUPLICATE_KEY")
+                obj[key] = value
+            return obj
+
+        with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_JSON):
+            try:
+                value = json.loads(raw.decode("utf-8-sig"), object_pairs_hook=unique)
+            except AcquisitionBlocked:
+                raise
+            except (ValueError, UnicodeError, RecursionError):
+                raise AcquisitionBlocked("CONFIG_INVALID") from None
+        with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_FILE_CUSTODY):
+            if not _no_links(config) or _private_identity(config) != sid:
+                raise _EnrollmentHold("CONFIG_UNTRUSTED")
+        return value
+    finally:
+        for handle in reversed(handles):
+            if real_os.name == "nt":
+                handle[1](handle[0])
+            else:
+                real_os.close(handle)
+
+
+def _validate_legacy_health_9444_value(value, config: Path, local: Path, checkout: Path,
+                                       sid: str) -> ChromeEnvironment:
+    """Validate legacy 9444 schema plus strict actual file and profile custody."""
+    env = _environment_from_value(value, config, checkout, local_app_data=local)
+    with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_SCHEMA):
+        if env.port != 9444 or env.endpoint != "http://127.0.0.1:9444":
+            raise _EnrollmentHold("CONFIG_UNTRUSTED")
+    _require_operator_control(env)
+    from .local_completion_handoff import HandoffBlocked, _private_identity
+    try:
+        with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_FILE_CUSTODY):
+            if not _no_links(env.config_path) or _private_identity(env.config_path) != sid:
+                raise _EnrollmentHold("CONFIG_UNTRUSTED")
+        with _supervisor_config_check(_SupervisorConfigCheck.PROFILE_CUSTODY):
+            for path in (env.user_data_dir, env.user_data_dir / env.profile_directory):
+                if not _no_links(path) or _private_identity(path) != sid:
+                    raise AcquisitionBlocked("OPERATOR_OWNERSHIP_UNPROVEN")
+    except (_EnrollmentHold, AcquisitionBlocked):
+        raise
+    except (HandoffBlocked, OSError, ValueError):
+        raise AcquisitionBlocked("OPERATOR_OWNERSHIP_UNPROVEN") from None
+    return env
+
+
+def _read_legacy_health_9444_config(config: Path, local: Path, checkout: Path,
+                                    sid: str) -> tuple[ChromeEnvironment, dict]:
+    """One bounded pinned read and custody validation for legacy 9444 health."""
+    value = _read_pinned_legacy_json(config, local, checkout, sid)
+    env = _validate_legacy_health_9444_value(value, config, local, checkout, sid)
+    return env, value
+
+
+def _supervisor_9444_config(local: Path, checkout: Path,
+                            sid: str) -> tuple[ChromeEnvironment, dict] | None:
+    """Adopt a sole registered legacy 9444 Chrome config for health reads only."""
     with _supervisor_config_check(_SupervisorConfigCheck.LEGACY_REGISTRY_DISCOVERY):
         registry = _config_9444_registry(local, checkout)
     if not registry.present:
@@ -1571,9 +1696,13 @@ def _supervisor_9444_environment(local: Path, checkout: Path, sid: str) -> Chrom
     with _supervisor_config_check(_SupervisorConfigCheck.LEGACY_REGISTRY_AMBIGUOUS):
         if len(registry.present) != 1:
             raise _EnrollmentHold("LOCAL_CONFIG_AMBIGUOUS")
-    env = _read_9444_config(registry.present[0], local, checkout, sid)
-    _require_operator_control(env)
-    return env
+    return _read_legacy_health_9444_config(registry.present[0], local, checkout, sid)
+
+
+def _supervisor_9444_environment(local: Path, checkout: Path, sid: str) -> ChromeEnvironment | None:
+    """Adopt a sole registered Chrome config for health reads without changing it."""
+    selected = _supervisor_9444_config(local, checkout, sid)
+    return None if selected is None else selected[0]
 
 
 def _logon_environment(local: Path, checkout: Path, sid: str) -> ChromeEnvironment | None:
