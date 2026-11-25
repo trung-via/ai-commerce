@@ -87,14 +87,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "supervise":
         configured = os.environ.get("AI_COMMERCE_WAKEHUB_CONFIG")
         config = args.config if args.config is not None else Path(configured) if configured else None
+
+        def report_health(code):
+            if sys.stderr is not None:
+                print(json.dumps({"chrome_health": code}), file=sys.stderr, flush=True)
+
         result = run_supervisor(config, args.repository_root or _CODE_ROOT, dry_run=args.dry_run,
                                 max_ticks=args.max_ticks, idle_seconds=args.idle_seconds,
                                 max_backoff_seconds=args.max_backoff_seconds,
-                                on_health=lambda code: print(json.dumps({"chrome_health": code}),
-                                                             file=sys.stderr, flush=True),
+                                on_health=report_health,
                                 observe_only=args.observe_only,
                                 _deployment=globals().get("_PROTECTED_DEPLOYMENT"))
-        print(json.dumps(result.to_dict(), sort_keys=True))
+        if sys.stdout is not None:
+            print(json.dumps(result.to_dict(), sort_keys=True))
         return 0 if result.code == "SUPERVISOR_STOPPED" else 2
     if args.diagnostic:
         if args.target_index is not None:

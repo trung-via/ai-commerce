@@ -3246,6 +3246,8 @@ class PersonalCdp9444ConfigRegistryTests(unittest.TestCase):
             ("SUPERVISOR_STARTED_HEALTH_OBSERVED", "OBSERVED"),
             ("SUPERVISOR_REUSED_HEALTH_OBSERVED", "OBSERVED"),
             ("SUPERVISOR_START_UNKNOWN", "HOLD"),
+            ("SUPERVISOR_TASK_CONFLICT", "HOLD"),
+            ("SUPERVISOR_START_NOT_ATTEMPTED", "HOLD"),
             ("LOCAL_CONFIG_REQUIRED", "HOLD"),
             ("PRIVATE_CONFIG_PATH", "HOLD"),
         ):
@@ -3325,7 +3327,7 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
         self.config = self.root / "existing-config.json"
         self.config.touch()
-        self.executable = self.root / "python.exe"
+        self.executable = self.root / "pythonw.exe"
         self.executable.touch()
         (self.root / "Lib" / "site-packages").mkdir(parents=True)
         self.op = "deploy_wakehub_supervisor"
@@ -3342,7 +3344,10 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.approval = event("write", self.op, {})
         self.owner = (self.root, 7, "S-1-5-21-101-202-303-1001")
         self.values = {}
-        self.child = SimpleNamespace(pid=123, poll=Mock(return_value=None))
+        self.instance = "8c7770e8-3c62-4163-9c9f-d75621d3ca52"
+        self.nonce = "e" * 32
+        self.state = "MISSING"
+        self.modes = []
         clock = count()
         self.mock(hostops, "time", new=SimpleNamespace(monotonic=lambda: next(clock), sleep=Mock()))
         self.mock(hostops, "os", new=SimpleNamespace(name="nt", environ=self.env))
@@ -3350,19 +3355,55 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.mock(hostops.sys, "prefix", new=str(self.root))
         self.mock(hostops, "ROOTS", new={"workspace": self.root})
         self.mock(hostops, "_persistent_clean_source", return_value=self.source)
-        self.mock(acquisition, "_native_operator", return_value=self.owner)
-        self.desktop_read = self.mock(runner, "_desktop_logon", return_value=self.desktop)
+        self.mock(acquisition, "_native_operator", side_effect=AssertionError("HostOps has no desktop"))
+        self.desktop_read = self.mock(runner, "_desktop_logon", side_effect=AssertionError("HostOps has no desktop"))
+        self.owner_session = self.mock(runner, "_supervisor_owner_session", return_value=(self.owner, self.desktop))
         self.config_read = self.mock(runner, "_observe_only_config", return_value=(None, self.config_pin))
         self.active = self.mock(runner, "_supervisor_active", return_value=False)
         self.mock(runner, "_supervisor_deployment_value", side_effect=self.values.get)
         self.mock(runner, "_store_supervisor_deployment_value", side_effect=self.values.__setitem__)
-        self.live_process = self.mock(runner, "_supervisor_process", return_value=456)
+        self.mock(runner, "_supervisor_slot", side_effect=lambda _: nullcontext())
+        self.live_process = self.mock(runner, "_supervisor_process", side_effect=lambda pid, *_: 456 if pid == 123 else 999)
         self.mock(runner, "monotonic_ns", return_value=100_000_000_000)
-        self.mock(hostops.subprocess, "DETACHED_PROCESS", new=0x8, create=True)
-        self.spawn = self.mock(hostops.subprocess, "Popen", return_value=self.child)
+        self.mock(acquisition, "_powershell", return_value=self.root / "pwsh.exe")
+        self.spawn = self.mock(hostops.subprocess, "Popen", side_effect=AssertionError("Detached launch"))
+        self.mock(hostops.subprocess, "run", side_effect=self.task_transport)
+        self.launch = Mock(side_effect=self.start_healthy)
 
     def mock(self, obj, name, **kwargs):
         return self.stack.enter_context(patch.object(obj, name, **kwargs))
+
+    def task_transport(self, argv, *, env, **kwargs):
+        self.assertIn("AI-Commerce-WakeHub-Supervisor", argv[-1])
+        self.assertIn("TASK_LOGON_INTERACTIVE_TOKEN", argv[-1])
+        self.assertIn("$task.RunEx($nonce, 12, $session, $sid)", argv[-1])
+        self.assertNotIn("AI-Commerce-WakeHub-9444-Clean", argv[-1])
+        self.assertEqual(env["AI_COMMERCE_SUPERVISOR_SID"], self.owner[2])
+        self.assertEqual(env["AI_COMMERCE_SUPERVISOR_SESSION"], "7")
+        self.assertEqual(env["AI_COMMERCE_SUPERVISOR_IMAGE"], str(self.executable))
+        action = env["AI_COMMERCE_SUPERVISOR_ARGUMENTS"]
+        self.assertTrue(action.endswith(" $(Arg0)"))
+        self.assertNotIn(str(self.config), action)
+        mode = env["AI_COMMERCE_SUPERVISOR_MODE"]
+        self.modes.append(mode)
+        if mode == "install":
+            self.assertEqual(self.state, "MISSING")
+            self.state = "READY"
+        if mode == "start":
+            nonce = env["AI_COMMERCE_SUPERVISOR_NONCE"]
+            self.assertEqual(json.loads(self.values["StartPending"]), self.intent(nonce))
+            return SimpleNamespace(stdout=self.launch(nonce).encode("ascii"))
+        return SimpleNamespace(stdout=self.state.encode("ascii"))
+
+    def intent(self, nonce):
+        return {"source_sha": self.sha, "source_digest": self.source, "config_digest": self.config_pin,
+                "desktop": self.desktop, "session": self.owner[1], "sid": self.owner[2],
+                "config": str(self.config), "nonce": nonce}
+
+    def start_healthy(self, nonce):
+        self.state = self.instance
+        self.publish_health(nonce=nonce, health="CHROME_OWNED")
+        return self.instance
 
     def dispatch(self):
         Path(self.env["GITHUB_EVENT_PATH"]).write_text(json.dumps(self.approval), encoding="utf-8")
@@ -3381,7 +3422,7 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.active.return_value = True
         self.values["Health"] = json.dumps({
             "source_sha": self.sha, "source_digest": self.source, "config_digest": self.config_pin,
-            "desktop": self.desktop, "nonce": "e" * 32, "pid": 123, "created": 456,
+            "desktop": self.desktop, "nonce": self.nonce, "session": 7, "pid": 123, "created": 456,
             "observed_ns": 99_000_000_000, "health": "CHROME_ABSENT", **overrides,
         })
 
@@ -3401,8 +3442,10 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.env["GITHUB_RUN_ATTEMPT"] = "2"
         self.assertEqual(self.dispatch()["code"], "PROTECTED_HOSTOPS_ONLY")
         self.desktop_read.assert_not_called()
+        self.owner_session.assert_not_called()
         self.config_read.assert_not_called()
         self.spawn.assert_not_called()
+        self.assertEqual(self.modes, [])
         self.assertEqual(self.values, {})
 
     def test_missing_changed_or_unavailable_config_holds_before_launch(self):
@@ -3417,22 +3460,30 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.active.side_effect = OSError("PRIVATE probe unavailable")
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_RUNTIME_UNAVAILABLE")
         self.spawn.assert_not_called()
+        self.assertNotIn("start", self.modes)
+        self.assertNotIn("install", self.modes)
         self.assertEqual(self.values, {})
 
     def test_reuse_needs_matching_live_source_owner_and_fresh_health(self):
+        self.state = self.instance
+        self.values["Run"] = json.dumps({**self.intent(self.nonce), "instance": self.instance})
         self.publish_health()
         receipt = self.dispatch()
         self.assertEqual((receipt["status"], receipt["code"], receipt["source_sha"]),
                          ("OBSERVED", "SUPERVISOR_REUSED_HEALTH_OBSERVED", self.sha))
         self.live_process.assert_called_with(123, self.executable, self.owner)
         for bad in ({"desktop": "f" * 64}, {"source_sha": "f" * 40}, {"source_digest": "f" * 64},
+                    {"config_digest": "f" * 64}, {"session": 8}, {"nonce": "f" * 32}, {"pid": 124},
                     {"observed_ns": 0}, {"created": 789}, {"health": "PRIVATE"}):
             with self.subTest(bad=bad):
                 self.publish_health(**bad)
                 self.assertEqual(self.dispatch()["code"], "SUPERVISOR_ACTIVE_UNVERIFIED")
         self.values.pop("Health")
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_ACTIVE_UNVERIFIED")
-        self.spawn.assert_not_called()
+        self.publish_health()
+        self.state = "baada257-28df-48ab-8af9-c61e1d86d41a"
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_ACTIVE_UNVERIFIED")
+        self.assertEqual(set(self.modes), {"inspect"})
 
     def test_pre_start_desktop_failure_reports_only_closed_codes(self):
         hold = self.runtime.RuntimeHold
@@ -3441,64 +3492,98 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
             ("CHROME_INTERACTIVE_SESSION_CONFLICT", "CHROME_INTERACTIVE_SESSION_CONFLICT"),
             ("PRIVATE native desktop detail", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"),
         ):
-            for before_recheck in ([], [self.desktop]):
+            for before_recheck in ([], [(self.owner, self.desktop)]):
                 with self.subTest(expected=expected, recheck=bool(before_recheck)):
-                    self.desktop_read.side_effect = [*before_recheck, hold(code)]
+                    self.owner_session.side_effect = [*before_recheck, hold(code)]
                     receipt = self.dispatch()
                     self.assertEqual((receipt["status"], receipt["code"], receipt["source_sha"]),
                                      ("HOLD", expected, self.sha))
         self.spawn.assert_not_called()
+        self.assertNotIn("install", self.modes)
+        self.assertNotIn("start", self.modes)
         self.assertEqual(self.values, {})
 
-    def test_start_requires_same_child_and_rechecked_health(self):
-        def launch(argv, **kwargs):
-            self.assertEqual(argv[-4:-1], [self.source, self.config_pin, self.desktop])
-            self.assertEqual(self.values["StartPending"], argv[-1])
-            self.assertEqual(kwargs["cwd"], self.root)
-            self.publish_health(nonce=argv[-1], health="CHROME_OWNED")
-            return self.child
-
-        self.spawn.side_effect = launch
+    def test_noninteractive_hostops_starts_and_reuses_the_canonical_task(self):
         receipt = self.dispatch()
         self.assertEqual((receipt["status"], receipt["code"], receipt["source_sha"]),
                          ("OBSERVED", "SUPERVISOR_STARTED_HEALTH_OBSERVED", self.sha))
         self.assertIsNone(self.values["StartPending"])
-        self.spawn.assert_called_once()
+        self.assertEqual(json.loads(self.values["Run"])["instance"], self.instance)
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_REUSED_HEALTH_OBSERVED")
+        self.assertEqual(self.modes.count("install"), 1)
+        self.assertEqual(self.modes.count("start"), 1)
+        self.desktop_read.assert_not_called()
+        self.spawn.assert_not_called()
+
+    def test_matching_idle_task_is_started_without_registration(self):
+        self.state = "READY"
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_STARTED_HEALTH_OBSERVED")
+        self.assertNotIn("install", self.modes)
+
+    def test_conflicting_task_is_never_repurposed(self):
+        self.state = "CONFLICT"
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_TASK_CONFLICT")
+        self.assertEqual(self.modes, ["inspect"])
+        self.assertEqual(self.values, {})
 
     def test_missing_or_ambiguous_child_health_keeps_unknown_and_never_retries(self):
         for publish in (False, True):
             with self.subTest(ambiguous=publish):
                 self.values.clear()
                 self.active.return_value = False
-                self.spawn.reset_mock()
+                self.state = "READY"
+                self.launch.reset_mock()
 
-                def launch(argv, **kwargs):
+                def launch(nonce):
+                    self.state = self.instance
                     if publish:
-                        self.publish_health(nonce=argv[-1], pid=999)
-                    return self.child
+                        self.publish_health(nonce=nonce, pid=999)
+                    return self.instance
 
-                self.spawn.side_effect = launch
+                self.launch.side_effect = launch
                 self.assertEqual(self.dispatch()["code"], "SUPERVISOR_START_UNKNOWN")
                 pending = self.values["StartPending"]
-                self.assertRegex(pending, r"^[a-f0-9]{32}$")
+                self.assertRegex(json.loads(pending)["nonce"], r"^[a-f0-9]{32}$")
                 self.active.return_value = False
                 self.assertEqual(self.dispatch()["code"], "SUPERVISOR_START_UNKNOWN")
                 self.assertEqual(self.values["StartPending"], pending)
-                self.spawn.assert_called_once()
+                self.launch.assert_called_once()
 
-    def test_spawn_exception_leaves_start_pending_fence(self):
-        self.spawn.side_effect = OSError("PRIVATE process creation result unknown")
+    def test_failed_start_before_runex_clears_the_pending_fence(self):
+        self.launch.side_effect = lambda _: "NOT_ATTEMPTED"
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_START_NOT_ATTEMPTED")
+        self.assertIsNone(self.values["StartPending"])
+        self.launch.assert_called_once()
+
+    def test_lost_start_reply_holds_then_reconciles_without_relaunch(self):
+        self.launch.side_effect = OSError("PRIVATE task start result unknown")
         receipt = self.dispatch()
         self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "SUPERVISOR_START_UNKNOWN"))
         pending = self.values["StartPending"]
-        self.assertRegex(pending, r"^[a-f0-9]{32}$")
-        self.assertEqual(self.spawn.call_args.args[0][-1], pending)
-
-        self.config_read.reset_mock()
         self.assertEqual(self.dispatch(), receipt)
         self.assertEqual(self.values, {"StartPending": pending})
-        self.config_read.assert_not_called()
-        self.spawn.assert_called_once()
+        nonce = json.loads(pending)["nonce"]
+        self.assertEqual(self.launch.call_args.args, (nonce,))
+        self.state = self.instance
+        self.publish_health()
+        self.assertEqual(self.dispatch(), receipt)
+        self.publish_health(nonce=nonce)
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_STARTED_HEALTH_OBSERVED")
+        self.assertIsNone(self.values["StartPending"])
+        self.launch.assert_called_once()
+
+    def test_child_desktop_hold_preserves_pending_until_health(self):
+        def launch(nonce):
+            self.state = self.instance
+            self.publish_health(nonce=nonce, health="WINDOWS_INTERACTIVE_REQUIRED")
+            return self.instance
+
+        self.launch.side_effect = launch
+        self.assertEqual(self.dispatch()["code"], "WINDOWS_INTERACTIVE_REQUIRED")
+        nonce = json.loads(self.values["StartPending"])["nonce"]
+        self.publish_health(nonce=nonce)
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_STARTED_HEALTH_OBSERVED")
+        self.launch.assert_called_once()
 
 
 class PersonalClean9444AutostartTests(unittest.TestCase):
