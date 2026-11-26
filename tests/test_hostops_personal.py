@@ -3517,7 +3517,8 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
 
         self.runtime = runner
         self.stack = self.enterContext(ExitStack())
-        self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        # Windows TEMP can use an 8.3 alias. Deployment intents pin the resolved path.
+        self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory())).resolve(strict=True)
         self.workspace = self.root / "checkout"
         self.workspace.mkdir()
         self.config = self.root / "existing-config.json"
@@ -5687,7 +5688,8 @@ $results | ConvertTo-Json -Compress -Depth 4
         pythonw_exe = Path(sys._base_executable).with_name("pythonw.exe")
 
         with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
+            # Match the canonical config path and digest persisted by deployment.
+            tmp_path = Path(tmp).resolve(strict=True)
             local = tmp_path / "LocalAppData"
             cfg_dir = local / "AI-Commerce" / "D5-Isolated-9444-Trial"
             profile = cfg_dir / "UserData"
