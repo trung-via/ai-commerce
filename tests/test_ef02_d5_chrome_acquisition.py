@@ -4917,6 +4917,98 @@ def test_clean_9444_import_is_inert(monkeypatch):
     assert callable(loaded["install_clean_9444_autostart"])
 
 
+@pytest.mark.parametrize("fault", [
+    "sid", "session", "creation", "executable", "argv0", "profile", "data_dir", "address",
+    "foreign_listener", "duplicate_listener", "duplicate_pid", "competing_port", "competing_profile",
+    "foreign_helper", "unknown_candidate", "duplicate_switch", "aliased_switch", "unsafe_flag",
+    "remote_origins", "navigation_arg",
+])
+def test_owned_9444_adoption_rejects_unproven_identity(monkeypatch, tmp_path, fault):
+    env, _, _, inventory, _ = logon_fixture(monkeypatch, tmp_path, running=True)
+    target, = inventory["processes"]
+    listener, = inventory["listeners"]
+    argv = env.command()
+    metadata = {
+        "sid": ("OwnerSid", "S-1-5-18"), "session": ("SessionId", 2),
+        "creation": ("CreationDate", "invalid"), "executable": ("ExecutablePath", "other.exe"),
+    }
+    substitutions = {
+        "argv0": (0, "chrome.exe"), "profile": (2, "--profile-directory=Other"),
+        "data_dir": (1, f"--user-data-dir={tmp_path}"),
+        "address": (3, "--remote-debugging-address=0.0.0.0"),
+    }
+    extras = {
+        "duplicate_switch": "--remote-debugging-port=9444", "aliased_switch": "/profile-directory=Other",
+        "unsafe_flag": "--no-sandbox", "remote_origins": "--remote-allow-origins=*",
+        "navigation_arg": "https://example.invalid/",
+    }
+    if fault in metadata:
+        key, value = metadata[fault]
+        target[key] = value
+    elif fault in substitutions:
+        index, arg = substitutions[fault]
+        argv[index] = arg
+    elif fault in extras:
+        argv.append(extras[fault])
+    elif fault == "foreign_listener":
+        listener["OwningProcess"] += 1
+    elif fault == "duplicate_listener":
+        inventory["listeners"].append(dict(listener))
+    else:
+        competitor_args = {
+            "duplicate_pid": [str(env.executable)],
+            "competing_port": [str(env.executable), "--remote-debugging-port=09444"],
+            "competing_profile": [str(env.executable), f"--user-data-dir={env.user_data_dir}"],
+            "foreign_helper": [str(env.executable), "--type=renderer", f"--user-data-dir={env.user_data_dir}"],
+        }
+        args = competitor_args.get(fault)
+        target_pid = target["ProcessId"]
+        inventory["processes"].append(dict(
+            target, ProcessId=target_pid if fault == "duplicate_pid" else target_pid + 1,
+            CommandLine=json.dumps(args) if args else None, OwnerSid="S-1-5-18",
+        ))
+    target["CommandLine"] = json.dumps(argv)
+    with pytest.raises(ca.AcquisitionBlocked, match="^BROWSER_OWNERSHIP_UNPROVEN$"):
+        ca._observe_9444_inventory(env, inventory, session=1, sid=_OPERATOR_SID)
+
+
+@pytest.mark.parametrize("fault", [
+    "listener", "port", "session", "creation", "executable", "argv0",
+    "--type", "--type=", "--type= ", "--type=utility", "/type=utility", "-type=utility",
+    "--profile-directory=Other", "/profile-directory=Default", "--remote-debugging-address=0.0.0.0",
+    "positional_type",
+])
+def test_owned_9444_rejects_contradictory_profile_helper(monkeypatch, tmp_path, fault):
+    env, _, _, inventory, _ = logon_fixture(monkeypatch, tmp_path, running=True)
+    target, = inventory["processes"]
+    helper = dict(target, ProcessId=target["ProcessId"] + 1)
+    args = [str(env.executable), f"--user-data-dir={env.user_data_dir}", "--type=crashpad-handler"]
+    if fault == "listener":
+        target["CommandLine"] = json.dumps([str(env.executable)])
+        args = env.command() + ["--type=crashpad-handler"]
+        inventory["listeners"][0]["OwningProcess"] = helper["ProcessId"]
+    elif fault == "port":
+        args.append("--remote-debugging-port=9444")
+    elif fault == "session":
+        helper["SessionId"] = 2
+    elif fault == "creation":
+        helper["CreationDate"] = "invalid"
+    elif fault == "executable":
+        helper["ExecutablePath"] = "other.exe"
+    elif fault == "argv0":
+        args[0] = "other.exe"
+    elif fault == "positional_type":
+        args.insert(-1, "--")
+    elif fault in ("--type", "--type=", "--type= "):
+        args[-1] = fault
+    else:
+        args.append(fault)
+    helper["CommandLine"] = json.dumps(args)
+    inventory["processes"].append(helper)
+    with pytest.raises(ca.AcquisitionBlocked, match="^BROWSER_OWNERSHIP_UNPROVEN$"):
+        ca._observe_9444_inventory(env, inventory, session=1, sid=_OPERATOR_SID)
+
+
 def test_source_counterexamples_legacy_health_vs_lifecycle_and_powershell(monkeypatch, tmp_path):
     """Focused source counterexamples for #1494/#1495 without speculating native root.
 
@@ -4965,6 +5057,9 @@ def test_source_counterexamples_legacy_health_vs_lifecycle_and_powershell(monkey
 
     # Positive known Chrome OFF (empty inventory) and owned 9444 alongside ordinary Chrome.
     assert ca._legacy_health_inventory(env, {"listeners": [], "processes": []}, session=1, sid=sid) == ("ABSENT", ((), ()))
+    ordinary_child["CommandLine"] = json.dumps([
+        str(env.executable), "--type=renderer", "--remote-debugging-port=0",
+    ])
     owned_proc = {
         "ProcessId": 500,
         "ExecutablePath": str(env.executable),
@@ -4973,12 +5068,26 @@ def test_source_counterexamples_legacy_health_vs_lifecycle_and_powershell(monkey
         "OwnerSid": sid,
         "CreationDate": "2026-11-05T01:00:02Z",
     }
+    target_helpers = [
+        dict(owned_proc, ProcessId=pid, CommandLine=json.dumps([
+            str(env.executable), f"--user-data-dir={env.user_data_dir}", f"--type={kind}",
+        ]))
+        for pid, kind in ((501, "crashpad-handler"), (502, "future-helper"))
+    ]
     inv_mixed_owned = {
         "listeners": [{"LocalAddress": "127.0.0.1", "LocalPort": 9444, "OwningProcess": 500}],
-        "processes": [ordinary_browser, ordinary_child, owned_proc],
+        "processes": [ordinary_browser, ordinary_child, owned_proc, *target_helpers],
     }
+    with pytest.raises(ca._Lifecycle9444Hold, match="^PROCESS_IDENTITY_UNKNOWN$"):
+        ca._lifecycle_inventory(env, inv_mixed_owned, session=1, sid=sid)
     state, identity = ca._legacy_health_inventory(env, inv_mixed_owned, session=1, sid=sid)
     assert state == "OWNED" and identity[0] == (("127.0.0.1", 9444, 500),) and len(identity[1]) == 1 and identity[1][0][0] == 500
+
+    owned_proc["CommandLine"] = json.dumps(env.command() + ["--enable-logging"])
+    assert ca._legacy_health_inventory(env, inv_mixed_owned, session=1, sid=sid)[0] == "OWNED"
+    with pytest.raises(ca.AcquisitionBlocked, match="^BROWSER_OWNERSHIP_UNPROVEN$"):
+        ca._observe_9444_inventory(env, inv_mixed_owned, session=1, sid=sid)
+    owned_proc["CommandLine"] = json.dumps(env.command())
 
     # Fail-closed negatives: foreign listener, non-loopback listener, wrong port, missing/unparseable
     # CommandLine, helper claiming dedicated profile, and foreign 9444 claimant without listener.
