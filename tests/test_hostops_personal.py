@@ -3281,7 +3281,11 @@ class PersonalCdp9444ConfigRegistryTests(unittest.TestCase):
                              ("OBSERVED", "TASK_INSTANCE_PRESENT"),
                              ("HOLD", "TASK_MISSING"),
                              ("HOLD", "TASK_DACL_REPR_MISMATCH"),
-                             ("HOLD", "PENDING_INTENT_PRESENT_TASK_READY")):
+                             ("HOLD", "PENDING_INTENT_PRESENT_TASK_READY"),
+                             ("HOLD", "PENDING_INTENT_PRESENT+TASK_EXITED_NO_HEALTH+TASK_READY+PEND_WITH_GUID_PRIOR_SRC+MUTEX_INACTIVE+HEALTH_ABSENT+RUN_ABSENT+HIST_EXIT_2+LOG_EXIT_2"),
+                             ("HOLD", "PENDING_INTENT_PRESENT+RUNEX_RETURNED_EXIT_UNPROVEN+TASK_READY+PEND_WITH_GUID_PRIOR_SRC+MUTEX_INACTIVE+HEALTH_ABSENT+RUN_ABSENT+HIST_EXIT_2+LOG_NO_MATCH"),
+                             ("HOLD", "PENDING_INTENT_PRESENT+UNKNOWN_NO_GUID_WEAK_EVIDENCE+TASK_READY+PEND_NO_GUID_PRIOR_SRC+MUTEX_INACTIVE+HEALTH_ABSENT+RUN_ABSENT+HIST_NEVER_RAN+LOG_EMPTY"),
+                             ("HOLD", "PENDING_INTENT_PRESENT+UNKNOWN_EVIDENCE_UNAVAILABLE+TASK_READY+PEND_WITH_GUID_PRIOR_SRC+MUTEX_INACTIVE+HEALTH_MATCH_PROCESS_UNVERIFIED+RUN_ABSENT+HIST_EXIT_2+LOG_NO_MATCH")):
             expected = {"status": status, "code": code, "operation": task_probe,
                         "issue_number": 17, "source_sha": "f" * 40, "remote_shell_enabled": False,
                         "approval_channel": "CHATGPT_TO_AI_COMMERCE_ISSUE"}
@@ -3376,8 +3380,10 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.nonce = "e" * 32
         self.state = "MISSING"
         self.probe_state = "TASK_READY"
+        self.probe_pending_state = None
         self.modes = []
         self.captured_task_envs = []
+        self.captured_pending_guids = []
         clock = count()
         self.mock(hostops, "time", new=SimpleNamespace(monotonic=lambda: next(clock), sleep=Mock()))
         self.mock(hostops, "os", new=SimpleNamespace(name="nt", environ=self.env))
@@ -3422,11 +3428,23 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
             "AI_COMMERCE_SUPERVISOR_IMAGE", "AI_COMMERCE_SUPERVISOR_ARGUMENTS",
             "AI_COMMERCE_SUPERVISOR_ROOT",
         )})
-        if mode == "probe":
+        if mode in ("probe", "probe_pending"):
             self.assertTrue(argv[-1].endswith(hostops._SUPERVISOR_TASK_PROBE_SCRIPT))
             for forbidden in ("RegisterTaskDefinition", "RunEx", "DeleteTask", ".Stop("):
                 self.assertNotIn(forbidden, argv[-1])
             self.assertEqual(env["AI_COMMERCE_SUPERVISOR_NONCE"], "")
+            if mode == "probe_pending":
+                self.captured_pending_guids.append(env.get("AI_COMMERCE_SUPERVISOR_PENDING_GUID", ""))
+                out = (
+                    self.probe_pending_state
+                    if self.probe_pending_state is not None
+                    else (
+                        f"{self.probe_state}+HIST_NA+LOG_NA"
+                        if self.probe_state in hostops._SUPERVISOR_TASK_MISMATCH_CODES
+                        else f"{self.probe_state}+HIST_NEVER_RAN+LOG_EMPTY"
+                    )
+                )
+                return SimpleNamespace(stdout=out.encode("ascii"))
             return SimpleNamespace(stdout=self.probe_state.encode("ascii"))
         self.assertTrue(argv[-1].endswith(hostops._SUPERVISOR_TASK_SCRIPT))
         self.assertIn("$task.RunEx($nonce, 12, $session, $sid)", argv[-1])
@@ -3578,8 +3596,9 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.approval = event("read", "wakehub_supervisor_task_probe", {})
         return self.dispatch(mode="read")
 
-    def assert_task_probe_has_no_effects(self):
-        self.runtime._supervisor_active.assert_not_called()
+    def assert_task_probe_has_no_effects(self, *, pending_inspected=False):
+        if not pending_inspected:
+            self.runtime._supervisor_active.assert_not_called()
         self.runtime._supervisor_slot.assert_not_called()
         self.config_read.assert_not_called()
         self.user_config.assert_not_called()
@@ -3658,15 +3677,27 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
 
     def test_task_probe_reports_pending_intent_states_and_preflight_holds(self):
         self.values["StartPending"] = json.dumps(self.intent(self.nonce))
-        for task_code in ("TASK_READY", "TASK_INSTANCE_PRESENT", "TASK_MISSING", "TASK_DACL_SEMANTIC_MISMATCH"):
+        for task_code, expected_verdict, expected_hist, expected_log in (
+            ("TASK_READY", "UNKNOWN_NO_GUID_WEAK_EVIDENCE", "HIST_NEVER_RAN", "LOG_EMPTY"),
+            ("TASK_INSTANCE_PRESENT", "STARTUP_HEALTH_MISSING", "HIST_NEVER_RAN", "LOG_EMPTY"),
+            ("TASK_MISSING", "UNKNOWN_TASK_DRIFT", "HIST_NA", "LOG_NA"),
+            ("TASK_DACL_SEMANTIC_MISMATCH", "UNKNOWN_TASK_DRIFT", "HIST_NA", "LOG_NA"),
+        ):
             with self.subTest(pending="present", task_code=task_code):
                 self.probe_state = task_code
                 receipt = self.dispatch_task_probe()
-                self.assertEqual((receipt["status"], receipt["code"]),
-                                 ("HOLD", f"PENDING_INTENT_PRESENT_{task_code}"))
+                self.assertEqual(
+                    (receipt["status"], receipt["code"]),
+                    ("HOLD", "+".join((
+                        "PENDING_INTENT_PRESENT", expected_verdict, task_code,
+                        "PEND_NO_GUID_SAME_SRC", "MUTEX_INACTIVE", "HEALTH_ABSENT",
+                        "RUN_ABSENT", expected_hist, expected_log,
+                    ))),
+                )
                 self.assertNotIn(self.nonce, json.dumps(receipt))
 
         self.values.clear()
+        self.probe_pending_state = None
         with patch.object(self.runtime, "_supervisor_deployment_value",
                           side_effect=self.runtime.RuntimeHold("SUPERVISOR_EVIDENCE_INVALID")):
             self.probe_state = "TASK_READY"
@@ -3692,7 +3723,483 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.owner_session.side_effect = [(self.owner, self.desktop), (self.owner, "f" * 64)]
         self.assertEqual(self.dispatch_task_probe()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
         self.owner_session.side_effect = None
-        self.assert_task_probe_has_no_effects()
+        self.assert_task_probe_has_no_effects(pending_inspected=True)
+
+    def test_task_probe_pending_original_ready_with_and_without_guid(self):
+        prior_intent = {**self.intent(self.nonce), "source_sha": "1" * 40, "source_digest": "2" * 64}
+        cases = (
+            ("with_guid_exit_2", {**prior_intent, "instance": self.instance},
+             "TASK_READY+HIST_EXIT_2+LOG_EXIT_2",
+             "TASK_EXITED_NO_HEALTH", "PEND_WITH_GUID_PRIOR_SRC", "HIST_EXIT_2", "LOG_EXIT_2", self.instance),
+            ("with_guid_action_start_failed", {**prior_intent, "instance": self.instance},
+             "TASK_READY+HIST_ERR_FILE_NOT_FOUND+LOG_ACTION_START_FAILED",
+             "ACTION_START_FAILED", "PEND_WITH_GUID_PRIOR_SRC", "HIST_ERR_FILE_NOT_FOUND", "LOG_ACTION_START_FAILED", self.instance),
+            ("with_guid_log_denied", {**prior_intent, "instance": self.instance},
+             "TASK_READY+HIST_EXIT_2+LOG_DENIED",
+             "RUNEX_RETURNED_EXIT_UNPROVEN", "PEND_WITH_GUID_PRIOR_SRC", "HIST_EXIT_2", "LOG_DENIED", self.instance),
+            ("with_guid_log_no_match", {**prior_intent, "instance": self.instance},
+             "TASK_READY+HIST_EXIT_1+LOG_NO_MATCH",
+             "RUNEX_RETURNED_EXIT_UNPROVEN", "PEND_WITH_GUID_PRIOR_SRC", "HIST_EXIT_1", "LOG_NO_MATCH", self.instance),
+            ("with_guid_log_empty", {**prior_intent, "instance": self.instance},
+             "TASK_READY+HIST_NEVER_RAN+LOG_EMPTY",
+             "RUNEX_RETURNED_EXIT_UNPROVEN", "PEND_WITH_GUID_PRIOR_SRC", "HIST_NEVER_RAN", "LOG_EMPTY", self.instance),
+            ("with_guid_log_started_no_exit", {**prior_intent, "instance": self.instance},
+             "TASK_READY+HIST_RUNNING+LOG_STARTED_NO_EXIT",
+             "RUNEX_RETURNED_EXIT_UNPROVEN", "PEND_WITH_GUID_PRIOR_SRC", "HIST_RUNNING", "LOG_STARTED_NO_EXIT", self.instance),
+            ("with_guid_hist_unavailable", {**prior_intent, "instance": self.instance},
+             "TASK_READY+HIST_UNAVAILABLE+LOG_UNAVAILABLE",
+             "RUNEX_RETURNED_EXIT_UNPROVEN", "PEND_WITH_GUID_PRIOR_SRC", "HIST_UNAVAILABLE", "LOG_UNAVAILABLE", self.instance),
+            ("no_guid_never_ran_empty_log_weak_history", prior_intent,
+             "TASK_READY+HIST_NEVER_RAN+LOG_EMPTY",
+             "UNKNOWN_NO_GUID_WEAK_EVIDENCE", "PEND_NO_GUID_PRIOR_SRC", "HIST_NEVER_RAN", "LOG_EMPTY", ""),
+            ("no_guid_never_ran_log_denied", prior_intent,
+             "TASK_READY+HIST_NEVER_RAN+LOG_DENIED",
+             "UNKNOWN_NO_GUID_LOG_UNAVAILABLE", "PEND_NO_GUID_PRIOR_SRC", "HIST_NEVER_RAN", "LOG_DENIED", ""),
+            ("no_guid_historic_uncorrelated", prior_intent,
+             "TASK_READY+HIST_EXIT_2+LOG_UNCORRELATED_NO_GUID",
+             "UNKNOWN_NO_GUID_UNCORRELATED", "PEND_NO_GUID_PRIOR_SRC", "HIST_EXIT_2", "LOG_UNCORRELATED_NO_GUID", ""),
+            ("no_guid_hist_unavailable", prior_intent,
+             "TASK_READY+HIST_UNAVAILABLE+LOG_UNAVAILABLE",
+             "UNKNOWN_EVIDENCE_UNAVAILABLE", "PEND_NO_GUID_PRIOR_SRC", "HIST_UNAVAILABLE", "LOG_UNAVAILABLE", ""),
+        )
+        for name, record, native_out, verdict, shape, hist, log_code, want_guid in cases:
+            with self.subTest(name=name):
+                raw_pending = json.dumps(record)
+                self.values.clear()
+                self.values["StartPending"] = raw_pending
+                self.captured_pending_guids.clear()
+                self.probe_pending_state = native_out
+                receipt = self.dispatch_task_probe()
+                self.assertEqual(receipt["status"], "HOLD")
+                self.assertEqual(receipt["code"], "+".join((
+                    "PENDING_INTENT_PRESENT", verdict, "TASK_READY", shape,
+                    "MUTEX_INACTIVE", "HEALTH_ABSENT", "RUN_ABSENT", hist, log_code,
+                )))
+                self.assertEqual(self.captured_pending_guids, [want_guid])
+                self.assertEqual(self.values, {"StartPending": raw_pending})
+                public = json.dumps(receipt)
+                for secret in (self.instance, self.nonce, prior_intent["source_sha"], prior_intent["source_digest"]):
+                    self.assertNotIn(secret, public)
+
+        # Invalid native probe_pending responses fail closed without leaking raw output.
+        for bad in ("TASK_READY", "TASK_READY+HIST_EXIT_2", "TASK_READY+HIST_EXIT_2+PRIVATE_LOG",
+                    f"{self.instance}+HIST_EXIT_0+LOG_EXIT_0"):
+            with self.subTest(bad=bad):
+                self.probe_pending_state = bad
+                receipt = self.dispatch_task_probe()
+                self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "SUPERVISOR_RUNTIME_UNAVAILABLE"))
+                self.assertNotIn("PRIVATE", json.dumps(receipt))
+                self.assertNotIn(self.instance, json.dumps(receipt))
+        self.assert_task_probe_has_no_effects(pending_inspected=True)
+
+    def test_task_probe_pending_malformed_identity_drift_and_mutation_detection(self):
+        base = self.intent(self.nonce)
+        self.probe_pending_state = "TASK_READY+HIST_EXIT_2+LOG_UNCORRELATED_NO_GUID"
+        malformed_cases = (
+            "{not-json",
+            '{"nonce":"' + self.nonce + '","nonce":"' + self.nonce + '"}',
+            "[]",
+            json.dumps({k: v for k, v in base.items() if k != "nonce"}),
+            json.dumps({**base, "extra": "PRIVATE"}),
+            json.dumps({**base, "nonce": "BAD"}),
+            json.dumps({**base, "instance": "not-a-guid"}),
+            json.dumps({**base, "session": True}),
+            json.dumps({**base, "config": "C:\\bad\npath"}),
+        )
+        for raw in malformed_cases:
+            with self.subTest(raw=raw[:24]):
+                self.values.clear()
+                self.values["StartPending"] = raw
+                self.publish_health(nonce=self.nonce)
+                self.active.return_value = False
+                self.values["Run"] = json.dumps({**base, "instance": self.instance})
+                receipt = self.dispatch_task_probe()
+                self.assertEqual(receipt["status"], "HOLD")
+                self.assertEqual(receipt["code"], "+".join((
+                    "PENDING_INTENT_PRESENT", "UNKNOWN_PENDING_MALFORMED", "TASK_READY",
+                    "PEND_MALFORMED", "MUTEX_INACTIVE", "HEALTH_UNCORRELATED",
+                    "RUN_UNCORRELATED", "HIST_EXIT_2", "LOG_NA",
+                )))
+                self.assertEqual(self.values["StartPending"], raw)
+
+        # Owner SID drift never correlates Health/Run/Log to the current owner.
+        self.values.clear()
+        self.values["StartPending"] = json.dumps({**base, "sid": "S-1-5-21-9-9-9-9999", "instance": self.instance})
+        self.publish_health(nonce=self.nonce)
+        self.active.return_value = False
+        receipt = self.dispatch_task_probe()
+        self.assertEqual(receipt["code"], "+".join((
+            "PENDING_INTENT_PRESENT", "UNKNOWN_OWNER_DRIFT", "TASK_READY",
+            "PEND_OWNER_DRIFT", "MUTEX_INACTIVE", "HEALTH_UNCORRELATED",
+            "RUN_ABSENT", "HIST_EXIT_2", "LOG_NA",
+        )))
+
+        # Session/desktop drift is surfaced explicitly while still inspecting history/log.
+        self.values.clear()
+        self.values["StartPending"] = json.dumps({**base, "desktop": "9" * 64, "instance": self.instance})
+        self.probe_pending_state = "TASK_READY+HIST_EXIT_2+LOG_EXIT_2"
+        receipt = self.dispatch_task_probe()
+        self.assertEqual(receipt["code"], "+".join((
+            "PENDING_INTENT_PRESENT", "TASK_EXITED_NO_HEALTH", "TASK_READY",
+            "PEND_WITH_GUID_SESSION_DRIFT", "MUTEX_INACTIVE", "HEALTH_ABSENT",
+            "RUN_ABSENT", "HIST_EXIT_2", "LOG_EXIT_2",
+        )))
+
+        # Exact StartPending value change between before and after (e.g. GUID added) yields PENDING_INTENT_CHANGED.
+        before_raw = json.dumps(base)
+        after_raw = json.dumps({**base, "instance": self.instance})
+        reads = {"StartPending": iter([before_raw, after_raw])}
+
+        def changing_reg(name):
+            if name == "StartPending":
+                return next(reads[name])
+            return None
+
+        with patch.object(self.runtime, "_supervisor_deployment_value", side_effect=changing_reg):
+            receipt = self.dispatch_task_probe()
+            self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "PENDING_INTENT_CHANGED"))
+
+        # Expected registration drift mid-probe fails closed.
+        self.values.clear()
+        self.values["StartPending"] = after_raw
+        with patch.object(hostops, "_supervisor_expected_registration",
+                          side_effect=[(self.executable, "args-1"), (self.executable, "args-2")]):
+            receipt = self.dispatch_task_probe()
+            self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "SUPERVISOR_RUNTIME_UNAVAILABLE"))
+        self.assert_task_probe_has_no_effects(pending_inspected=True)
+
+    def test_task_probe_pending_health_run_mutex_and_instance_matrix(self):
+        with_guid = {**self.intent(self.nonce), "instance": self.instance}
+        no_guid = self.intent(self.nonce)
+
+        # 1. Matching live health + matching running instance + active mutex -> ACTIVE_HEALTH_UNRESOLVED.
+        self.values.clear()
+        self.values["StartPending"] = json.dumps(with_guid)
+        self.publish_health(nonce=self.nonce, health="CHROME_OWNED")
+        self.values["Run"] = json.dumps(with_guid)
+        self.probe_pending_state = "TASK_INSTANCE_MATCH+HIST_RUNNING+LOG_STARTED_NO_EXIT"
+        receipt = self.dispatch_task_probe()
+        self.assertEqual(receipt["code"], "+".join((
+            "PENDING_INTENT_PRESENT", "ACTIVE_HEALTH_UNRESOLVED", "TASK_INSTANCE_MATCH",
+            "PEND_WITH_GUID_SAME_SRC", "MUTEX_ACTIVE", "HEALTH_MATCH_LIVE",
+            "RUN_MATCH", "HIST_RUNNING", "LOG_STARTED_NO_EXIT",
+        )))
+        self.live_process.assert_called_with(123, self.executable, self.owner)
+
+        # 2. NO_GUID + running instance + matching live health -> ACTIVE_HEALTH_UNRESOLVED.
+        self.values.clear()
+        self.values["StartPending"] = json.dumps(no_guid)
+        self.publish_health(nonce=self.nonce, health="CHROME_ABSENT")
+        self.probe_pending_state = "TASK_INSTANCE_PRESENT+HIST_RUNNING+LOG_UNCORRELATED_NO_GUID"
+        receipt = self.dispatch_task_probe()
+        self.assertEqual(receipt["code"], "+".join((
+            "PENDING_INTENT_PRESENT", "ACTIVE_HEALTH_UNRESOLVED", "TASK_INSTANCE_PRESENT",
+            "PEND_NO_GUID_SAME_SRC", "MUTEX_ACTIVE", "HEALTH_MATCH_LIVE",
+            "RUN_ABSENT", "HIST_RUNNING", "LOG_UNCORRELATED_NO_GUID",
+        )))
+
+        # 3. Matching running instance without fresh verified matching health -> STARTUP_HEALTH_MISSING.
+        for label, setup_health, want_health, mutex_val in (
+            ("absent", lambda: None, "HEALTH_ABSENT", False),
+            ("foreign", lambda: self.publish_health(nonce="f" * 32), "HEALTH_FOREIGN", True),
+            ("stale", lambda: self.publish_health(nonce=self.nonce, observed_ns=0), "HEALTH_MATCH_STALE", True),
+            ("unverified_proc", lambda: self.publish_health(nonce=self.nonce, pid=999), "HEALTH_MATCH_PROCESS_UNVERIFIED", True),
+            ("malformed", lambda: self.values.__setitem__("Health", "{bad"), "HEALTH_MALFORMED", False),
+        ):
+            with self.subTest(startup_missing=label):
+                self.values.clear()
+                self.values["StartPending"] = json.dumps(with_guid)
+                self.active.return_value = False
+                setup_health()
+                self.active.return_value = mutex_val
+                self.probe_pending_state = "TASK_INSTANCE_MATCH+HIST_RUNNING+LOG_STARTED_NO_EXIT"
+                receipt = self.dispatch_task_probe()
+                self.assertEqual(receipt["code"], "+".join((
+                    "PENDING_INTENT_PRESENT", "STARTUP_HEALTH_MISSING", "TASK_INSTANCE_MATCH",
+                    "PEND_WITH_GUID_SAME_SRC", "MUTEX_ACTIVE" if mutex_val else "MUTEX_INACTIVE",
+                    want_health, "RUN_ABSENT", "HIST_RUNNING", "LOG_STARTED_NO_EXIT",
+                )))
+
+        # 4. Active/conflicting states when task is READY or another instance/busy -> ACTIVE_UNRESOLVED.
+        for label, probe_out, setup_state, want_mutex, want_health, want_run in (
+            ("other_instance", "TASK_INSTANCE_OTHER+HIST_RUNNING+LOG_NO_MATCH",
+             lambda: self.active.__setattr__("return_value", True), "MUTEX_ACTIVE", "HEALTH_ABSENT", "RUN_ABSENT"),
+            ("busy", "TASK_BUSY+HIST_QUEUED+LOG_NO_MATCH",
+             lambda: self.active.__setattr__("return_value", False), "MUTEX_INACTIVE", "HEALTH_ABSENT", "RUN_ABSENT"),
+            ("ready_mutex_active", "TASK_READY+HIST_EXIT_0+LOG_NO_MATCH",
+             lambda: self.active.__setattr__("return_value", True), "MUTEX_ACTIVE", "HEALTH_ABSENT", "RUN_ABSENT"),
+            ("ready_stale_health", "TASK_READY+HIST_EXIT_0+LOG_NO_MATCH",
+             lambda: (self.publish_health(nonce=self.nonce, observed_ns=0),
+                      self.active.__setattr__("return_value", False)),
+             "MUTEX_INACTIVE", "HEALTH_MATCH_STALE", "RUN_ABSENT"),
+            ("ready_run_match", "TASK_READY+HIST_EXIT_0+LOG_NO_MATCH",
+             lambda: (self.values.__setitem__("Run", json.dumps(with_guid)),
+                      self.active.__setattr__("return_value", False)),
+             "MUTEX_INACTIVE", "HEALTH_ABSENT", "RUN_MATCH"),
+        ):
+            with self.subTest(unresolved=label):
+                self.values.clear()
+                self.values["StartPending"] = json.dumps(with_guid)
+                self.active.return_value = False
+                setup_state()
+                self.probe_pending_state = probe_out
+                receipt = self.dispatch_task_probe()
+                parts = receipt["code"].split("+")
+                self.assertEqual(parts[1], "ACTIVE_UNRESOLVED")
+                self.assertEqual((parts[4], parts[5], parts[6]), (want_mutex, want_health, want_run))
+
+        # 5. Process verifier failures (permission/API/owner/session RuntimeHold) and PID reuse
+        #    (creation mismatch) map to HEALTH_MATCH_PROCESS_UNVERIFIED and NEVER infer death.
+        verifier_failures = (
+            ("runtime_hold_owner_session_or_api",
+             self.runtime.RuntimeHold("SUPERVISOR_PROCESS_UNVERIFIED")),
+            ("permission_error", PermissionError("PRIVATE access denied")),
+            ("os_api_error", OSError("PRIVATE OpenProcess failed")),
+            ("pid_reuse_creation_mismatch", lambda pid, *_: 999),
+            ("non_int_creation_bool", lambda pid, *_: True),
+        )
+        for label, effect in verifier_failures:
+            for shape_name, pending_rec, shape_code, probe_out, want_hist, want_log in (
+                ("no_guid_uncorrelated", no_guid, "PEND_NO_GUID_SAME_SRC",
+                 "TASK_READY+HIST_EXIT_2+LOG_UNCORRELATED_NO_GUID", "HIST_EXIT_2", "LOG_UNCORRELATED_NO_GUID"),
+                ("no_guid_weak_history", no_guid, "PEND_NO_GUID_SAME_SRC",
+                 "TASK_READY+HIST_NEVER_RAN+LOG_EMPTY", "HIST_NEVER_RAN", "LOG_EMPTY"),
+                ("with_guid_no_match", with_guid, "PEND_WITH_GUID_SAME_SRC",
+                 "TASK_READY+HIST_EXIT_2+LOG_NO_MATCH", "HIST_EXIT_2", "LOG_NO_MATCH"),
+                ("with_guid_exact_terminal_contradicts_unverified_proc", with_guid, "PEND_WITH_GUID_SAME_SRC",
+                 "TASK_READY+HIST_EXIT_2+LOG_EXIT_2", "HIST_EXIT_2", "LOG_EXIT_2"),
+                ("with_guid_start_failed_contradicts_matching_health", with_guid, "PEND_WITH_GUID_SAME_SRC",
+                 "TASK_READY+HIST_ERR_FILE_NOT_FOUND+LOG_ACTION_START_FAILED", "HIST_ERR_FILE_NOT_FOUND", "LOG_ACTION_START_FAILED"),
+            ):
+                with self.subTest(verifier=label, shape=shape_name):
+                    self.values.clear()
+                    self.values["StartPending"] = json.dumps(pending_rec)
+                    self.publish_health(nonce=self.nonce, pid=123, created=456)
+                    self.active.return_value = False
+                    self.values["Run"] = json.dumps({
+                        **self.intent("1" * 32), "instance": "baada257-28df-48ab-8af9-c61e1d86d41a",
+                    })
+                    self.probe_pending_state = probe_out
+                    with patch.object(self.runtime, "_supervisor_process", side_effect=effect):
+                        receipt = self.dispatch_task_probe()
+                    self.assertEqual(receipt["status"], "HOLD")
+                    self.assertEqual(receipt["code"], "+".join((
+                        "PENDING_INTENT_PRESENT", "UNKNOWN_EVIDENCE_UNAVAILABLE", "TASK_READY",
+                        shape_code, "MUTEX_INACTIVE", "HEALTH_MATCH_PROCESS_UNVERIFIED",
+                        "RUN_PRIOR", want_hist, want_log,
+                    )))
+
+        # 5b. Malformed health (including unhashable list/dict health enums) and malformed Run
+        #     fail safely to HEALTH_MALFORMED/RUN_MALFORMED and UNKNOWN_EVIDENCE_UNAVAILABLE.
+        malformed_health_payloads = (
+            ("unhashable_list", json.dumps({**json.loads(self.values["Health"]), "health": ["CHROME_OWNED"]})),
+            ("unhashable_dict", json.dumps({**json.loads(self.values["Health"]), "health": {"k": "v"}})),
+            ("non_string_int", json.dumps({**json.loads(self.values["Health"]), "health": 1})),
+            ("non_string_bool", json.dumps({**json.loads(self.values["Health"]), "health": True})),
+            ("non_string_null", json.dumps({**json.loads(self.values["Health"]), "health": None})),
+            ("unknown_enum", json.dumps({**json.loads(self.values["Health"]), "health": "PRIVATE_STATE"})),
+            ("invalid_json", "{not-json"),
+        )
+        for label, bad_health_raw in malformed_health_payloads:
+            with self.subTest(malformed_health=label):
+                self.values.clear()
+                self.values["StartPending"] = json.dumps(with_guid)
+                self.values["Health"] = bad_health_raw
+                self.active.return_value = False
+                self.probe_pending_state = "TASK_READY+HIST_EXIT_2+LOG_EXIT_2"
+                receipt = self.dispatch_task_probe()
+                self.assertEqual(receipt["status"], "HOLD")
+                self.assertEqual(receipt["code"], "+".join((
+                    "PENDING_INTENT_PRESENT", "UNKNOWN_EVIDENCE_UNAVAILABLE", "TASK_READY",
+                    "PEND_WITH_GUID_SAME_SRC", "MUTEX_INACTIVE", "HEALTH_MALFORMED",
+                    "RUN_ABSENT", "HIST_EXIT_2", "LOG_EXIT_2",
+                )))
+
+        self.values.clear()
+        self.values["StartPending"] = json.dumps(with_guid)
+        self.values["Run"] = "{malformed-run"
+        self.active.return_value = False
+        self.probe_pending_state = "TASK_READY+HIST_EXIT_2+LOG_EXIT_2"
+        receipt = self.dispatch_task_probe()
+        self.assertEqual(receipt["status"], "HOLD")
+        self.assertEqual(receipt["code"], "+".join((
+            "PENDING_INTENT_PRESENT", "UNKNOWN_EVIDENCE_UNAVAILABLE", "TASK_READY",
+            "PEND_WITH_GUID_SAME_SRC", "MUTEX_INACTIVE", "HEALTH_ABSENT",
+            "RUN_MALFORMED", "HIST_EXIT_2", "LOG_EXIT_2",
+        )))
+
+        # Retired overly-strong / dead-inference codes are rejected by the validator.
+        for rejected in (
+            "PENDING_INTENT_PRESENT+TASK_EXITED_NO_HEALTH+TASK_READY+PEND_NO_GUID_SAME_SRC+MUTEX_INACTIVE+HEALTH_MATCH_DEAD+RUN_ABSENT+HIST_EXIT_2+LOG_UNCORRELATED_NO_GUID",
+            "PENDING_INTENT_PRESENT+ACTION_NOT_ATTEMPTED_EVIDENCE+TASK_READY+PEND_NO_GUID_SAME_SRC+MUTEX_INACTIVE+HEALTH_ABSENT+RUN_ABSENT+HIST_NEVER_RAN+LOG_EMPTY",
+            "PENDING_INTENT_PRESENT+RUNEX_RETURNED_EXITED_UNCORRELATED+TASK_READY+PEND_WITH_GUID_SAME_SRC+MUTEX_INACTIVE+HEALTH_ABSENT+RUN_ABSENT+HIST_EXIT_2+LOG_NO_MATCH",
+        ):
+            self.assertFalse(hostops._is_valid_supervisor_task_probe_code(rejected))
+
+        # 6. Foreign health on READY task with exact-GUID terminal log supports TASK_EXITED_NO_HEALTH.
+        self.values.clear()
+        self.values["StartPending"] = json.dumps(with_guid)
+        self.publish_health(nonce="f" * 32)
+        self.active.return_value = False
+        self.probe_pending_state = "TASK_READY+HIST_EXIT_2+LOG_EXIT_2"
+        receipt = self.dispatch_task_probe()
+        self.assertEqual(receipt["code"], "+".join((
+            "PENDING_INTENT_PRESENT", "TASK_EXITED_NO_HEALTH", "TASK_READY",
+            "PEND_WITH_GUID_SAME_SRC", "MUTEX_INACTIVE", "HEALTH_FOREIGN",
+            "RUN_ABSENT", "HIST_EXIT_2", "LOG_EXIT_2",
+        )))
+
+        # 7. Unreadable mutex / Health / Run fail closed to UNKNOWN_EVIDENCE_UNAVAILABLE.
+        self.values.clear()
+        self.values["StartPending"] = json.dumps(with_guid)
+        self.probe_pending_state = "TASK_READY+HIST_EXIT_2+LOG_EXIT_2"
+        self.active.side_effect = OSError("PRIVATE mutex")
+        receipt = self.dispatch_task_probe()
+        self.assertEqual(receipt["code"].split("+")[1], "UNKNOWN_EVIDENCE_UNAVAILABLE")
+        self.assertEqual(receipt["code"].split("+")[4], "MUTEX_UNKNOWN")
+        self.active.side_effect = None
+        self.active.return_value = False
+
+        def bad_health(name):
+            if name == "Health":
+                raise OSError("PRIVATE reg")
+            return self.values.get(name)
+
+        with patch.object(self.runtime, "_supervisor_deployment_value", side_effect=bad_health):
+            receipt = self.dispatch_task_probe()
+            self.assertEqual(receipt["code"].split("+")[1], "UNKNOWN_EVIDENCE_UNAVAILABLE")
+            self.assertEqual(receipt["code"].split("+")[5], "HEALTH_UNREADABLE")
+
+        def bad_run(name):
+            if name == "Run":
+                raise OSError("PRIVATE reg")
+            return self.values.get(name)
+
+        with patch.object(self.runtime, "_supervisor_deployment_value", side_effect=bad_run):
+            receipt = self.dispatch_task_probe()
+            self.assertEqual(receipt["code"].split("+")[1], "UNKNOWN_EVIDENCE_UNAVAILABLE")
+            self.assertEqual(receipt["code"].split("+")[6], "RUN_UNREADABLE")
+        self.assert_task_probe_has_no_effects(pending_inspected=True)
+
+    def test_supervisor_pending_powershell_history_and_log_correlation_matrix(self):
+        """Exercise exact PowerShell history & Operational log correlation helpers offline (no COM/EventLog)."""
+        import os
+        import shutil
+
+        if os.name != "nt":
+            self.skipTest("Windows PowerShell required for pending diagnostic helper matrix")
+        shell = shutil.which("pwsh") or shutil.which("pwsh.exe") or shutil.which("powershell.exe")
+        if not shell:
+            self.skipTest("PowerShell CLI unavailable for offline pending diagnostic matrix")
+
+        self.stack.close()
+        harness = hostops._SUPERVISOR_PENDING_DIAGNOSTIC_FUNCTIONS + r"""
+$taskPath = '\AI-Commerce-WakeHub-Supervisor'
+$otherTask = '\Other-Task'
+$target = '8c7770e8-3c62-4163-9c9f-d75621d3ca52'
+$historic = '11111111-2222-3333-4444-555555555555'
+$recent = [DateTime]::new(2026, 11, 26, 8, 0, 0)
+$sentinel = [DateTime]::new(1899, 12, 30, 0, 0, 0)
+
+$histCases = @(
+    @{ name = 'never_ran_code'; t = $sentinel; r = 267011; want = 'HIST_NEVER_RAN' },
+    @{ name = 'never_ran_zero'; t = $sentinel; r = 0; want = 'HIST_NEVER_RAN' },
+    @{ name = 'sentinel_weird'; t = $sentinel; r = 2; want = 'HIST_UNAVAILABLE' },
+    @{ name = 'null_result'; t = $recent; r = $null; want = 'HIST_UNAVAILABLE' },
+    @{ name = 'bool_result'; t = $recent; r = $true; want = 'HIST_UNAVAILABLE' },
+    @{ name = 'str_result'; t = $recent; r = '0'; want = 'HIST_UNAVAILABLE' },
+    @{ name = 'null_time'; t = $null; r = 2; want = 'HIST_UNAVAILABLE' },
+    @{ name = 'exit_0'; t = $recent; r = 0; want = 'HIST_EXIT_0' },
+    @{ name = 'exit_1'; t = $recent; r = 1; want = 'HIST_EXIT_1' },
+    @{ name = 'exit_2'; t = $recent; r = 2; want = 'HIST_EXIT_2' },
+    @{ name = 'exit_other'; t = $recent; r = 42; want = 'HIST_EXIT_OTHER' },
+    @{ name = 'running'; t = $recent; r = 267009; want = 'HIST_RUNNING' },
+    @{ name = 'terminated'; t = $recent; r = 267014; want = 'HIST_TERMINATED' },
+    @{ name = 'queued'; t = $recent; r = 267045; want = 'HIST_QUEUED' },
+    @{ name = 'file_not_found'; t = $recent; r = -2147024894; want = 'HIST_ERR_FILE_NOT_FOUND' },
+    @{ name = 'access_denied'; t = $recent; r = -2147024891; want = 'HIST_ERR_ACCESS_DENIED' },
+    @{ name = 'dir_invalid'; t = $recent; r = -2147024629; want = 'HIST_ERR_DIR_INVALID' },
+    @{ name = 'cancelled_ntstatus'; t = $recent; r = -1073741510; want = 'HIST_ERR_CANCELLED' },
+    @{ name = 'err_system'; t = $recent; r = -1073741819; want = 'HIST_ERR_SYSTEM' }
+)
+
+function New-Ev($id, $task, $inst, $act, $res) {
+    [pscustomobject]@{ Id = $id; TaskName = $task; InstanceId = $inst; ActivityId = $act; ResultCode = $res }
+}
+
+$logCases = @(
+    @{ name = 'no_guid_empty'; guid = ''; events = @(); want = 'LOG_EMPTY' },
+    @{ name = 'no_guid_other_task_only'; guid = ''; events = @(
+        (New-Ev 201 $otherTask ('{' + $target + '}') $null '2')
+    ); want = 'LOG_EMPTY' },
+    @{ name = 'no_guid_historic_event'; guid = ''; events = @(
+        (New-Ev 201 $taskPath ('{' + $historic + '}') $null '2')
+    ); want = 'LOG_UNCORRELATED_NO_GUID' },
+    @{ name = 'no_guid_start_failed_101'; guid = ''; events = @(
+        (New-Ev 101 $taskPath '' $null '0x80070005')
+    ); want = 'LOG_UNCORRELATED_NO_GUID' },
+    @{ name = 'guid_empty_log'; guid = $target; events = @(); want = 'LOG_EMPTY' },
+    @{ name = 'guid_unrelated_historic_only'; guid = $target; events = @(
+        (New-Ev 201 $taskPath ('{' + $historic + '}') $null '1'),
+        (New-Ev 103 $taskPath ('{' + $historic + '}') $null '0x80070002')
+    ); want = 'LOG_NO_MATCH' },
+    @{ name = 'guid_other_task_same_guid_ignored'; guid = $target; events = @(
+        (New-Ev 201 $otherTask ('{' + $target + '}') ([Guid]::Parse($target)) '2')
+    ); want = 'LOG_EMPTY' },
+    @{ name = 'guid_match_exit_2_ignores_historic_exit_0'; guid = $target; events = @(
+        (New-Ev 201 $taskPath ('{' + $historic + '}') $null '0'),
+        (New-Ev 201 $taskPath ('{' + $target.ToUpper() + '}') $null '2'),
+        (New-Ev 200 $taskPath ('{' + $target + '}') $null $null)
+    ); want = 'LOG_EXIT_2' },
+    @{ name = 'guid_match_exit_1_hex'; guid = $target; events = @(
+        (New-Ev 201 $taskPath ('{' + $target + '}') $null '0x1')
+    ); want = 'LOG_EXIT_1' },
+    @{ name = 'guid_match_exit_0'; guid = $target; events = @(
+        (New-Ev 201 $taskPath ('{' + $target + '}') $null '0')
+    ); want = 'LOG_EXIT_0' },
+    @{ name = 'guid_match_exit_other'; guid = $target; events = @(
+        (New-Ev 201 $taskPath ('{' + $target + '}') $null '99')
+    ); want = 'LOG_EXIT_OTHER' },
+    @{ name = 'guid_match_err_system'; guid = $target; events = @(
+        (New-Ev 201 $taskPath ('{' + $target + '}') $null '0x80070005')
+    ); want = 'LOG_ERR_SYSTEM' },
+    @{ name = 'guid_match_103_ignores_historic_201'; guid = $target; events = @(
+        (New-Ev 201 $taskPath ('{' + $historic + '}') $null '2'),
+        (New-Ev 103 $taskPath '' ([Guid]::Parse($target)) '0x80070002')
+    ); want = 'LOG_ACTION_START_FAILED' },
+    @{ name = 'guid_match_terminated'; guid = $target; events = @(
+        (New-Ev 111 $taskPath ('{' + $target + '}') $null $null)
+    ); want = 'LOG_TERMINATED' },
+    @{ name = 'guid_match_completed_no_201'; guid = $target; events = @(
+        (New-Ev 102 $taskPath ('{' + $target + '}') $null $null)
+    ); want = 'LOG_COMPLETED' },
+    @{ name = 'guid_match_129_via_activity_id'; guid = $target; events = @(
+        (New-Ev 129 $taskPath '' ([Guid]::Parse($target)) $null)
+    ); want = 'LOG_STARTED_NO_EXIT' }
+)
+
+$histOut = foreach ($c in $histCases) {
+    [pscustomobject]@{ name = $c.name; want = $c.want; got = (Get-SupervisorHistoryCode $c.t $c.r) }
+}
+$logOut = foreach ($c in $logCases) {
+    [pscustomobject]@{ name = $c.name; want = $c.want; got = (Get-SupervisorOperationalLogCode $c.events $taskPath $c.guid) }
+}
+[pscustomobject]@{ hist = @($histOut); log = @($logOut) } | ConvertTo-Json -Compress -Depth 4
+"""
+        completed = subprocess.run(
+            [shell, "-NoProfile", "-NonInteractive", "-Command", harness],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr[-3000:])
+        payload = json.loads(completed.stdout)
+        for row in payload["hist"]:
+            with self.subTest(hist=row["name"]):
+                self.assertEqual(row["got"], row["want"])
+                self.assertIn(row["got"], hostops._SUPERVISOR_PENDING_HISTORY_CODES)
+        for row in payload["log"]:
+            with self.subTest(log=row["name"]):
+                self.assertEqual(row["got"], row["want"])
+                self.assertIn(row["got"], hostops._SUPERVISOR_PENDING_LOG_CODES)
 
     def test_supervisor_task_comparator_matrix_equivalent_and_strict_negatives(self):
         """Exercise the exact shared PowerShell comparator on controlled in-memory fixtures (no COM)."""
