@@ -1610,54 +1610,121 @@ def test_n3a_logon_decisions_are_advisory_without_mutation(
     assert capsys.readouterr().out == ""
 
 
-@pytest.mark.parametrize("mask", [0x120089, 0x1200A9, 0xA0000000])
-def test_existing_9444_shared_root_accepts_only_proven_read_custody(monkeypatch, tmp_path, mask):
+def test_supervised_adoption_uses_private_objects_without_common_root_acl(monkeypatch, tmp_path):
+    from ai_commerce.remote import _private_state, local_completion_handoff as handoff
+
+    env, repo, home, _, events = logon_fixture(monkeypatch, tmp_path)
+    root = home / "AI-Commerce"
+    calls = []
+    descriptors = []
+    open_file = _private_state._Transaction.open
+
+    def track_open(transaction, name, flags):
+        assert transaction.state.path == env.config_path and flags == os.O_RDONLY
+        fd = open_file(transaction, name, flags)
+        descriptors.append(fd)
+        return fd
+
+    def identity(path):
+        calls.append(path)
+        if path in (root, home, Path(home.anchor)):
+            handoff._check_windows_acl("S-1-5-21-4-5-6-1001",
+                                       [("allow", "S-1-5-32-545")], _OPERATOR_SID)
+        if path == env.config_path and descriptors:
+            # The post-read custody check must still hold the file open.
+            assert os.fstat(descriptors[0]).st_size == path.stat().st_size
+        return _OPERATOR_SID
+
+    monkeypatch.setattr(handoff, "_private_identity", identity)
+    monkeypatch.setattr(_private_state._Transaction, "open", track_open)
+    before = env.config_path.read_bytes()
+    assert ca._read_supervised_9444_config(env.config_path, home, repo, _OPERATOR_SID) == (
+        env, json.loads(before))
+    assert calls == [env.config_path.parent, env.config_path] * 2 and len(descriptors) == 1
+    with pytest.raises(handoff.HandoffBlocked, match="^HANDOFF_PERMISSIONS_INVALID$"):
+        ca._read_9444_config(env.config_path, home, repo, _OPERATOR_SID)
+    assert env.config_path.read_bytes() == before and events == []
+
+
+@pytest.mark.parametrize("private_parent", [True, False])
+def test_supervised_adoption_of_root_level_config_requires_private_parent(
+        monkeypatch, tmp_path, private_parent):
     from ai_commerce.remote import local_completion_handoff as handoff
 
     env, repo, home, _, _ = logon_fixture(monkeypatch, tmp_path)
     root = home / "AI-Commerce"
-    users = "S-1-5-32-545"
+    config = root / "chrome.json"
+    env.config_path.rename(config)
 
     def identity(path):
-        aces = [("allow", _OPERATOR_SID)]
-        if path == root:
-            aces.append(("allow", users))
-        handoff._check_windows_acl(_OPERATOR_SID, aces, _OPERATOR_SID)
+        if path == root and not private_parent:
+            raise handoff.HandoffBlocked("HANDOFF_PERMISSIONS_INVALID")
         return _OPERATOR_SID
 
-    def acl(path):
-        if path == root:
-            return _OPERATOR_SID, [(0, 0, 0x1F01FF, _OPERATOR_SID), (0, 0x10, mask, users)]
-        # An ancestor may allow creating unrelated entries and have an
-        # inherit-only CREATOR OWNER ACE without granting deletion of a child.
-        return "S-1-5-18", [(0, 0, 0x1F01FF, "S-1-5-18"), (0, 0, 0x04, users),
-                            (0, 0x0B, 0x10000000, "S-1-3-0")]
+    monkeypatch.setattr(handoff, "_private_identity", identity)
+    if private_parent:
+        current, _ = ca._read_supervised_9444_config(config, home, repo, _OPERATOR_SID)
+        assert current == ca.replace(env, config_path=config)
+    else:
+        with pytest.raises(handoff.HandoffBlocked, match="^HANDOFF_PERMISSIONS_INVALID$"):
+            ca._read_supervised_9444_config(config, home, repo, _OPERATOR_SID)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows directory handles")
+def test_supervised_adoption_fails_closed_when_ancestor_handle_cannot_be_pinned(monkeypatch, tmp_path):
+    from ai_commerce.remote import _private_state
+
+    env, repo, home, _, events = logon_fixture(monkeypatch, tmp_path)
+    open_handle = _private_state._windows_handle
+
+    def pin(path, flags, **kwargs):
+        if path == home / "AI-Commerce":
+            assert kwargs["directory"] and flags == 0
+            raise _private_state.PrivateStateError("PATH_UNSAFE")
+        return open_handle(path, flags, **kwargs)
+
+    monkeypatch.setattr(_private_state, "_windows_handle", pin)
+    with pytest.raises(ca._EnrollmentHold, match="^CHROME_CONFIG_ANCESTOR_PIN_UNPROVEN$"):
+        ca._read_supervised_9444_config(env.config_path, home, repo, _OPERATOR_SID)
+    assert events == []
+
+
+@pytest.mark.parametrize("fault, code", [
+    ("port", "CONFIG_UNTRUSTED"), ("schema", "CONFIG_INVALID"),
+    ("duplicate", "CONFIG_DUPLICATE_KEY"), ("oversize", "CONFIG_INVALID"),
+])
+def test_supervised_adoption_rejects_invalid_config(monkeypatch, tmp_path, fault, code):
+    env, repo, home, _, events = logon_fixture(monkeypatch, tmp_path)
+    raw = env.config_path.read_bytes()
+    if fault == "port":
+        raw = raw.replace(b":9444", b":9222")
+    elif fault == "schema":
+        raw = raw.replace(b'"version": 1', b'"version": true')
+    elif fault == "duplicate":
+        raw = b'{"version": 1, ' + raw[1:]
+    else:
+        raw += b" " * 8192
+    env.config_path.write_bytes(raw)
+    with pytest.raises((ca._EnrollmentHold, ca.AcquisitionBlocked), match=f"^{code}$"):
+        ca._read_supervised_9444_config(env.config_path, home, repo, _OPERATOR_SID)
+    assert env.config_path.read_bytes() == raw and events == []
+
+
+def test_9444_creation_still_requires_private_root(monkeypatch, tmp_path):
+    from ai_commerce.remote import local_completion_handoff as handoff
+
+    env, repo, home, _, events = enrollment_fixture(monkeypatch, tmp_path)
+
+    def identity(path):
+        if path == home / "AI-Commerce":
+            raise handoff.HandoffBlocked("HANDOFF_PERMISSIONS_INVALID")
+        return _OPERATOR_SID
 
     monkeypatch.setattr(handoff, "_private_identity", identity)
-    monkeypatch.setattr(ca, "_windows_ancestor_acl", acl)
-    with pytest.raises(handoff.HandoffBlocked, match="^HANDOFF_PERMISSIONS_INVALID$"):
-        ca._read_9444_config(env.config_path, home, repo, _OPERATOR_SID)
-    assert ca._read_9444_config(env.config_path, home, repo, _OPERATOR_SID, shared_root=True) == env
-
-
-@pytest.mark.parametrize("on_parent, mask", [
-    (False, 0x02), (False, 0x04), (False, 0x10), (False, 0x100),
-    (False, 0x40000000), (False, 0x10000000), (False, 0x00010000),
-    (False, 0x00040000), (False, 0x00080000), (False, 0x02000000), (True, 0x40),
-])
-def test_existing_9444_shared_root_rejects_possible_ancestor_mutation(monkeypatch, tmp_path, on_parent, mask):
-    env, repo, home, _, _ = logon_fixture(monkeypatch, tmp_path)
-    untrusted_path = home if on_parent else home / "AI-Commerce"
-
-    def acl(path):
-        aces = [(0, 0, 0x1F01FF, _OPERATOR_SID)]
-        if path == untrusted_path:
-            aces.append((0, 0, mask, "S-1-5-32-545"))
-        return _OPERATOR_SID, aces
-
-    monkeypatch.setattr(ca, "_windows_ancestor_acl", acl)
-    with pytest.raises(ca._EnrollmentHold, match="^CHROME_CONFIG_ANCESTOR_MUTATION_ALLOWED$"):
-        ca._read_9444_config(env.config_path, home, repo, _OPERATOR_SID, shared_root=True)
+    assert_enrollment_hold(ca.enroll_existing_9444(repo, opt_in=True), "OPERATOR_OWNERSHIP_UNPROVEN")
+    assert not env.config_path.parent.exists()
+    assert [tx.operations for tx in ca._NativeEnrollment.instances] == [["pin", "close"]]
+    assert "signature" not in events
 
 
 @pytest.mark.parametrize("gate", ["non_windows", "noninteractive_runner", "session_zero",
