@@ -122,7 +122,8 @@ def main(argv: list[str] | None = None) -> int:
                                 max_backoff_seconds=args.max_backoff_seconds,
                                 on_health=report_health,
                                 observe_only=args.observe_only,
-                                _deployment=globals().get("_PROTECTED_DEPLOYMENT"))
+                                _deployment=globals().get("_PROTECTED_DEPLOYMENT"),
+                                _startup_receipt=globals().get("_PROTECTED_STARTUP_RECEIPT"))
         if sys.stdout is not None:
             print(json.dumps(result.to_dict(), sort_keys=True))
         return 0 if result.code == "SUPERVISOR_STOPPED" else 2

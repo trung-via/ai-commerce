@@ -3789,6 +3789,33 @@ _SUPERVISOR_CHROME_HOLDS = frozenset({
     "CDP_PROTOCOL_UNAVAILABLE", "PROFILE_LOCK_HOLD", "ENROLLMENT_PROFILE_LOCK_UNPROVEN",
     "PROFILE_ALREADY_ACTIVE_NO_CDP", "WINDOWS_PROBE_INVALID",
 })
+_STARTUP_RECEIPT_SCHEMA = "WakeHubSupervisorStartupReceipt.v1"
+_STARTUP_STAGE_REASONS = {
+    "ARGV_NONCE": frozenset({"ARGV_COUNT_INVALID", "NONCE_UNSUBSTITUTED", "NONCE_FORMAT_INVALID"}),
+    "PENDING_READ": frozenset({
+        "PENDING_ABSENT", "PENDING_UNREADABLE", "PENDING_KIND_OR_SIZE_INVALID",
+        "PENDING_MALFORMED", "PENDING_NONCE_MISMATCH",
+    }),
+    "SOURCE_DIGEST": frozenset({
+        "SOURCE_READ_ERROR", "SOURCE_DIGEST_MISMATCH", "SOURCE_MODULE_PRELOADED",
+    }),
+    "CLI_ENTRY": frozenset({"IMPORT_FAILED", "CLI_EXIT_NONZERO", "CLI_EXCEPTION"}),
+    "OWNER_CONFIG": frozenset({
+        "WINDOWS_INTERACTIVE_REQUIRED", "ELEVATED_CHROME_DISALLOWED", "LOCAL_OPERATOR_ONLY",
+        "WINDOWS_OWNER_CONTEXT_UNVERIFIED", "OWNER_UNVERIFIED",
+        "LOCAL_CONFIG_CHANGED", "LOCAL_CONFIG_REQUIRED", "LOCAL_CONFIG_STALE",
+        "LOCAL_CONFIG_AMBIGUOUS", "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED", "LOCAL_CONFIG_INVALID",
+    }),
+    "FIRST_HEALTH": frozenset({
+        "SUPERVISOR_ACTIVE", "SLOT_UNAVAILABLE",
+        "WINDOWS_INTERACTIVE_REQUIRED", "CHROME_INTERACTIVE_SESSION_CONFLICT",
+        "WINDOWS_OWNER_CONTEXT_UNVERIFIED", "LOCAL_CONFIG_CHANGED", "LOCAL_CONFIG_INVALID",
+        "CHROME_OWNER_UNPROVEN", "CHROME_ENROLLMENT_DRIFT", "BROWSER_OWNERSHIP_UNPROVEN",
+        "CHROME_EXECUTABLE_UNTRUSTED", "WINDOWS_PROBE_UNAVAILABLE", "WINDOWS_PROBE_INVALID",
+        "CHROME_OBSERVATION_CHANGED", "CHROME_LAUNCH_RECONCILE_REQUIRED",
+        "HEALTH_PUBLISH_FAILED", "FIRST_HEALTH_HOLD", "HEALTH_PUBLISHED",
+    }),
+}
 
 
 def _supervisor_owner_session() -> tuple[tuple[Path, int, str], str]:
@@ -3876,7 +3903,8 @@ def _supervisor_deployment_value(name: str) -> str | None:
             value, kind = winreg.QueryValueEx(key, name)
     except FileNotFoundError:
         return None
-    _require(kind == winreg.REG_SZ and 0 < len(value) <= 2048, "SUPERVISOR_EVIDENCE_INVALID")
+    limit = 4096 if name.startswith("RetiredPending_") else 2048
+    _require(kind == winreg.REG_SZ and 0 < len(value) <= limit, "SUPERVISOR_EVIDENCE_INVALID")
     return value
 
 
@@ -3886,10 +3914,14 @@ def _store_supervisor_deployment_value(name: str, value: str | None) -> None:
     with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _SUPERVISOR_DEPLOYMENT_KEY,
                             access=winreg.KEY_SET_VALUE) as key:
         if value is None:
-            winreg.DeleteValue(key, name)
+            try:
+                winreg.DeleteValue(key, name)
+            except FileNotFoundError:
+                if name != "StartupReceipt":
+                    raise
         else:
             winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
-        if name in {"StartPending", "Run"}:
+        if name in {"StartPending", "Run", "StartupReceipt"} or name.startswith("RetiredPending_"):
             winreg.FlushKey(key)
 
 
@@ -4307,7 +4339,9 @@ def _deployment_health(deployment: dict, *, health_only: bool = False):
     def publish(code: str) -> None:
         nonlocal last_health
         pid = os.getpid()
-        owner = (Path(os.environ["LOCALAPPDATA"]), deployment["session"], deployment["sid"])
+        local_env = os.environ.get("LOCALAPPDATA")
+        local_dir = Path(local_env) if local_env else chrome_acquisition._native_local_app_data()
+        owner = (local_dir, deployment["session"], deployment["sid"])
         created = _supervisor_process(pid, Path(sys.executable), owner)
         last_health = json.dumps({
             **{key: deployment[key] for key in (
@@ -4326,14 +4360,46 @@ def _deployment_health(deployment: dict, *, health_only: bool = False):
     return publish, clear
 
 
+def _report_startup_stage(callback: Callable[[str, str], None] | None, stage: str, reason: str,
+                          *, fallback: str) -> None:
+    if callback is None:
+        return
+    allowed = _STARTUP_STAGE_REASONS.get(stage, frozenset())
+    safe_reason = reason if reason in allowed else fallback
+    with suppress(Exception):
+        callback(stage, safe_reason)
+
+
 def _observe_only_supervisor(config_path: Path | None, repository_root: Path, *,
                              stop: SupervisorStop, max_ticks: int | None, idle_seconds: int,
                              max_backoff_seconds: int, on_health: Callable[[str], None] | None,
-                             deployment: dict | None) -> Result:
+                             deployment: dict | None,
+                             startup_receipt: Callable[[str, str], None] | None = None) -> Result:
     config_pin = deployment["config_digest"] if deployment is not None else None
     desktop_pin = deployment["desktop"] if deployment is not None else None
     protected = deployment is not None
-    publish, clear_health = _deployment_health(deployment, health_only=True) if protected else (None, None)
+    raw_publish, clear_health = _deployment_health(deployment, health_only=True) if protected else (None, None)
+    first_health_published = False
+    tick_startup_reported = False
+
+    def publish(code: str) -> None:
+        nonlocal first_health_published, tick_startup_reported
+        assert raw_publish is not None
+        try:
+            raw_publish(code)
+        except Exception:
+            if not first_health_published and not tick_startup_reported:
+                tick_startup_reported = True
+                _report_startup_stage(startup_receipt, "FIRST_HEALTH", "HEALTH_PUBLISH_FAILED",
+                                      fallback="HEALTH_PUBLISH_FAILED")
+            raise
+        if not first_health_published:
+            first_health_published = True
+            tick_startup_reported = True
+            _report_startup_stage(startup_receipt, "FIRST_HEALTH", "HEALTH_PUBLISHED",
+                                  fallback="HEALTH_PUBLISHED")
+
+    publish_fn = publish if raw_publish is not None else None
 
     def observe() -> Result:
         nonlocal config_pin, desktop_pin
@@ -4359,32 +4425,51 @@ def _observe_only_supervisor(config_path: Path | None, repository_root: Path, *,
                  and _supervised_desktop(owner[1], owner[2]) == desktop and not stop.is_set(),
                  "CHROME_OBSERVATION_CHANGED")
         health = "CHROME_OWNED" if state == "OWNED" else "CHROME_ABSENT"
-        if publish is not None:
-            publish(health)
+        if publish_fn is not None:
+            publish_fn(health)
         return SupervisorTickResult("HOLD", health, "SOURCE_ONLY", False, chrome_health=health)
 
     def tick() -> Result:
+        nonlocal tick_startup_reported
+        tick_startup_reported = False
         result = _registered_result(observe)
-        if publish is not None:
+        if publish_fn is not None:
             if result.code in _SUPERVISOR_DESKTOP_HOLDS | _SUPERVISOR_CHROME_HOLDS:
                 # Replace stale positive health while waiting for a fresh observation.
-                publish(result.code)
+                publish_fn(result.code)
                 return result
             if result.code == _LAUNCH_UNKNOWN:
+                if not first_health_published and not tick_startup_reported:
+                    tick_startup_reported = True
+                    _report_startup_stage(startup_receipt, "FIRST_HEALTH", result.code,
+                                          fallback="FIRST_HEALTH_HOLD")
                 clear_health()
                 return result
-        _require(isinstance(result, SupervisorTickResult), result.code)
+        if not isinstance(result, SupervisorTickResult):
+            if not first_health_published and not tick_startup_reported:
+                tick_startup_reported = True
+                _report_startup_stage(startup_receipt, "FIRST_HEALTH", result.code,
+                                      fallback="FIRST_HEALTH_HOLD")
+            _require(False, result.code)
         return result
 
-    return supervise(tick, stop=stop, max_ticks=max_ticks, idle_seconds=idle_seconds,
-                     max_backoff_seconds=max_backoff_seconds, on_health=on_health,
-                     _wait_after_tick=lambda: idle_seconds, _on_slot_exit=clear_health)
+    outcome = supervise(tick, stop=stop, max_ticks=max_ticks, idle_seconds=idle_seconds,
+                        max_backoff_seconds=max_backoff_seconds, on_health=on_health,
+                        _wait_after_tick=lambda: idle_seconds, _on_slot_exit=clear_health)
+    if not first_health_published and outcome.code in ("SUPERVISOR_ACTIVE", "SUPERVISOR_SLOT_UNAVAILABLE"):
+        _report_startup_stage(
+            startup_receipt, "FIRST_HEALTH",
+            "SUPERVISOR_ACTIVE" if outcome.code == "SUPERVISOR_ACTIVE" else "SLOT_UNAVAILABLE",
+            fallback="SLOT_UNAVAILABLE",
+        )
+    return outcome
 
 
 def run_supervisor(config_path: Path | None, repository_root: Path, *, dry_run: bool = False,
                    max_ticks: int | None = None, idle_seconds: int = 30,
                    max_backoff_seconds: int = 300, on_health: Callable[[str], None] | None = None,
-                   observe_only: bool = False, _deployment: dict | None = None) -> Result:
+                   observe_only: bool = False, _deployment: dict | None = None,
+                   _startup_receipt: Callable[[str, str], None] | None = None) -> Result:
     """One Chrome health tick and at most one due source per iteration.
 
     max_ticks counts iterations, including health-only ticks while sources wait.
@@ -4395,6 +4480,7 @@ def run_supervisor(config_path: Path | None, repository_root: Path, *, dry_run: 
         try:
             config_path, _ = _resolve_runtime_config(repository_root, observe_only=observe_only)
         except RuntimeHold as exc:
+            _report_startup_stage(_startup_receipt, "OWNER_CONFIG", str(exc), fallback="LOCAL_CONFIG_INVALID")
             return Result("HOLD", str(exc), "SOURCE_ONLY")
     stop = StopEvent()
     if _deployment is not None:
@@ -4402,18 +4488,52 @@ def run_supervisor(config_path: Path | None, repository_root: Path, *, dry_run: 
             owner = chrome_acquisition._enrollment_operator(attended=False, protocol_only=True)
             _require((owner[1], owner[2]) == (_deployment["session"], _deployment["sid"]),
                      "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+        except (RuntimeHold, chrome_acquisition._EnrollmentHold, chrome_acquisition.AcquisitionBlocked) as exc:
+            code = _safe_code(exc, "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+            _report_startup_stage(_startup_receipt, "OWNER_CONFIG", code, fallback="OWNER_UNVERIFIED")
+            return Result("HOLD", code, "SOURCE_ONLY")
+        except (OSError, ValueError, TypeError, PrivateStateError, HandoffBlocked):
+            _report_startup_stage(_startup_receipt, "OWNER_CONFIG", "OWNER_UNVERIFIED", fallback="OWNER_UNVERIFIED")
+            return Result("HOLD", "WINDOWS_OWNER_CONTEXT_UNVERIFIED", "SOURCE_ONLY")
+        try:
             chrome, pin = _observe_only_config(config_path, repository_root, owner, stop.is_set, protected=True)
             _require(pin == _deployment["config_digest"], "LOCAL_CONFIG_CHANGED")
             observe_only = not isinstance(chrome, _SupervisorChrome)
         except RuntimeHold as exc:
-            return Result("HOLD", _safe_code(exc, "LOCAL_CONFIG_INVALID"), "SOURCE_ONLY")
+            code = _safe_code(exc, "LOCAL_CONFIG_INVALID")
+            _report_startup_stage(_startup_receipt, "OWNER_CONFIG", code, fallback="LOCAL_CONFIG_INVALID")
+            return Result("HOLD", code, "SOURCE_ONLY")
         except (OSError, ValueError, TypeError, PrivateStateError, HandoffBlocked):
+            _report_startup_stage(_startup_receipt, "OWNER_CONFIG", "LOCAL_CONFIG_INVALID",
+                                  fallback="LOCAL_CONFIG_INVALID")
             return Result("HOLD", "LOCAL_CONFIG_INVALID", "SOURCE_ONLY")
     if observe_only:
         return _observe_only_supervisor(config_path, repository_root, stop=stop, max_ticks=max_ticks,
                                         idle_seconds=idle_seconds, max_backoff_seconds=max_backoff_seconds,
-                                        on_health=on_health, deployment=_deployment)
-    publish, clear_health = _deployment_health(_deployment) if _deployment is not None else (None, None)
+                                        on_health=on_health, deployment=_deployment,
+                                        startup_receipt=_startup_receipt)
+    raw_publish, clear_health = _deployment_health(_deployment) if _deployment is not None else (None, None)
+    first_health_published = False
+    tick_startup_reported = False
+
+    def publish(code: str) -> None:
+        nonlocal first_health_published, tick_startup_reported
+        assert raw_publish is not None
+        try:
+            raw_publish(code)
+        except Exception:
+            if not first_health_published and not tick_startup_reported:
+                tick_startup_reported = True
+                _report_startup_stage(_startup_receipt, "FIRST_HEALTH", "HEALTH_PUBLISH_FAILED",
+                                      fallback="HEALTH_PUBLISH_FAILED")
+            raise
+        if not first_health_published:
+            first_health_published = True
+            tick_startup_reported = True
+            _report_startup_stage(_startup_receipt, "FIRST_HEALTH", "HEALTH_PUBLISHED",
+                                  fallback="HEALTH_PUBLISHED")
+
+    publish_fn = publish if raw_publish is not None else None
     retries: dict[tuple[str, Path | str], _Retry] = {}
     issue_cursor = {}
     chrome_retry = _Retry()
@@ -4421,7 +4541,7 @@ def run_supervisor(config_path: Path | None, repository_root: Path, *, dry_run: 
     wake_at = 0.0
 
     def registered_tick() -> Result:
-        nonlocal chrome_retry, next_source_at, wake_at
+        nonlocal chrome_retry, next_source_at, wake_at, tick_startup_reported
         chrome_context = None
         if _deployment is None:
             runtime = _read_runtime_config(config_path, repository_root)
@@ -4442,15 +4562,19 @@ def run_supervisor(config_path: Path | None, repository_root: Path, *, dry_run: 
             return chrome_context.run_once(start_after=chrome_retry.due)
 
         chrome = _registered_result(chrome_tick)
-        if publish is not None:
+        if publish_fn is not None:
             if chrome.code in _OBSERVED_CHROME_HEALTH:
-                publish(chrome.code)
+                publish_fn(chrome.code)
             elif chrome.code in ("INTERACTIVE_9444_START_GRANT_REQUIRED", "PAUSED_BY_HUMAN",
                                  "CHROME_DEMAND_START_BACKOFF"):
-                publish("CHROME_ABSENT")
+                publish_fn("CHROME_ABSENT")
             elif chrome.code in _SUPERVISOR_DESKTOP_HOLDS:
-                publish(chrome.code)
+                publish_fn(chrome.code)
             else:
+                if not first_health_published and not tick_startup_reported:
+                    tick_startup_reported = True
+                    _report_startup_stage(_startup_receipt, "FIRST_HEALTH", chrome.code,
+                                          fallback="FIRST_HEALTH_HOLD")
                 clear_health()
         if chrome.code in _CHROME_READY or chrome.code in (
                 "CHROME_ACQUISITION_NOT_READY", "PAUSED_BY_HUMAN", "INTERACTIVE_9444_START_GRANT_REQUIRED"):
@@ -4498,16 +4622,28 @@ def run_supervisor(config_path: Path | None, repository_root: Path, *, dry_run: 
                                     chrome_health=chrome.code)
 
     def tick() -> Result:
-        nonlocal wake_at
+        nonlocal wake_at, tick_startup_reported
+        tick_startup_reported = False
         wake_at = monotonic() + idle_seconds
         result = _registered_result(registered_tick)
         if clear_health is not None and not isinstance(result, SupervisorTickResult):
+            if not first_health_published and not tick_startup_reported:
+                tick_startup_reported = True
+                _report_startup_stage(_startup_receipt, "FIRST_HEALTH", result.code,
+                                      fallback="FIRST_HEALTH_HOLD")
             clear_health()
         return result
 
-    return supervise(tick, stop=stop, max_ticks=max_ticks, idle_seconds=idle_seconds,
-                     max_backoff_seconds=max_backoff_seconds, on_health=on_health,
-                     _wait_after_tick=lambda: max(0.0, wake_at - monotonic()), _on_slot_exit=clear_health)
+    outcome = supervise(tick, stop=stop, max_ticks=max_ticks, idle_seconds=idle_seconds,
+                        max_backoff_seconds=max_backoff_seconds, on_health=on_health,
+                        _wait_after_tick=lambda: max(0.0, wake_at - monotonic()), _on_slot_exit=clear_health)
+    if not first_health_published and outcome.code in ("SUPERVISOR_ACTIVE", "SUPERVISOR_SLOT_UNAVAILABLE"):
+        _report_startup_stage(
+            _startup_receipt, "FIRST_HEALTH",
+            "SUPERVISOR_ACTIVE" if outcome.code == "SUPERVISOR_ACTIVE" else "SLOT_UNAVAILABLE",
+            fallback="SLOT_UNAVAILABLE",
+        )
+    return outcome
 
 
 def diagnostic(path: Path, repository_root: Path) -> Result:

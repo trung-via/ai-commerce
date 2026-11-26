@@ -3281,9 +3281,12 @@ class PersonalCdp9444ConfigRegistryTests(unittest.TestCase):
                              ("OBSERVED", "TASK_INSTANCE_PRESENT"),
                              ("HOLD", "TASK_MISSING"),
                              ("HOLD", "TASK_DACL_REPR_MISMATCH"),
+                             ("HOLD", "TASK_PRIOR_BOOTSTRAP_READY"),
                              ("HOLD", "PENDING_INTENT_PRESENT_TASK_READY"),
                              ("HOLD", "PENDING_INTENT_PRESENT+TASK_EXITED_NO_HEALTH+TASK_READY+PEND_WITH_GUID_PRIOR_SRC+MUTEX_INACTIVE+HEALTH_ABSENT+RUN_ABSENT+HIST_EXIT_2+LOG_EXIT_2"),
                              ("HOLD", "PENDING_INTENT_PRESENT+RUNEX_RETURNED_EXIT_UNPROVEN+TASK_READY+PEND_WITH_GUID_PRIOR_SRC+MUTEX_INACTIVE+HEALTH_ABSENT+RUN_ABSENT+HIST_EXIT_2+LOG_NO_MATCH"),
+                             ("HOLD", "PENDING_INTENT_PRESENT+RUNEX_RETURNED_EXIT_UNPROVEN+TASK_PRIOR_BOOTSTRAP_READY+PEND_WITH_GUID_PRIOR_SRC+MUTEX_INACTIVE+HEALTH_ABSENT+RUN_ABSENT+HIST_EXIT_2+LOG_DISABLED+STARTUP_UNCORRELATED_ARGV_NONCE_NONCE_UNSUBSTITUTED"),
+                             ("HOLD", "PENDING_INTENT_PRESENT+RUNEX_RETURNED_EXIT_UNPROVEN+TASK_READY+PEND_WITH_GUID_SAME_SRC+MUTEX_INACTIVE+HEALTH_ABSENT+RUN_ABSENT+HIST_EXIT_2+LOG_DISABLED+STARTUP_MATCH_OWNER_CONFIG_WINDOWS_INTERACTIVE_REQUIRED"),
                              ("HOLD", "PENDING_INTENT_PRESENT+UNKNOWN_NO_GUID_WEAK_EVIDENCE+TASK_READY+PEND_NO_GUID_PRIOR_SRC+MUTEX_INACTIVE+HEALTH_ABSENT+RUN_ABSENT+HIST_NEVER_RAN+LOG_EMPTY"),
                              ("HOLD", "PENDING_INTENT_PRESENT+UNKNOWN_EVIDENCE_UNAVAILABLE+TASK_READY+PEND_WITH_GUID_PRIOR_SRC+MUTEX_INACTIVE+HEALTH_MATCH_PROCESS_UNVERIFIED+RUN_ABSENT+HIST_EXIT_2+LOG_NO_MATCH")):
             expected = {"status": status, "code": code, "operation": task_probe,
@@ -3293,6 +3296,26 @@ class PersonalCdp9444ConfigRegistryTests(unittest.TestCase):
                       "sid": "PRIVATE_SECRET", "instance_guid": "PRIVATE_SECRET", "nonce": "PRIVATE_SECRET"}
             cases.append({"name": "task_probe_" + code, "body": encode(leaked),
                           "request": task_probe_request, "expected": expected})
+        recover_op = "recover_wakehub_supervisor_health_only"
+        recover_request = encode({"schema": hostops.SCHEMA, "operation": recover_op, "parameters": {}})
+        for code, status in (
+            ("SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED", "OBSERVED"),
+            ("RECOVERY_PENDING_GUID_REQUIRED", "HOLD"),
+            ("RECOVERY_PRIOR_HEALTH_ONLY_UNPROVEN", "HOLD"),
+            ("RECOVERY_ARCHIVE_FAILED", "HOLD"),
+            ("PRIVATE_RECOVERY_DETAIL", "HOLD"),
+        ):
+            native = hostops._supervisor_receipt(code, 17, "f" * 40, operation=recover_op)
+            expected = {
+                "status": status, "code": "SUPERVISOR_RUNTIME_UNAVAILABLE" if code.startswith("PRIVATE") else code,
+                "operation": recover_op, "issue_number": 17, "source_sha": "f" * 40,
+                "approval_channel": "OWNER_GITHUB_COMMENT", "remote_shell_enabled": False,
+                "arbitrary_shell_enabled": False, "exact_chat_verified": False, "wake_sent": False,
+            }
+            self.assertEqual(native, expected)
+            leaked = {**native, "pending_raw": "PRIVATE_SECRET", "prior_nonce": "PRIVATE_SECRET"}
+            cases.append({"name": "recover_" + code, "body": encode(leaked),
+                          "request": recover_request, "expected": expected})
         harness = r"""
 const fs = require('fs'), path = require('path'), vm = require('vm');
 const cases = JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
@@ -3379,6 +3402,8 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.instance = "8c7770e8-3c62-4163-9c9f-d75621d3ca52"
         self.nonce = "e" * 32
         self.state = "MISSING"
+        self.recovery_states = None
+        self.migrate_result = "MIGRATED"
         self.probe_state = "TASK_READY"
         self.probe_pending_state = None
         self.modes = []
@@ -3448,6 +3473,15 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
             return SimpleNamespace(stdout=self.probe_state.encode("ascii"))
         self.assertTrue(argv[-1].endswith(hostops._SUPERVISOR_TASK_SCRIPT))
         self.assertIn("$task.RunEx($nonce, 12, $session, $sid)", argv[-1])
+        if mode == "inspect_recovery":
+            self.assertTrue(env.get("AI_COMMERCE_SUPERVISOR_PRIOR_ARGUMENTS", "").endswith(" $(Arg0)"))
+            out = self.recovery_states.pop(0) if isinstance(self.recovery_states, list) else self.state
+            return SimpleNamespace(stdout=out.encode("ascii"))
+        if mode == "migrate":
+            self.assertTrue(env.get("AI_COMMERCE_SUPERVISOR_PRIOR_ARGUMENTS", "").endswith(" $(Arg0)"))
+            if self.migrate_result == "MIGRATED":
+                self.state = "READY"
+            return SimpleNamespace(stdout=self.migrate_result.encode("ascii"))
         if mode == "install":
             self.assertEqual(self.state, "MISSING")
             self.state = "READY"
@@ -4684,6 +4718,673 @@ $out | ConvertTo-Json -Compress
         self.publish_health(nonce=nonce)
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_STARTED_HEALTH_OBSERVED")
         self.launch.assert_called_once()
+
+    def dispatch_recovery(self):
+        self.env["GITHUB_EVENT_NAME"] = "issue_comment"
+        self.approval = event("write", hostops._SUPERVISOR_RECOVER_HEALTH_ONLY, {})
+        return self.dispatch(mode="write")
+
+    def setup_legacy_health_only_config(self):
+        self.env.pop("AI_COMMERCE_WAKEHUB_CONFIG", None)
+        local = self.owner[0]
+        private = local / "AI-Commerce"
+        self.config = private / "D5-Isolated-9444-Trial" / "config.json"
+        profile = self.config.parent / "UserData"
+        (profile / "Default").mkdir(parents=True, exist_ok=True)
+        chrome_exe = local / "chrome.exe"
+        chrome_exe.touch()
+        value = {
+            "version": 1, "executable": str(chrome_exe), "user_data_dir": str(profile),
+            "profile_directory": "Default", "cdp_endpoint": "http://127.0.0.1:9444",
+            "allow_launch": True, "exclusive_user_data": True,
+        }
+        self.config.write_text(json.dumps(value), encoding="utf-8")
+        env = acquisition.load_environment(self.config, self.workspace, local_app_data=local)
+        self.mock(acquisition, "_supervisor_9444_config", return_value=(env, value))
+        self.mock(acquisition, "_verify_google_chrome")
+        self.config_pin = self.runtime._legacy_health_config(self.workspace, self.owner)[1]
+        legacy_sender = self.runtime.NativeChrome9444(
+            self.workspace, env, supervised=True, legacy_health_only=True,
+        )
+        self.config_read.return_value = (legacy_sender, self.config_pin)
+        return env, value
+
+    def test_task_probe_startup_receipt_correlation_and_prior_bootstrap_codes(self):
+        prior_intent = {
+            **self.intent(self.nonce), "source_sha": "1" * 40, "source_digest": "2" * 64,
+            "instance": self.instance,
+        }
+        self.values["StartPending"] = json.dumps(prior_intent)
+        self.probe_pending_state = "TASK_PRIOR_BOOTSTRAP_READY+HIST_EXIT_2+LOG_DISABLED"
+
+        # 1. Exact #1485 shape with prior bootstrap and no StartupReceipt -> 9-part code.
+        receipt = self.dispatch_task_probe()
+        self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "+".join((
+            "PENDING_INTENT_PRESENT", "RUNEX_RETURNED_EXIT_UNPROVEN", "TASK_PRIOR_BOOTSTRAP_READY",
+            "PEND_WITH_GUID_PRIOR_SRC", "MUTEX_INACTIVE", "HEALTH_ABSENT",
+            "RUN_ABSENT", "HIST_EXIT_2", "LOG_DISABLED",
+        ))))
+
+        # 2. Uncorrelated pre-nonce StartupReceipt stays UNCORRELATED (never assigned as correlated proof).
+        self.values["StartupReceipt"] = json.dumps({
+            "schema": "WakeHubSupervisorStartupReceipt.v1",
+            "stage": "ARGV_NONCE", "reason": "NONCE_UNSUBSTITUTED", "correlated": False,
+            "source_sha": None, "source_digest": None, "config_digest": None,
+            "desktop": None, "session": None, "nonce": None, "pid": 321, "observed_ns": 100,
+        })
+        receipt = self.dispatch_task_probe()
+        self.assertTrue(receipt["code"].endswith("+STARTUP_UNCORRELATED_ARGV_NONCE_NONCE_UNSUBSTITUTED"))
+        self.assertEqual(receipt["code"].split("+")[1], "RUNEX_RETURNED_EXIT_UNPROVEN")
+
+        # 3. Correlated matching StartupReceipt reports exact stage/reason without leaking pins.
+        self.values["StartupReceipt"] = json.dumps({
+            "schema": "WakeHubSupervisorStartupReceipt.v1",
+            "stage": "OWNER_CONFIG", "reason": "WINDOWS_INTERACTIVE_REQUIRED", "correlated": True,
+            "source_sha": prior_intent["source_sha"], "source_digest": prior_intent["source_digest"],
+            "config_digest": prior_intent["config_digest"], "desktop": prior_intent["desktop"],
+            "session": prior_intent["session"], "nonce": prior_intent["nonce"],
+            "pid": 321, "observed_ns": 100,
+        })
+        receipt = self.dispatch_task_probe()
+        self.assertTrue(receipt["code"].endswith("+STARTUP_MATCH_OWNER_CONFIG_WINDOWS_INTERACTIVE_REQUIRED"))
+        self.assertNotIn(self.nonce, json.dumps(receipt))
+
+        # 4. Foreign, malformed, and unreadable StartupReceipt fail closed.
+        self.values["StartupReceipt"] = json.dumps({
+            "schema": "WakeHubSupervisorStartupReceipt.v1",
+            "stage": "CLI_ENTRY", "reason": "IMPORT_FAILED", "correlated": True,
+            "source_sha": prior_intent["source_sha"], "source_digest": prior_intent["source_digest"],
+            "config_digest": prior_intent["config_digest"], "desktop": prior_intent["desktop"],
+            "session": prior_intent["session"], "nonce": "f" * 32,
+            "pid": 321, "observed_ns": 100,
+        })
+        self.assertTrue(self.dispatch_task_probe()["code"].endswith("+STARTUP_FOREIGN"))
+
+        self.values["StartupReceipt"] = "{bad-json"
+        self.assertTrue(self.dispatch_task_probe()["code"].endswith("+STARTUP_MALFORMED"))
+
+        # Uncorrelated flag with non-null pins is rejected as malformed.
+        self.values["StartupReceipt"] = json.dumps({
+            "schema": "WakeHubSupervisorStartupReceipt.v1",
+            "stage": "ARGV_NONCE", "reason": "NONCE_UNSUBSTITUTED", "correlated": False,
+            "source_sha": prior_intent["source_sha"], "source_digest": None, "config_digest": None,
+            "desktop": None, "session": None, "nonce": None, "pid": 321, "observed_ns": 100,
+        })
+        self.assertTrue(self.dispatch_task_probe()["code"].endswith("+STARTUP_MALFORMED"))
+
+        def unreadable_startup(name):
+            if name == "StartupReceipt":
+                raise OSError("PRIVATE reg failure")
+            return self.values.get(name)
+
+        with patch.object(self.runtime, "_supervisor_deployment_value", side_effect=unreadable_startup):
+            self.assertTrue(self.dispatch_task_probe()["code"].endswith("+STARTUP_UNREADABLE"))
+
+        # 5. Prior bootstrap busy task classifies as ACTIVE_UNRESOLVED.
+        self.values.pop("StartupReceipt", None)
+        self.probe_pending_state = "TASK_PRIOR_BOOTSTRAP_BUSY+HIST_RUNNING+LOG_DISABLED"
+        receipt = self.dispatch_task_probe()
+        self.assertEqual(receipt["code"].split("+")[1], "ACTIVE_UNRESOLVED")
+        self.assertEqual(receipt["code"].split("+")[2], "TASK_PRIOR_BOOTSTRAP_BUSY")
+        self.assert_task_probe_has_no_effects(pending_inspected=True)
+
+    def test_recovery_write_authorization_and_no_automatic_replay(self):
+        op = hostops._SUPERVISOR_RECOVER_HEALTH_ONLY
+        with self.assertRaisesRegex(hostops.Denied, "READ_OPERATION_DENIED"):
+            hostops.parse_event(event("read", op, {}), "read")
+        with self.assertRaisesRegex(hostops.Denied, "INVALID_PARAMETERS"):
+            hostops.parse_event(event("write", op, {"force": True}), "write")
+        with self.assertRaisesRegex(hostops.Denied, "PROTECTED_HOSTOPS_ONLY"):
+            hostops.perform(hostops.parse_event(event("write", op, {}), "write"))
+
+        self.approval = event("write", op, {})
+        self.approval["comment"]["body"] = "APPROVE WRITE #99"
+        self.assertEqual(self.dispatch()["code"], "EXACT_WRITE_APPROVAL_REQUIRED")
+
+        for key, value in (("AI_COMMERCE_GIT_GUARD_TEST", "1"), ("GITHUB_RUN_ATTEMPT", "2"),
+                           ("GITHUB_ACTOR", "other")):
+            with self.subTest(key=key), patch.dict(self.env, {key: value}):
+                receipt = self.dispatch_recovery()
+                self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "PROTECTED_HOSTOPS_ONLY"))
+        self.store.assert_not_called()
+        self.launch.assert_not_called()
+        self.assertEqual(self.modes, [])
+
+    def test_recovery_write_exact_1485_case_archives_migrates_and_starts_fresh_health_only(self):
+        self.setup_legacy_health_only_config()
+        prior_sha = "1" * 40
+        prior_digest = "2" * 64
+        prior_nonce = "e" * 32
+        prior_guid = "8c7770e8-3c62-4163-9c9f-d75621d3ca52"
+        fresh_guid = "baada257-28df-48ab-8af9-c61e1d86d41a"
+        prior_intent = {
+            **self.intent(prior_nonce), "source_sha": prior_sha, "source_digest": prior_digest,
+            "instance": prior_guid,
+        }
+        raw_prior = json.dumps(prior_intent)
+        self.values["StartPending"] = raw_prior
+        self.state = "PRIOR_READY"
+        self.mock(hostops, "_verify_prior_supervisor_source", return_value=True)
+
+        archive_key = f"RetiredPending_{prior_nonce}"
+        observed_order = []
+        orig_store = self.values.__setitem__
+
+        def tracking_store(name, value):
+            observed_order.append(("store", name))
+            if value is None:
+                self.values.pop(name, None)
+            else:
+                orig_store(name, value)
+
+        self.store.side_effect = tracking_store
+
+        def start_fresh(nonce):
+            observed_order.append(("start", nonce))
+            # Prior archive MUST already exist before RunEx and new nonce MUST be distinct.
+            self.assertIn(archive_key, self.values)
+            self.assertNotEqual(nonce, prior_nonce)
+            self.state = fresh_guid
+            self.publish_health(nonce=nonce, mode=self.runtime._CHROME_HEALTH_ONLY, health="CHROME_OWNED")
+            return fresh_guid
+
+        self.launch.side_effect = start_fresh
+        receipt = self.dispatch_recovery()
+        self.assertEqual(receipt, {
+            "status": "OBSERVED", "code": "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED",
+            "operation": hostops._SUPERVISOR_RECOVER_HEALTH_ONLY, "issue_number": 17,
+            "source_sha": self.sha, "approval_channel": "OWNER_GITHUB_COMMENT",
+            "remote_shell_enabled": False, "arbitrary_shell_enabled": False,
+            "exact_chat_verified": False, "wake_sent": False,
+        })
+        # Repeated inspect_recovery -> migrate -> start -> inspect confirmation.
+        self.assertEqual(self.modes[:4], ["inspect_recovery", "inspect_recovery", "migrate", "start"])
+        self.launch.assert_called_once()
+        # Original pending bytes and HISTORICAL_UNKNOWN classification preserved durably.
+        archive = json.loads(self.values[archive_key])
+        self.assertEqual(archive["schema"], "WakeHubSupervisorRetiredPending.v1")
+        self.assertEqual(archive["classification"], "HISTORICAL_UNKNOWN")
+        self.assertEqual(archive["pending_raw"], raw_prior)
+        self.assertEqual(archive["prior_nonce"], prior_nonce)
+        self.assertEqual(archive["prior_instance"], prior_guid)
+        self.assertEqual(archive["prior_mode"], "LEGACY_CHROME_HEALTH_ONLY")
+        # New Run has fresh identity and StartPending was promoted.
+        self.assertNotIn("StartPending", self.values)
+        run_record = json.loads(self.values["Run"])
+        self.assertNotEqual(run_record["nonce"], prior_nonce)
+        self.assertEqual(run_record["instance"], fresh_guid)
+        self.assertEqual(run_record["source_sha"], self.sha)
+        self.assertEqual(run_record["source_digest"], self.source)
+        # Archive write preceded StartPending replacement.
+        store_names = [item[1] for item in observed_order if item[0] == "store"]
+        self.assertLess(store_names.index(archive_key), store_names.index("StartPending"))
+
+    def test_recovery_write_fail_closed_matrix(self):
+        self.setup_legacy_health_only_config()
+        prior_sha, prior_digest, prior_nonce = "1" * 40, "2" * 64, "e" * 32
+        prior_guid = "8c7770e8-3c62-4163-9c9f-d75621d3ca52"
+        valid_prior = {
+            **self.intent(prior_nonce), "source_sha": prior_sha, "source_digest": prior_digest,
+            "instance": prior_guid,
+        }
+        raw_prior = json.dumps(valid_prior)
+        verify_prior = self.mock(hostops, "_verify_prior_supervisor_source", return_value=True)
+
+        def reset_clean():
+            self.values.clear()
+            self.values["StartPending"] = raw_prior
+            self.state = "READY"
+            self.recovery_states = None
+            self.migrate_result = "MIGRATED"
+            self.active.side_effect = None
+            self.active.return_value = False
+            verify_prior.return_value = True
+            self.modes.clear()
+            self.launch.reset_mock()
+            self.store.reset_mock()
+            self.store.side_effect = lambda k, v: self.values.pop(k, None) if v is None else self.values.__setitem__(k, v)
+
+        # 1. Absent, no-GUID, malformed, foreign-owner pending.
+        for label, pending_val, want in (
+            ("absent", None, "RECOVERY_PENDING_ABSENT"),
+            ("no_guid", json.dumps({k: v for k, v in valid_prior.items() if k != "instance"}), "RECOVERY_PENDING_GUID_REQUIRED"),
+            ("malformed", "{bad", "RECOVERY_PENDING_MALFORMED"),
+            ("foreign_owner", json.dumps({**valid_prior, "sid": "S-1-5-21-9-9-9-9999"}), "RECOVERY_PENDING_OWNER_MISMATCH"),
+        ):
+            with self.subTest(pending=label):
+                reset_clean()
+                if pending_val is None:
+                    self.values.pop("StartPending")
+                else:
+                    self.values["StartPending"] = pending_val
+                self.assertEqual(self.dispatch_recovery()["code"], want)
+                self.launch.assert_not_called()
+
+        # 2. Missing historical proof (source / config pin / non-health-only current config).
+        reset_clean()
+        verify_prior.return_value = False
+        self.assertEqual(self.dispatch_recovery()["code"], "RECOVERY_PRIOR_SOURCE_UNPROVEN")
+
+        reset_clean()
+        self.values["StartPending"] = json.dumps({**valid_prior, "config_digest": "9" * 64})
+        self.assertEqual(self.dispatch_recovery()["code"], "RECOVERY_PRIOR_HEALTH_ONLY_UNPROVEN")
+
+        reset_clean()
+        saved_config_rv = self.config_read.return_value
+        try:
+            self.config_read.return_value = (SimpleNamespace(legacy_health_only=False), self.config_pin)
+            self.assertEqual(self.dispatch_recovery()["code"], "RECOVERY_HEALTH_ONLY_REQUIRED")
+        finally:
+            self.config_read.return_value = saved_config_rv
+
+        # 3. Active/unknown mutex, busy/queued/conflicting/drifted task.
+        for label, setup_fn, want in (
+            ("mutex_active", lambda: setattr(self.active, "return_value", True), "SUPERVISOR_ACTIVE_UNVERIFIED"),
+            ("mutex_unknown", lambda: setattr(self.active, "side_effect", OSError("PRIVATE")), "RECOVERY_EVIDENCE_UNAVAILABLE"),
+            ("task_busy", lambda: setattr(self, "state", "BUSY"), "SUPERVISOR_ACTIVE_UNVERIFIED"),
+            ("task_conflict", lambda: setattr(self, "state", "CONFLICT"), "SUPERVISOR_TASK_CONFLICT"),
+            ("task_missing", lambda: setattr(self, "state", "MISSING"), "SUPERVISOR_TASK_CONFLICT"),
+            ("task_drifted_second_check", lambda: setattr(self, "recovery_states", ["PRIOR_READY", "BUSY"]), "SUPERVISOR_ACTIVE_UNVERIFIED"),
+            ("task_changed_second_check", lambda: setattr(self, "recovery_states", ["PRIOR_READY", "CONFLICT"]), "RECOVERY_STATE_CHANGED"),
+        ):
+            with self.subTest(quiescence=label):
+                reset_clean()
+                setup_fn()
+                self.assertEqual(self.dispatch_recovery()["code"], want)
+                self.assertEqual(self.values["StartPending"], raw_prior)
+                self.launch.assert_not_called()
+
+        # 4. Stale / foreign / contradictory Run, Health, StartupReceipt records.
+        for label, key, bad_val, want in (
+            ("run_prior", "Run", json.dumps({**self.intent("1" * 32), "instance": "baada257-28df-48ab-8af9-c61e1d86d41a"}), "RECOVERY_CONFLICTING_RUN"),
+            ("run_match", "Run", raw_prior, "RECOVERY_CONFLICTING_RUN"),
+            ("run_malformed", "Run", "{bad", "RECOVERY_CONFLICTING_RUN"),
+            ("health_foreign", "Health", json.dumps({"source_sha": self.sha, "source_digest": self.source, "config_digest": self.config_pin, "desktop": self.desktop, "nonce": "f" * 32, "session": 7, "pid": 123, "created": 456, "observed_ns": 99_000_000_000, "health": "CHROME_OWNED"}), "RECOVERY_CONFLICTING_HEALTH"),
+            ("health_malformed", "Health", "{bad", "RECOVERY_CONFLICTING_HEALTH"),
+            ("startup_published", "StartupReceipt", json.dumps({"schema": "WakeHubSupervisorStartupReceipt.v1", "stage": "FIRST_HEALTH", "reason": "HEALTH_PUBLISHED", "correlated": True, "source_sha": prior_sha, "source_digest": prior_digest, "config_digest": self.config_pin, "desktop": self.desktop, "session": 7, "nonce": prior_nonce, "pid": 123, "observed_ns": 100}), "RECOVERY_CONFLICTING_HEALTH"),
+        ):
+            with self.subTest(record=label):
+                reset_clean()
+                self.values[key] = bad_val
+                self.assertEqual(self.dispatch_recovery()["code"], want)
+                self.assertEqual(self.values["StartPending"], raw_prior)
+                self.launch.assert_not_called()
+
+        # 5. Pending changed mid-recovery -> RECOVERY_STATE_CHANGED, no mutation.
+        reset_clean()
+        reads = {"StartPending": iter([raw_prior, json.dumps({**valid_prior, "nonce": "9" * 32})])}
+        with patch.object(self.runtime, "_supervisor_deployment_value",
+                          side_effect=lambda k: next(reads[k]) if k in reads else self.values.get(k)):
+            self.assertEqual(self.dispatch_recovery()["code"], "RECOVERY_STATE_CHANGED")
+            self.launch.assert_not_called()
+
+        # 6. Archive write failure / crash / conflict leaves original StartPending untouched.
+        reset_clean()
+        self.store.side_effect = OSError("PRIVATE disk full")
+        self.assertEqual(self.dispatch_recovery()["code"], "RECOVERY_ARCHIVE_FAILED")
+        self.assertEqual(self.values["StartPending"], raw_prior)
+        self.launch.assert_not_called()
+
+        reset_clean()
+        self.values[f"RetiredPending_{prior_nonce}"] = json.dumps({"schema": "WakeHubSupervisorRetiredPending.v1", "classification": "FAILED", "pending_raw": "corrupted"})
+        self.assertEqual(self.dispatch_recovery()["code"], "RECOVERY_ARCHIVE_CONFLICT")
+        self.assertEqual(self.values["StartPending"], raw_prior)
+        self.launch.assert_not_called()
+
+        # 7. Migration conflict preserves archive AND original StartPending without calling RunEx.
+        reset_clean()
+        self.state = "PRIOR_READY"
+        self.migrate_result = "CONFLICT"
+        self.assertEqual(self.dispatch_recovery()["code"], "SUPERVISOR_TASK_CONFLICT")
+        self.assertEqual(self.values["StartPending"], raw_prior)
+        self.assertIn(f"RetiredPending_{prior_nonce}", self.values)
+        self.launch.assert_not_called()
+
+        # 8. New attempt correlated startup failure returns SUPERVISOR_START_UNKNOWN with zero replay.
+        reset_clean()
+        fresh_guid = "baada257-28df-48ab-8af9-c61e1d86d41a"
+
+        def start_and_fail(nonce):
+            self.state = "READY"
+            self.values["StartupReceipt"] = json.dumps({
+                "schema": "WakeHubSupervisorStartupReceipt.v1",
+                "stage": "OWNER_CONFIG", "reason": "WINDOWS_INTERACTIVE_REQUIRED", "correlated": True,
+                "source_sha": self.sha, "source_digest": self.source, "config_digest": self.config_pin,
+                "desktop": self.desktop, "session": 7, "nonce": nonce, "pid": 555, "observed_ns": 200,
+            })
+            return fresh_guid
+
+        self.launch.side_effect = start_and_fail
+        self.assertEqual(self.dispatch_recovery()["code"], "SUPERVISOR_START_UNKNOWN")
+        self.launch.assert_called_once()
+        self.assertIn(f"RetiredPending_{prior_nonce}", self.values)
+        new_pending = json.loads(self.values["StartPending"])
+        self.assertEqual(new_pending["instance"], fresh_guid)
+        self.assertNotEqual(new_pending["nonce"], prior_nonce)
+
+    def test_recovery_powershell_inspect_and_in_place_migrate_matrix(self):
+        """Exercise real PowerShell inspect_recovery, migrate, and probe prior-bootstrap branches offline."""
+        import os
+        import shutil
+
+        if os.name != "nt":
+            self.skipTest("Windows PowerShell required for recovery task migration matrix")
+        shell = shutil.which("pwsh") or shutil.which("pwsh.exe") or shutil.which("powershell.exe")
+        if not shell:
+            self.skipTest("PowerShell CLI unavailable")
+
+        for forbidden in ("DeleteTask", ".Stop("):
+            self.assertNotIn(forbidden, hostops._SUPERVISOR_TASK_SCRIPT)
+            self.assertNotIn(forbidden, hostops._SUPERVISOR_TASK_PROBE_SCRIPT)
+
+        self.stack.close()
+        harness = hostops._SUPERVISOR_TASK_COMPARATOR_FUNCTIONS + r"""
+$sid = 'S-1-5-21-101-202-303-1001'
+$name = 'AI-Commerce-WakeHub-Supervisor'
+$sddl = 'O:' + $sid + 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;' + $sid + ')'
+$expected = [pscustomobject]@{
+    Principal = [pscustomobject]@{ Id = 'WakeHubSupervisorOwner' }
+    Actions = [pscustomobject]@{ Context = 'WakeHubSupervisorOwner' }
+}
+$newArgs = '-I -B -S -c "import base64;exec(base64.b64decode(''TkVX''))" C:\TOOL\ai-commerce C:\venv\Lib\site-packages $(Arg0)'
+$priorArgs = '-I -B -S -c "import base64;exec(base64.b64decode(''T0xE''))" C:\TOOL\ai-commerce C:\venv\Lib\site-packages $(Arg0)'
+$unknownArgs = '-I -B -S -c "import base64;exec(base64.b64decode(''QkFE''))" C:\TOOL\ai-commerce C:\venv\Lib\site-packages $(Arg0)'
+$expectedAction = [pscustomobject]@{
+    Path = 'C:\Python311\pythonw.exe'
+    Arguments = $newArgs
+    WorkingDirectory = 'C:\TOOL\ai-commerce'
+}
+$priorAction = [pscustomobject]@{
+    Path = 'C:\Python311\pythonw.exe'
+    Arguments = $priorArgs
+    WorkingDirectory = 'C:\TOOL\ai-commerce'
+}
+
+function New-Task([string]$argsText, [int]$state, [int]$instCount) {
+    $actItem = [pscustomobject]@{ Type = 0; Path = $expectedAction.Path; Arguments = $argsText; WorkingDirectory = $expectedAction.WorkingDirectory }
+    $actions = [pscustomobject]@{ Context = 'WakeHubSupervisorOwner'; Count = 1 }
+    $actions | Add-Member -MemberType ScriptMethod -Name Item -Value { param($i) if ($i -eq 1) { return $actItem } return $null }.GetNewClosure()
+    $def = [pscustomobject]@{
+        Principal = [pscustomobject]@{ UserId = $sid; GroupId = ''; Id = 'WakeHubSupervisorOwner'; LogonType = 3; RunLevel = 0 }
+        Triggers = [pscustomobject]@{ Count = 0 }
+        Actions = $actions
+        Settings = [pscustomobject]@{
+            AllowDemandStart = $true; MultipleInstances = 2; DisallowStartIfOnBatteries = $false; StopIfGoingOnBatteries = $false;
+            ExecutionTimeLimit = 'PT0S'; AllowHardTerminate = $true; RestartCount = 0; RestartInterval = '';
+            RunOnlyIfIdle = $false; RunOnlyIfNetworkAvailable = $false; StartWhenAvailable = $false; WakeToRun = $false;
+            DeleteExpiredTaskAfter = ''; Hidden = $false; Compatibility = 2
+        }
+    }
+    $task = [pscustomobject]@{ Enabled = $true; Path = ('\' + $name); State = $state; Definition = $def }
+    $task | Add-Member -MemberType ScriptMethod -Name GetSecurityDescriptor -Value { param($i) return $sddl }.GetNewClosure()
+    $task | Add-Member -MemberType ScriptMethod -Name GetInstances -Value { param($f) return [pscustomobject]@{ Count = $instCount } }.GetNewClosure()
+    return $task
+}
+
+function Run-Migrate($task, [string]$mode) {
+    $regCalls = [System.Collections.Generic.List[int]]::new()
+    $state = [pscustomobject]@{ current = $task }
+    $status = Get-SupervisorRegistrationStatus $state.current $expected $expectedAction $name $sid
+    $isPrior = ($status -ceq 'TASK_ACTION_ARGS_MISMATCH' -and (Get-SupervisorRegistrationStatus $state.current $expected $priorAction $name $sid) -ceq 'OK')
+    if ($mode -ceq 'inspect_recovery') {
+        if ($status -cne 'OK' -and !$isPrior) { return @{ out = 'CONFLICT'; calls = @($regCalls) } }
+        $inst = $state.current.GetInstances(0)
+        if ($state.current.State -eq 3 -and $inst.Count -eq 0) {
+            return @{ out = $(if ($isPrior) { 'PRIOR_READY' } else { 'READY' }); calls = @($regCalls) }
+        }
+        return @{ out = 'BUSY'; calls = @($regCalls) }
+    }
+    if (!$isPrior) { return @{ out = 'CONFLICT'; calls = @($regCalls) } }
+    $inst = $state.current.GetInstances(0)
+    if ($state.current.State -ne 3 -or $inst.Count -ne 0) { return @{ out = 'BUSY'; calls = @($regCalls) } }
+    $regCalls.Add(52)
+    $state.current = New-Task $newArgs 3 0
+    if ((Get-SupervisorRegistrationStatus $state.current $expected $expectedAction $name $sid) -cne 'OK') {
+        return @{ out = 'CONFLICT'; calls = @($regCalls) }
+    }
+    return @{ out = 'MIGRATED'; calls = @($regCalls) }
+}
+
+$results = [ordered]@{
+    inspect_prior_ready = Run-Migrate (New-Task $priorArgs 3 0) 'inspect_recovery'
+    inspect_new_ready = Run-Migrate (New-Task $newArgs 3 0) 'inspect_recovery'
+    inspect_unknown = Run-Migrate (New-Task $unknownArgs 3 0) 'inspect_recovery'
+    inspect_busy = Run-Migrate (New-Task $priorArgs 4 1) 'inspect_recovery'
+    migrate_prior_idle = Run-Migrate (New-Task $priorArgs 3 0) 'migrate'
+    migrate_unknown_blocked = Run-Migrate (New-Task $unknownArgs 3 0) 'migrate'
+    migrate_busy_blocked = Run-Migrate (New-Task $priorArgs 4 1) 'migrate'
+}
+$results | ConvertTo-Json -Compress -Depth 4
+"""
+        completed = subprocess.run(
+            [shell, "-NoProfile", "-NonInteractive", "-Command", harness],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr[-3000:])
+        data = json.loads(completed.stdout)
+        self.assertEqual(data["inspect_prior_ready"], {"out": "PRIOR_READY", "calls": []})
+        self.assertEqual(data["inspect_new_ready"], {"out": "READY", "calls": []})
+        self.assertEqual(data["inspect_unknown"], {"out": "CONFLICT", "calls": []})
+        self.assertEqual(data["inspect_busy"], {"out": "BUSY", "calls": []})
+        self.assertEqual(data["migrate_prior_idle"], {"out": "MIGRATED", "calls": [52]})
+        self.assertEqual(data["migrate_unknown_blocked"], {"out": "CONFLICT", "calls": []})
+        self.assertEqual(data["migrate_busy_blocked"], {"out": "BUSY", "calls": []})
+
+    def test_verify_prior_supervisor_source_against_real_git_checkout(self):
+        self.stack.close()
+        repo = Path(__file__).resolve().parents[1]
+        head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+        src_root = repo / "src"
+        manifest = sorted(
+            [p.relative_to(src_root).as_posix(), hashlib.sha256(p.read_bytes()).hexdigest()]
+            for p in (src_root / "ai_commerce").rglob("*.py")
+        )
+        head_digest = hashlib.sha256(json.dumps(manifest, separators=(",", ":")).encode("ascii")).hexdigest()
+        with patch.object(hostops, "ROOTS", {"workspace": repo}):
+            self.assertTrue(hostops._verify_prior_supervisor_source(repo, head, head_digest, head, head_digest))
+            self.assertFalse(hostops._verify_prior_supervisor_source(repo, head, "0" * 64, head, head_digest))
+            self.assertFalse(hostops._verify_prior_supervisor_source(repo, "0" * 40, head_digest, head, head_digest))
+
+    def test_real_bootstrap_controlled_offline_windows_fixture_boundaries(self):
+        """Exercise real _SUPERVISOR_BOOTSTRAP + canonical CLI with fake winreg and isolated legacy 9444 data."""
+        import os
+        import sys
+        from ai_commerce.production_orchestration.contracts import digest
+
+        if os.name != "nt":
+            self.skipTest("Windows python/pythonw bootstrap fixture requires Windows")
+        self.stack.close()
+        root = Path(__file__).resolve().parents[1]
+        src_root = root / "src"
+        files = {
+            path.relative_to(src_root).as_posix(): path.read_bytes()
+            for path in (src_root / "ai_commerce").rglob("*.py")
+        }
+        manifest = [[name, hashlib.sha256(raw).hexdigest()] for name, raw in sorted(files.items())]
+        src_digest = hashlib.sha256(json.dumps(manifest, separators=(",", ":")).encode("ascii")).hexdigest()
+        deps = Path(sys.prefix) / "Lib" / "site-packages"
+        python_exe = Path(sys._base_executable).with_name("python.exe")
+        pythonw_exe = Path(sys._base_executable).with_name("pythonw.exe")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            local = tmp_path / "LocalAppData"
+            cfg_dir = local / "AI-Commerce" / "D5-Isolated-9444-Trial"
+            profile = cfg_dir / "UserData"
+            (profile / "Default").mkdir(parents=True)
+            chrome_exe = tmp_path / "chrome.exe"
+            chrome_exe.write_bytes(b"MZ")
+            cfg = cfg_dir / "config.json"
+            cfg_data = {
+                "version": 1, "executable": str(chrome_exe), "user_data_dir": str(profile),
+                "profile_directory": "Default", "cdp_endpoint": "http://127.0.0.1:9444",
+                "allow_launch": True, "exclusive_user_data": True,
+            }
+            cfg.write_text(json.dumps(cfg_data), encoding="utf-8")
+            cfg_pin = digest([str(cfg), cfg_data, False])
+            sid = "S-1-5-21-101-202-303-1001"
+            nonce = "a" * 32
+            desktop = "d" * 64
+            base_intent = {
+                "source_sha": "1" * 40, "source_digest": src_digest, "config_digest": cfg_pin,
+                "desktop": desktop, "session": 7, "sid": sid, "config": str(cfg), "nonce": nonce,
+            }
+
+            def run_fixture(
+                *,
+                exe=python_exe,
+                argv_tail=None,
+                pending_raw=None,
+                pending_kind=1,
+                pending_absent=False,
+                omit_localappdata=False,
+                cli_fault=None,
+            ):
+                out_file = tmp_path / f"store_{os.urandom(4).hex()}.json"
+                initial_store = {} if pending_absent else {
+                    "StartPending": json.dumps(base_intent) if pending_raw is None else pending_raw,
+                }
+                prelude = f"""
+import contextlib, json, os, sys, types
+from pathlib import Path
+STORE = {initial_store!r}
+KINDS = {{'StartPending': {pending_kind!r}}}
+OUT = {str(out_file)!r}
+fake_winreg = types.ModuleType('winreg')
+fake_winreg.HKEY_CURRENT_USER = 1
+fake_winreg.REG_SZ = 1
+fake_winreg.REG_EXPAND_SZ = 2
+fake_winreg.KEY_SET_VALUE = 2
+fake_winreg.KEY_QUERY_VALUE = 1
+class FakeKey:
+    def __enter__(self): return self
+    def __exit__(self, *a): pass
+fake_winreg.OpenKey = lambda *a, **k: FakeKey()
+fake_winreg.CreateKeyEx = lambda *a, **k: FakeKey()
+def qv(k, n):
+    if n not in STORE or STORE[n] is None:
+        raise FileNotFoundError(n)
+    return (STORE[n], KINDS.get(n, 1))
+def sv(k, n, r, kind, val):
+    STORE[n] = val
+    KINDS[n] = kind
+    Path(OUT).write_text(json.dumps(STORE), encoding='utf-8')
+def dv(k, n):
+    STORE.pop(n, None)
+    Path(OUT).write_text(json.dumps(STORE), encoding='utf-8')
+fake_winreg.QueryValueEx = qv
+fake_winreg.SetValueEx = sv
+fake_winreg.DeleteValue = dv
+fake_winreg.FlushKey = lambda k: None
+sys.modules['winreg'] = fake_winreg
+if {omit_localappdata!r}:
+    os.environ.pop('LOCALAPPDATA', None)
+else:
+    os.environ['LOCALAPPDATA'] = {str(local)!r}
+for k in list(os.environ):
+    if k in ('CI', 'GITHUB_ACTIONS', 'GITHUB_RUN_ID', 'GITHUB_EVENT_PATH', 'TF_BUILD', 'BUILD_BUILDID') or k.startswith('AI_COMMERCE_GIT_GUARD_'):
+        os.environ.pop(k, None)
+"""
+                hook = f"""
+orig_run_module = runpy.run_module
+def wrapped_run_module(mod_name, **kw):
+    fault = {cli_fault!r}
+    if fault == 'import_error':
+        raise ImportError('synthetic missing module')
+    if fault == 'cli_exit_2':
+        raise SystemExit(2)
+    import ai_commerce.remote.chrome_acquisition as acq
+    import ai_commerce.remote.local_completion_handoff as handoff
+    import ai_commerce.wakehub_runtime.runner as runner
+    local_p = Path({str(local)!r})
+    owner = (local_p, 7, {sid!r})
+    acq._native_local_app_data = lambda: local_p
+    if fault == 'owner_interactive':
+        acq._enrollment_operator = lambda **k: (_ for _ in ()).throw(acq._EnrollmentHold('WINDOWS_INTERACTIVE_REQUIRED'))
+    else:
+        acq._enrollment_operator = lambda **k: owner
+    if fault == 'chrome_sig':
+        acq._verify_google_chrome = lambda env: (_ for _ in ()).throw(acq.AcquisitionBlocked('CHROME_EXECUTABLE_UNTRUSTED'))
+    else:
+        acq._verify_google_chrome = lambda env: None
+    acq._query_windows = lambda port: {{'listeners': [], 'processes': []}}
+    acq._clean_launch_pending = lambda: False
+    handoff._private_identity = lambda path: {sid!r}
+    runner._private_identity = lambda path: {sid!r}
+    runner._supervised_desktop = lambda s, sid_: {desktop!r}
+    runner._supervisor_process = lambda pid, exe, own: 123456
+    if fault == 'slot_active':
+        def busy(name='x'):
+            raise runner.RuntimeHold('SUPERVISOR_ACTIVE')
+        runner._supervisor_slot = busy
+    else:
+        runner._supervisor_slot = lambda name='x': contextlib.nullcontext()
+    orig_rs = runner.run_supervisor
+    runner.run_supervisor = lambda *a, **k: orig_rs(*a, **{{**k, 'max_ticks': 1}})
+    return orig_run_module(mod_name, **kw)
+runpy.run_module = wrapped_run_module
+"""
+                bootstrap_code = hostops._SUPERVISOR_BOOTSTRAP.replace(
+                    "try:\n    runpy.run_module(", hook + "\ntry:\n    runpy.run_module(",
+                )
+                args = [str(exe), "-I", "-B", "-S", "-c", prelude + bootstrap_code] + (
+                    [str(root), str(deps), nonce] if argv_tail is None else argv_tail
+                )
+                completed = subprocess.run(args, capture_output=True, text=True, timeout=20, check=False)
+                store = json.loads(out_file.read_text(encoding="utf-8")) if out_file.exists() else {}
+                receipt = json.loads(store["StartupReceipt"]) if "StartupReceipt" in store else None
+                return completed.returncode, receipt, store
+
+            # 1. Pre-nonce / argv / pending-read failures MUST stay uncorrelated with null pins.
+            uncorrelated_cases = [
+                ("argv_short", dict(argv_tail=[str(root), str(deps)]), "ARGV_NONCE", "ARGV_COUNT_INVALID"),
+                ("nonce_unsubstituted", dict(argv_tail=[str(root), str(deps), "$(Arg0)"]), "ARGV_NONCE", "NONCE_UNSUBSTITUTED"),
+                ("nonce_bad_format", dict(argv_tail=[str(root), str(deps), "not-hex"]), "ARGV_NONCE", "NONCE_FORMAT_INVALID"),
+                ("pending_absent", dict(pending_absent=True), "PENDING_READ", "PENDING_ABSENT"),
+                ("pending_wrong_kind", dict(pending_kind=2), "PENDING_READ", "PENDING_KIND_OR_SIZE_INVALID"),
+                ("pending_malformed", dict(pending_raw="{bad"), "PENDING_READ", "PENDING_MALFORMED"),
+                ("pending_nonce_mismatch", dict(pending_raw=json.dumps({**base_intent, "nonce": "f" * 32})),
+                 "PENDING_READ", "PENDING_NONCE_MISMATCH"),
+            ]
+            for label, kwargs, want_stage, want_reason in uncorrelated_cases:
+                with self.subTest(uncorrelated=label):
+                    rc, rec, _ = run_fixture(**kwargs)
+                    self.assertEqual(rc, 2, label)
+                    self.assertIsNotNone(rec, label)
+                    self.assertEqual(rec["schema"], "WakeHubSupervisorStartupReceipt.v1", label)
+                    self.assertEqual((rec["stage"], rec["reason"], rec["correlated"]), (want_stage, want_reason, False), label)
+                    self.assertTrue(all(rec[k] is None for k in ("nonce", "source_sha", "source_digest", "config_digest", "desktop", "session")), label)
+                    self.assertNotIn(str(cfg), json.dumps(rec), label)
+                    self.assertNotIn("$(Arg0)", json.dumps(rec), label)
+
+            # 2. Post-nonce failures MUST carry correlated=True and exact verified pins.
+            correlated_cases = [
+                ("source_digest_mismatch", dict(pending_raw=json.dumps({**base_intent, "source_digest": "0" * 64})),
+                 "SOURCE_DIGEST", "SOURCE_DIGEST_MISMATCH"),
+                ("import_failed", dict(cli_fault="import_error"), "CLI_ENTRY", "IMPORT_FAILED"),
+                ("cli_exit_nonzero", dict(cli_fault="cli_exit_2"), "CLI_ENTRY", "CLI_EXIT_NONZERO"),
+                ("owner_interactive", dict(cli_fault="owner_interactive"), "OWNER_CONFIG", "WINDOWS_INTERACTIVE_REQUIRED"),
+                ("config_changed", dict(pending_raw=json.dumps({**base_intent, "config_digest": "9" * 64})),
+                 "OWNER_CONFIG", "LOCAL_CONFIG_CHANGED"),
+                ("slot_active", dict(cli_fault="slot_active"), "FIRST_HEALTH", "SUPERVISOR_ACTIVE"),
+                ("chrome_sig", dict(cli_fault="chrome_sig"), "FIRST_HEALTH", "CHROME_EXECUTABLE_UNTRUSTED"),
+            ]
+            for label, kwargs, want_stage, want_reason in correlated_cases:
+                with self.subTest(correlated=label):
+                    rc, rec, _ = run_fixture(**kwargs)
+                    self.assertEqual(rc, 2, label)
+                    self.assertIsNotNone(rec, label)
+                    self.assertEqual((rec["stage"], rec["reason"], rec["correlated"]), (want_stage, want_reason, True), label)
+                    self.assertEqual(rec["nonce"], nonce, label)
+                    self.assertEqual(rec["source_sha"], base_intent["source_sha"], label)
+                    self.assertNotIn(str(cfg), json.dumps(rec), label)
+
+            # 3. Healthy legacy health-only path under real pythonw.exe -I -B -S (even without LOCALAPPDATA env).
+            rc, rec, store = run_fixture(exe=pythonw_exe, omit_localappdata=True)
+            self.assertEqual(rc, 2)  # max_ticks=1 HOLD CHROME_ABSENT returns 2
+            self.assertIsNotNone(rec)
+            self.assertEqual((rec["stage"], rec["reason"], rec["correlated"]), ("FIRST_HEALTH", "HEALTH_PUBLISHED", True))
+            self.assertNotIn("Health", store)  # cleared cleanly on slot exit after publishing health
 
 
 class PersonalClean9444AutostartTests(unittest.TestCase):

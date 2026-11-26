@@ -55,6 +55,7 @@ _CLEAN_DEMAND_MIGRATION = "migrate_clean_9444_demand_task"
 _CLEAN_TASK_RESET = "reset_clean_9444_tasks"
 _CLEAN_TASK_WRITES = (_CLEAN_AUTOSTART, _CLEAN_DEMAND_MIGRATION, _CLEAN_TASK_RESET)
 _SUPERVISOR_DEPLOY = "deploy_wakehub_supervisor"
+_SUPERVISOR_RECOVER_HEALTH_ONLY = "recover_wakehub_supervisor_health_only"
 _SUPERVISOR_CONFIG_PROBE = "wakehub_supervisor_config_probe"
 _SUPERVISOR_TASK_PROBE = "wakehub_supervisor_task_probe"
 _CLEAN_RUNTIME_PROBE = "clean_9444_runtime_probe"
@@ -231,10 +232,10 @@ def parse_event(event, mode):
         else:
             deny("READ_OPERATION_DENIED")
     else:
-        if operation in (*_CLEAN_TASK_WRITES, _SUPERVISOR_DEPLOY):
+        if operation in (*_CLEAN_TASK_WRITES, _SUPERVISOR_DEPLOY, _SUPERVISOR_RECOVER_HEALTH_ONLY):
             if params:
                 deny("INVALID_PARAMETERS")
-            if operation == _SUPERVISOR_DEPLOY and number > 2**53 - 1:
+            if operation in (_SUPERVISOR_DEPLOY, _SUPERVISOR_RECOVER_HEALTH_ONLY) and number > 2**53 - 1:
                 deny("ISSUE_OWNER_OR_STATE_DENIED")
         elif operation == "git_sync_main":
             if set(params) != {"expected_local_sha", "target_sha"} or any(
@@ -965,6 +966,16 @@ _SUPERVISOR_HOLDS = frozenset({
     "LOCAL_CONFIG_CHANGED", "SUPERVISOR_RUNTIME_UNAVAILABLE", "SUPERVISOR_ACTIVE_UNVERIFIED",
     "SUPERVISOR_START_UNKNOWN", "SUPERVISOR_TASK_CONFLICT", "SUPERVISOR_START_NOT_ATTEMPTED",
 }) | _SUPERVISOR_DESKTOP_HOLDS | _SUPERVISOR_CHROME_HOLDS
+_SUPERVISOR_RECOVERY_OBSERVED = frozenset({"SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED"})
+_SUPERVISOR_RECOVERY_HOLDS = _SUPERVISOR_HOLDS | frozenset({
+    "RECOVERY_PENDING_ABSENT", "RECOVERY_PENDING_GUID_REQUIRED", "RECOVERY_PENDING_MALFORMED",
+    "RECOVERY_PENDING_OWNER_MISMATCH", "RECOVERY_PRIOR_SOURCE_UNPROVEN",
+    "RECOVERY_HEALTH_ONLY_REQUIRED", "RECOVERY_PRIOR_HEALTH_ONLY_UNPROVEN",
+    "RECOVERY_CONFLICTING_RUN", "RECOVERY_CONFLICTING_HEALTH",
+    "RECOVERY_EVIDENCE_UNAVAILABLE", "RECOVERY_STATE_CHANGED",
+    "RECOVERY_ARCHIVE_CONFLICT", "RECOVERY_ARCHIVE_FAILED",
+    "RECOVERY_TASK_MIGRATION_FAILED",
+})
 
 _SUPERVISOR_TASK_MISMATCH_CODES = frozenset({
     "TASK_MISSING", "TASK_DISABLED", "TASK_PATH_MISMATCH",
@@ -986,7 +997,9 @@ _SUPERVISOR_TASK_MISMATCH_CODES = frozenset({
     "TASK_SETTING_DELETE_EXPIRED", "TASK_SETTING_HIDDEN", "TASK_SETTING_COMPATIBILITY",
 })
 _SUPERVISOR_TASK_PROBE_OBSERVED = frozenset({"TASK_READY", "TASK_INSTANCE_PRESENT"})
-_SUPERVISOR_TASK_BASE_CODES = _SUPERVISOR_TASK_MISMATCH_CODES | _SUPERVISOR_TASK_PROBE_OBSERVED | {"TASK_BUSY"}
+_SUPERVISOR_TASK_BASE_CODES = _SUPERVISOR_TASK_MISMATCH_CODES | _SUPERVISOR_TASK_PROBE_OBSERVED | {
+    "TASK_BUSY", "TASK_PRIOR_BOOTSTRAP_READY", "TASK_PRIOR_BOOTSTRAP_BUSY",
+}
 _SUPERVISOR_TASK_PROBE_CODES = _SUPERVISOR_TASK_BASE_CODES | {
     "PENDING_INTENT_CHANGED",
     *(f"PENDING_INTENT_PRESENT_{code}" for code in _SUPERVISOR_TASK_BASE_CODES),
@@ -1034,6 +1047,46 @@ _SUPERVISOR_PENDING_LOG_CODES = frozenset({
     "LOG_DENIED", "LOG_DISABLED", "LOG_UNAVAILABLE",
     "LOG_EXIT_0", "LOG_EXIT_1", "LOG_EXIT_2", "LOG_EXIT_OTHER", "LOG_ERR_SYSTEM",
     "LOG_ACTION_START_FAILED", "LOG_TERMINATED", "LOG_COMPLETED", "LOG_STARTED_NO_EXIT",
+})
+_SUPERVISOR_STARTUP_RECEIPT_SCHEMA = "WakeHubSupervisorStartupReceipt.v1"
+_SUPERVISOR_STARTUP_STAGE_REASONS = {
+    "ARGV_NONCE": frozenset({"ARGV_COUNT_INVALID", "NONCE_UNSUBSTITUTED", "NONCE_FORMAT_INVALID"}),
+    "PENDING_READ": frozenset({
+        "PENDING_ABSENT", "PENDING_UNREADABLE", "PENDING_KIND_OR_SIZE_INVALID",
+        "PENDING_MALFORMED", "PENDING_NONCE_MISMATCH",
+    }),
+    "SOURCE_DIGEST": frozenset({
+        "SOURCE_READ_ERROR", "SOURCE_DIGEST_MISMATCH", "SOURCE_MODULE_PRELOADED",
+    }),
+    "CLI_ENTRY": frozenset({"IMPORT_FAILED", "CLI_EXIT_NONZERO", "CLI_EXCEPTION"}),
+    "OWNER_CONFIG": frozenset({
+        "WINDOWS_INTERACTIVE_REQUIRED", "ELEVATED_CHROME_DISALLOWED", "LOCAL_OPERATOR_ONLY",
+        "WINDOWS_OWNER_CONTEXT_UNVERIFIED", "OWNER_UNVERIFIED",
+        "LOCAL_CONFIG_CHANGED", "LOCAL_CONFIG_REQUIRED", "LOCAL_CONFIG_STALE",
+        "LOCAL_CONFIG_AMBIGUOUS", "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED", "LOCAL_CONFIG_INVALID",
+    }),
+    "FIRST_HEALTH": frozenset({
+        "SUPERVISOR_ACTIVE", "SLOT_UNAVAILABLE",
+        "WINDOWS_INTERACTIVE_REQUIRED", "CHROME_INTERACTIVE_SESSION_CONFLICT",
+        "WINDOWS_OWNER_CONTEXT_UNVERIFIED", "LOCAL_CONFIG_CHANGED", "LOCAL_CONFIG_INVALID",
+        "CHROME_OWNER_UNPROVEN", "CHROME_ENROLLMENT_DRIFT", "BROWSER_OWNERSHIP_UNPROVEN",
+        "CHROME_EXECUTABLE_UNTRUSTED", "WINDOWS_PROBE_UNAVAILABLE", "WINDOWS_PROBE_INVALID",
+        "CHROME_OBSERVATION_CHANGED", "CHROME_LAUNCH_RECONCILE_REQUIRED",
+        "HEALTH_PUBLISH_FAILED", "FIRST_HEALTH_HOLD", "HEALTH_PUBLISHED",
+    }),
+}
+_SUPERVISOR_STARTUP_RECEIPT_CODES = frozenset({
+    "STARTUP_ABSENT", "STARTUP_UNREADABLE", "STARTUP_MALFORMED", "STARTUP_UNCORRELATED", "STARTUP_FOREIGN",
+    *(
+        f"STARTUP_MATCH_{stage}_{reason}"
+        for stage, reasons in _SUPERVISOR_STARTUP_STAGE_REASONS.items()
+        for reason in reasons
+    ),
+    *(
+        f"STARTUP_UNCORRELATED_{stage}_{reason}"
+        for stage, reasons in _SUPERVISOR_STARTUP_STAGE_REASONS.items()
+        for reason in reasons
+    ),
 })
 
 # Pure comparator functions shared verbatim by protected task probe and deploy.
@@ -1459,6 +1512,18 @@ if (!$task) {
     exit
 }
 $status = Get-SupervisorRegistrationStatus $task $expected $action $name $sid
+$priorMatch = $false
+if ($status -ceq 'TASK_ACTION_ARGS_MISMATCH' -and ![string]::IsNullOrEmpty($env:AI_COMMERCE_SUPERVISOR_PRIOR_ARGUMENTS)) {
+    $priorAction = [pscustomobject]@{
+        Path = $action.Path
+        Arguments = $env:AI_COMMERCE_SUPERVISOR_PRIOR_ARGUMENTS
+        WorkingDirectory = $action.WorkingDirectory
+    }
+    if ((Get-SupervisorRegistrationStatus $task $expected $priorAction $name $sid) -ceq 'OK') {
+        $priorMatch = $true
+        $status = 'OK'
+    }
+}
 if ($status -cne 'OK') {
     if ($mode -ceq 'probe_pending') { $status + '+HIST_NA+LOG_NA' } else { $status }
     exit
@@ -1467,7 +1532,13 @@ $instances = $task.GetInstances(0)
 if ($null -eq $instances) { throw 'Instances unavailable' }
 $pendingGuid = if ($mode -ceq 'probe_pending') { [string]$env:AI_COMMERCE_SUPERVISOR_PENDING_GUID } else { '' }
 $hasPendingGuid = ($pendingGuid -cmatch '^[a-f0-9]{8}-([a-f0-9]{4}-){3}[a-f0-9]{12}$')
-if ($task.State -eq 3 -and $instances.Count -eq 0) {
+if ($priorMatch) {
+    if ($task.State -eq 3 -and $instances.Count -eq 0) {
+        $taskCode = 'TASK_PRIOR_BOOTSTRAP_READY'
+    } else {
+        $taskCode = 'TASK_PRIOR_BOOTSTRAP_BUSY'
+    }
+} elseif ($task.State -eq 3 -and $instances.Count -eq 0) {
     $taskCode = 'TASK_READY'
 } elseif ($instances.Count -eq 1 -and $instances.Item(1).State -eq 4) {
     $instance = $instances.Item(1)
@@ -1504,6 +1575,47 @@ $logCode = Read-SupervisorOperationalLog ('\' + $name) $pendingGuid
 _SUPERVISOR_TASK_SCRIPT = _SUPERVISOR_TASK_COMPARATOR_FUNCTIONS + _SUPERVISOR_TASK_SETUP_SCRIPT + r"""
 $task = Read-Registration
 $mode = $env:AI_COMMERCE_SUPERVISOR_MODE
+if ($mode -ceq 'inspect_recovery' -or $mode -ceq 'migrate') {
+    if (!$task) { 'MISSING'; exit }
+    $priorArgs = $env:AI_COMMERCE_SUPERVISOR_PRIOR_ARGUMENTS
+    $priorAction = if (![string]::IsNullOrEmpty($priorArgs)) {
+        [pscustomobject]@{
+            Path = $action.Path
+            Arguments = $priorArgs
+            WorkingDirectory = $action.WorkingDirectory
+        }
+    } else { $null }
+    $status = Get-SupervisorRegistrationStatus $task $expected $action $name $sid
+    $isPrior = $false
+    if ($status -ceq 'TASK_ACTION_ARGS_MISMATCH' -and $null -ne $priorAction) {
+        if ((Get-SupervisorRegistrationStatus $task $expected $priorAction $name $sid) -ceq 'OK') {
+            $isPrior = $true
+        }
+    }
+    if ($mode -ceq 'inspect_recovery') {
+        if ($status -cne 'OK' -and !$isPrior) { 'CONFLICT'; exit }
+        $instances = $task.GetInstances(0)
+        if ($null -eq $instances) { throw 'Instances unavailable' }
+        if ($task.State -eq 3 -and $instances.Count -eq 0) {
+            if ($isPrior) { 'PRIOR_READY' } else { 'READY' }
+            exit
+        }
+        'BUSY'; exit
+    }
+    # Explicit in-place migration ONLY from exact known prior registered definition while idle.
+    if (!$isPrior) { 'CONFLICT'; exit }
+    $instances = $task.GetInstances(0)
+    if ($null -eq $instances) { throw 'Instances unavailable' }
+    if ($task.State -ne 3 -or $instances.Count -ne 0) { 'BUSY'; exit }
+    # TASK_UPDATE (4) | TASK_DONT_ADD_PRINCIPAL_ACE (16) | TASK_IGNORE_REGISTRATION_TRIGGERS (32) = 52.
+    $null = $folder.RegisterTaskDefinition($name, $expected, 52, $sid, $null, 3, $sddl)
+    $updated = Read-Registration
+    if (!$updated) { 'CONFLICT'; exit }
+    if ((Get-SupervisorRegistrationStatus $updated $expected $action $name $sid) -cne 'OK') { 'CONFLICT'; exit }
+    $postInstances = $updated.GetInstances(0)
+    if ($null -eq $postInstances -or $updated.State -ne 3 -or $postInstances.Count -ne 0) { 'BUSY'; exit }
+    'MIGRATED'; exit
+}
 if (!$task -and $mode -ceq 'install') {
     # TASK_CREATE | TASK_DONT_ADD_PRINCIPAL_ACE | TASK_IGNORE_REGISTRATION_TRIGGERS.
     try { $null = $folder.RegisterTaskDefinition($name, $expected, 50, $sid, $null, 3, $sddl) }
@@ -1536,9 +1648,8 @@ if (!$instance -or $instance.Path -cne ('\' + $name) -or !$instance.InstanceGuid
 [Guid]::Parse($instance.InstanceGuid).ToString('D')
 """
 
-# Launch the canonical CLI using the exact source bytes read and hashed here.
-# The parent independently compares this hash with its protected checkout.
-_SUPERVISOR_BOOTSTRAP = """\
+# Exact known prior registered bootstrap definition (for verified in-place migration only).
+_SUPERVISOR_BOOTSTRAP_PRIOR = """\
 import hashlib, importlib.machinery, json, re, runpy, sys, winreg
 from pathlib import Path
 
@@ -1574,11 +1685,108 @@ runpy.run_module('ai_commerce.wakehub_runtime', run_name='__main__', alter_sys=T
                  init_globals={'_PROTECTED_DEPLOYMENT': intent})
 """
 
+# Launch the canonical CLI using the exact source bytes read and hashed here.
+# Records one bounded private StartupReceipt across startup boundaries without
+# leaking raw paths/args/secrets and correlates only after nonce/pin verification.
+_SUPERVISOR_BOOTSTRAP = """\
+import hashlib, importlib.machinery, json, os, re, runpy, sys, time, winreg
+from pathlib import Path
+
+_KEY = r'Software\\AI-Commerce\\WakeHubSupervisor'
+_PINS = ('source_sha', 'source_digest', 'config_digest', 'desktop', 'session', 'nonce')
+def _rec(stage, reason, pins=None):
+    row = {'schema': 'WakeHubSupervisorStartupReceipt.v1', 'stage': stage, 'reason': reason,
+           'correlated': pins is not None, 'pid': os.getpid(), 'observed_ns': time.monotonic_ns()}
+    for k in _PINS:
+        row[k] = pins[k] if pins is not None else None
+    try:
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, _KEY, access=winreg.KEY_SET_VALUE) as key:
+            winreg.SetValueEx(key, 'StartupReceipt', 0, winreg.REG_SZ, json.dumps(row, separators=(',', ':')))
+            winreg.FlushKey(key)
+    except Exception:
+        pass
+def _fail(stage, reason, pins=None):
+    _rec(stage, reason, pins)
+    raise SystemExit(2)
+
+if len(sys.argv) != 4:
+    _fail('ARGV_NONCE', 'ARGV_COUNT_INVALID')
+root, dependencies, nonce = sys.argv[1:]
+if nonce == '$(Arg0)':
+    _fail('ARGV_NONCE', 'NONCE_UNSUBSTITUTED')
+if not re.fullmatch(r'[a-f0-9]{32}', nonce):
+    _fail('ARGV_NONCE', 'NONCE_FORMAT_INVALID')
+try:
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _KEY) as key:
+        raw, kind = winreg.QueryValueEx(key, 'StartPending')
+except FileNotFoundError:
+    _fail('PENDING_READ', 'PENDING_ABSENT')
+except OSError:
+    _fail('PENDING_READ', 'PENDING_UNREADABLE')
+if kind != winreg.REG_SZ or type(raw) is not str or not 0 < len(raw) <= 2048:
+    _fail('PENDING_READ', 'PENDING_KIND_OR_SIZE_INVALID')
+try:
+    intent = json.loads(raw)
+except Exception:
+    _fail('PENDING_READ', 'PENDING_MALFORMED')
+if (type(intent) is not dict
+        or not {'source_sha', 'source_digest', 'config_digest', 'desktop', 'session', 'sid', 'config', 'nonce'} <= intent.keys()
+        or type(intent['source_sha']) is not str or not re.fullmatch(r'[a-f0-9]{40}', intent['source_sha'])
+        or any(type(intent[k]) is not str or not re.fullmatch(r'[a-f0-9]{64}', intent[k]) for k in ('source_digest', 'config_digest', 'desktop'))
+        or type(intent['session']) is not int or intent['session'] <= 0
+        or type(intent['sid']) is not str or type(intent['config']) is not str
+        or type(intent['nonce']) is not str or not re.fullmatch(r'[a-f0-9]{32}', intent['nonce'])):
+    _fail('PENDING_READ', 'PENDING_MALFORMED')
+if intent['nonce'] != nonce:
+    _fail('PENDING_READ', 'PENDING_NONCE_MISMATCH')
+pins = {k: intent[k] for k in _PINS}
+source = Path(root) / 'src'
+try:
+    files = {path.relative_to(source).as_posix(): path.read_bytes()
+             for path in (source / 'ai_commerce').rglob('*.py')}
+except OSError:
+    _fail('SOURCE_DIGEST', 'SOURCE_READ_ERROR', pins)
+manifest = [[name, hashlib.sha256(raw).hexdigest()] for name, raw in sorted(files.items())]
+observed = hashlib.sha256(json.dumps(manifest, separators=(',', ':')).encode('ascii')).hexdigest()
+if observed != intent['source_digest']:
+    _fail('SOURCE_DIGEST', 'SOURCE_DIGEST_MISMATCH', pins)
+if any(name == 'ai_commerce' or name.startswith('ai_commerce.') for name in sys.modules):
+    _fail('SOURCE_DIGEST', 'SOURCE_MODULE_PRELOADED', pins)
+loader = importlib.machinery.SourceFileLoader
+default_code = loader.get_code
+def get_code(self, fullname):
+    if fullname == 'ai_commerce' or fullname.startswith('ai_commerce.'):
+        name = Path(self.path).relative_to(source).as_posix()
+        return self.source_to_code(files[name], self.path)
+    return default_code(self, fullname)
+loader.get_code = get_code
+sys.path[:0] = [str(source), dependencies]
+sys.argv = ['wakehub_runtime', 'supervise', '--observe-only', '--config', intent['config'], '--repository-root', root]
+reported = [False]
+def _report_stage(stage, reason):
+    reported[0] = True
+    _rec(stage, reason, pins)
+try:
+    runpy.run_module('ai_commerce.wakehub_runtime', run_name='__main__', alter_sys=True,
+                     init_globals={'_PROTECTED_DEPLOYMENT': intent, '_PROTECTED_STARTUP_RECEIPT': _report_stage})
+except ImportError:
+    _fail('CLI_ENTRY', 'IMPORT_FAILED', pins)
+except SystemExit as exc:
+    if exc.code not in (None, 0) and not reported[0]:
+        _rec('CLI_ENTRY', 'CLI_EXIT_NONZERO', pins)
+    raise
+except Exception:
+    if not reported[0]:
+        _rec('CLI_ENTRY', 'CLI_EXCEPTION', pins)
+    raise SystemExit(2)
+"""
+
 _SUPERVISOR_INSTANCE = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
 
 
 def _run_supervisor_task_script(
-    acquisition, script, executable, arguments, root, owner, *, mode="inspect", nonce="", pending_guid="",
+    acquisition, script, executable, arguments, root, owner, *,
+    mode="inspect", nonce="", pending_guid="", prior_arguments="",
 ):
     # Select a verified native PowerShell without consulting a Chrome task.
     shell = acquisition._powershell(owner_action=lambda bootstrap: bootstrap)
@@ -1591,6 +1799,8 @@ def _run_supervisor_task_script(
     )
     if mode == "probe_pending":
         env["AI_COMMERCE_SUPERVISOR_PENDING_GUID"] = pending_guid
+    if prior_arguments:
+        env["AI_COMMERCE_SUPERVISOR_PRIOR_ARGUMENTS"] = prior_arguments
     result = subprocess.run(
         [str(shell), "-NoProfile", "-NonInteractive", "-Command",
          acquisition._POWERSHELL_TASK_READ_PREAMBLE + script],
@@ -1600,31 +1810,41 @@ def _run_supervisor_task_script(
     return result.stdout.strip().decode("ascii")
 
 
-def _supervisor_task(acquisition, executable, arguments, root, owner, *, mode="inspect", nonce=""):
+def _supervisor_task(
+    acquisition, executable, arguments, root, owner, *, mode="inspect", nonce="", prior_arguments="",
+):
     code = _run_supervisor_task_script(
-        acquisition, _SUPERVISOR_TASK_SCRIPT, executable, arguments, root, owner, mode=mode, nonce=nonce,
+        acquisition, _SUPERVISOR_TASK_SCRIPT, executable, arguments, root, owner,
+        mode=mode, nonce=nonce, prior_arguments=prior_arguments,
     )
-    if (code not in {"MISSING", "CONFLICT", "READY", "BUSY", "NOT_ATTEMPTED"}
-            and not _SUPERVISOR_INSTANCE.fullmatch(code)):
+    allowed = {"MISSING", "CONFLICT", "READY", "BUSY", "NOT_ATTEMPTED"}
+    if mode == "inspect_recovery":
+        allowed = {"MISSING", "CONFLICT", "READY", "PRIOR_READY", "BUSY"}
+    elif mode == "migrate":
+        allowed = {"MISSING", "CONFLICT", "BUSY", "MIGRATED"}
+    if code not in allowed and (mode in ("inspect_recovery", "migrate") or not _SUPERVISOR_INSTANCE.fullmatch(code)):
         deny("SUPERVISOR_RUNTIME_UNAVAILABLE")
     return code
 
 
-def _supervisor_task_probe(acquisition, executable, arguments, root, owner):
+def _supervisor_task_probe(acquisition, executable, arguments, root, owner, *, prior_arguments=""):
     code = _run_supervisor_task_script(
-        acquisition, _SUPERVISOR_TASK_PROBE_SCRIPT, executable, arguments, root, owner, mode="probe", nonce="",
+        acquisition, _SUPERVISOR_TASK_PROBE_SCRIPT, executable, arguments, root, owner,
+        mode="probe", nonce="", prior_arguments=prior_arguments,
     )
     if code not in _SUPERVISOR_TASK_BASE_CODES:
         deny("SUPERVISOR_RUNTIME_UNAVAILABLE")
     return code
 
 
-def _supervisor_task_probe_pending(acquisition, executable, arguments, root, owner, *, pending_guid=""):
+def _supervisor_task_probe_pending(
+    acquisition, executable, arguments, root, owner, *, pending_guid="", prior_arguments="",
+):
     if pending_guid and not _SUPERVISOR_INSTANCE.fullmatch(pending_guid):
         deny("SUPERVISOR_RUNTIME_UNAVAILABLE")
     raw = _run_supervisor_task_script(
         acquisition, _SUPERVISOR_TASK_PROBE_SCRIPT, executable, arguments, root, owner,
-        mode="probe_pending", nonce="", pending_guid=pending_guid,
+        mode="probe_pending", nonce="", pending_guid=pending_guid, prior_arguments=prior_arguments,
     )
     parts = raw.split("+")
     if (len(parts) != 3 or parts[0] not in _SUPERVISOR_PENDING_TASK_CODES
@@ -1762,6 +1982,56 @@ def _probe_supervisor_run_state(runtime, intent):
     return "RUN_PRIOR"
 
 
+def _probe_supervisor_startup_receipt(runtime, intent):
+    """Read and correlate the bounded private StartupReceipt without leaking raw data.
+
+    Only receipts with verified matching nonce/source/config/desktop/session pins
+    correlate to `intent`. Untrusted or pre-nonce receipts stay UNCORRELATED and
+    are never assigned as proven correlation to an original attempt.
+    """
+    try:
+        raw = runtime._supervisor_deployment_value("StartupReceipt")
+    except Exception:
+        return "STARTUP_UNREADABLE"
+    if raw is None:
+        return "STARTUP_ABSENT"
+    if type(raw) is not str or not 0 < len(raw) <= 2048:
+        return "STARTUP_MALFORMED"
+    try:
+        value = json.loads(raw, object_pairs_hook=_object_unique)
+    except (Denied, ValueError, TypeError, RecursionError):
+        return "STARTUP_MALFORMED"
+    pin_keys = ("source_sha", "source_digest", "config_digest", "desktop", "session", "nonce")
+    required = {"schema", "stage", "reason", "correlated", "pid", "observed_ns", *pin_keys}
+    if type(value) is not dict or value.keys() != required:
+        return "STARTUP_MALFORMED"
+    stage = value["stage"]
+    reason = value["reason"]
+    correlated = value["correlated"]
+    if (value["schema"] != _SUPERVISOR_STARTUP_RECEIPT_SCHEMA
+            or type(stage) is not str or stage not in _SUPERVISOR_STARTUP_STAGE_REASONS
+            or type(reason) is not str or reason not in _SUPERVISOR_STARTUP_STAGE_REASONS[stage]
+            or type(correlated) is not bool
+            or type(value["pid"]) is not int or not 0 < value["pid"] < 2**32
+            or type(value["observed_ns"]) is not int):
+        return "STARTUP_MALFORMED"
+    if not correlated:
+        if any(value[k] is not None for k in pin_keys):
+            return "STARTUP_MALFORMED"
+        return f"STARTUP_UNCORRELATED_{stage}_{reason}"
+    if (type(value["source_sha"]) is not str or re.fullmatch(r"[a-f0-9]{40}", value["source_sha"]) is None
+            or any(type(value[k]) is not str or re.fullmatch(r"[a-f0-9]{64}", value[k]) is None
+                   for k in ("source_digest", "config_digest", "desktop"))
+            or type(value["session"]) is not int or value["session"] <= 0
+            or type(value["nonce"]) is not str or re.fullmatch(r"[a-f0-9]{32}", value["nonce"]) is None):
+        return "STARTUP_MALFORMED"
+    if intent is None:
+        return "STARTUP_UNCORRELATED"
+    if any(value[k] != intent[k] for k in pin_keys):
+        return "STARTUP_FOREIGN"
+    return f"STARTUP_MATCH_{stage}_{reason}"
+
+
 def _classify_pending_supervisor_diagnosis(
     task_code, pending_shape, mutex_state, health_state, run_state, history_code, log_code,
 ):
@@ -1779,9 +2049,9 @@ def _classify_pending_supervisor_diagnosis(
         return "ACTIVE_UNRESOLVED"
     if task_code in ("TASK_INSTANCE_MATCH", "TASK_INSTANCE_PRESENT"):
         return "STARTUP_HEALTH_MISSING"
-    if task_code in ("TASK_INSTANCE_OTHER", "TASK_BUSY"):
+    if task_code in ("TASK_INSTANCE_OTHER", "TASK_BUSY", "TASK_PRIOR_BOOTSTRAP_BUSY"):
         return "ACTIVE_UNRESOLVED"
-    # Task is TASK_READY (idle, zero instances).
+    # Task is TASK_READY or TASK_PRIOR_BOOTSTRAP_READY (idle, zero instances).
     if mutex_state == "MUTEX_ACTIVE" or health_state == "HEALTH_MATCH_STALE" or run_state == "RUN_MATCH":
         return "ACTIVE_UNRESOLVED"
     if health_state in ("HEALTH_MALFORMED", "HEALTH_MATCH_PROCESS_UNVERIFIED") or run_state == "RUN_MALFORMED":
@@ -1807,14 +2077,18 @@ def _classify_pending_supervisor_diagnosis(
 
 def _supervisor_pending_public_code(
     task_code, pending_shape, mutex_state, health_state, run_state, history_code, log_code,
+    *, startup_state="STARTUP_ABSENT",
 ):
     verdict = _classify_pending_supervisor_diagnosis(
         task_code, pending_shape, mutex_state, health_state, run_state, history_code, log_code,
     )
-    return "+".join((
+    parts = [
         "PENDING_INTENT_PRESENT", verdict, task_code, pending_shape,
         mutex_state, health_state, run_state, history_code, log_code,
-    ))
+    ]
+    if startup_state != "STARTUP_ABSENT":
+        parts.append(startup_state)
+    return "+".join(parts)
 
 
 def _is_valid_supervisor_task_probe_code(code):
@@ -1823,9 +2097,11 @@ def _is_valid_supervisor_task_probe_code(code):
     if code in _SUPERVISOR_TASK_PROBE_CODES:
         return True
     parts = code.split("+")
-    if len(parts) != 9:
+    if len(parts) not in (9, 10):
         return False
-    prefix, verdict, task_code, pending_shape, mutex_state, health_state, run_state, history_code, log_code = parts
+    prefix, verdict, task_code, pending_shape, mutex_state, health_state, run_state, history_code, log_code = parts[:9]
+    if len(parts) == 10 and (parts[9] == "STARTUP_ABSENT" or parts[9] not in _SUPERVISOR_STARTUP_RECEIPT_CODES):
+        return False
     return (
         prefix == "PENDING_INTENT_PRESENT"
         and verdict in _SUPERVISOR_PENDING_VERDICTS
@@ -1839,15 +2115,21 @@ def _is_valid_supervisor_task_probe_code(code):
     )
 
 
-def _supervisor_receipt(code, issue_number, sha=None):
-    if type(code) is not str or code not in _SUPERVISOR_OBSERVED | _SUPERVISOR_HOLDS:
+def _supervisor_receipt(code, issue_number, sha=None, *, operation=_SUPERVISOR_DEPLOY):
+    if operation == _SUPERVISOR_RECOVER_HEALTH_ONLY:
+        observed = _SUPERVISOR_RECOVERY_OBSERVED
+        allowed = observed | _SUPERVISOR_RECOVERY_HOLDS
+    else:
+        observed = _SUPERVISOR_OBSERVED
+        allowed = observed | _SUPERVISOR_HOLDS
+    if type(code) is not str or code not in allowed:
         code = "SUPERVISOR_RUNTIME_UNAVAILABLE"
     if type(sha) is not str or re.fullmatch(r"[a-f0-9]{40}", sha) is None:
         code = "PROTECTED_HOSTOPS_ONLY"
         sha = None
     result = {
-        "status": "OBSERVED" if code in _SUPERVISOR_OBSERVED else "HOLD", "code": code,
-        "operation": _SUPERVISOR_DEPLOY, "issue_number": issue_number,
+        "status": "OBSERVED" if code in observed else "HOLD", "code": code,
+        "operation": operation, "issue_number": issue_number,
         "approval_channel": "OWNER_GITHUB_COMMENT", "remote_shell_enabled": False,
         "arbitrary_shell_enabled": False, "exact_chat_verified": False, "wake_sent": False,
     }
@@ -1903,14 +2185,98 @@ def _supervisor_interpreter(acquisition, root):
     return executable, dependencies
 
 
-def _supervisor_expected_registration(acquisition, root):
+def _supervisor_expected_registration_for(acquisition, root, bootstrap_source):
     executable, dependencies = _supervisor_interpreter(acquisition, root)
-    bootstrap = base64.b64encode(_SUPERVISOR_BOOTSTRAP.encode("ascii")).decode("ascii")
+    bootstrap = base64.b64encode(bootstrap_source.encode("ascii")).decode("ascii")
     arguments = subprocess.list2cmdline([
         "-I", "-B", "-S", "-c", f"import base64;exec(base64.b64decode('{bootstrap}'))",
         str(root), str(dependencies), "$(Arg0)",
     ])
     return executable, arguments
+
+
+def _supervisor_expected_registration(acquisition, root):
+    return _supervisor_expected_registration_for(acquisition, root, _SUPERVISOR_BOOTSTRAP)
+
+
+def _supervisor_prior_registration(acquisition, root):
+    return _supervisor_expected_registration_for(acquisition, root, _SUPERVISOR_BOOTSTRAP_PRIOR)
+
+
+def _git_bytes(root, args, *, stdin_bytes=None):
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *args], input=stdin_bytes, capture_output=True,
+            timeout=15, check=False, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        deny("GIT_READ_UNAVAILABLE")
+    if result.returncode:
+        deny("GIT_READ_FAILED")
+    return result.stdout
+
+
+def _verify_prior_supervisor_source(root, prior_sha, prior_digest, current_sha, current_digest):
+    """Independently prove a prior pending source commit and legacy health-only boundary."""
+    if (type(prior_sha) is not str or re.fullmatch(r"[a-f0-9]{40}", prior_sha) is None
+            or type(prior_digest) is not str or re.fullmatch(r"[a-f0-9]{64}", prior_digest) is None):
+        return False
+    if prior_sha == current_sha:
+        return prior_digest == current_digest
+    try:
+        if _git("rev-parse", "--verify", f"{prior_sha}^{{commit}}").strip() != prior_sha:
+            return False
+        _git("merge-base", "--is-ancestor", prior_sha, current_sha)
+        raw_tree = _git_bytes(root, ("ls-tree", "-r", "-z", prior_sha, "--", "src/ai_commerce"))
+        entries = [item for item in raw_tree.split(b"\0") if item]
+        names = []
+        blob_shas = []
+        for entry in entries:
+            meta, rel = entry.split(b"\t", 1)
+            rel_str = rel.decode("utf-8")
+            if not rel_str.startswith("src/ai_commerce/") or not rel_str.endswith(".py"):
+                continue
+            parts = meta.split()
+            if len(parts) != 3 or parts[1] != b"blob":
+                continue
+            names.append(rel_str[len("src/"):])
+            blob_shas.append(parts[2].decode("ascii"))
+        if not names or len(names) > 4096:
+            return False
+        batch = _git_bytes(root, ("cat-file", "--batch"), stdin_bytes=("\n".join(blob_shas) + "\n").encode("ascii"))
+        pos = 0
+        raw_manifest = []
+        crlf_manifest = []
+        runner_bytes = None
+        for name in names:
+            nl = batch.index(b"\n", pos)
+            header = batch[pos:nl].decode("ascii").split()
+            if len(header) != 3 or header[1] != "blob":
+                return False
+            size = int(header[2])
+            pos = nl + 1
+            blob = batch[pos:pos + size]
+            if len(blob) != size or batch[pos + size:pos + size + 1] != b"\n":
+                return False
+            pos += size + 1
+            if name == "ai_commerce/wakehub_runtime/runner.py":
+                runner_bytes = blob
+            raw_manifest.append([name, hashlib.sha256(blob).hexdigest()])
+            crlf_blob = blob.replace(b"\n", b"\r\n") if b"\r" not in blob else blob
+            crlf_manifest.append([name, hashlib.sha256(crlf_blob).hexdigest()])
+        if runner_bytes is None:
+            return False
+        raw_digest = hashlib.sha256(json.dumps(sorted(raw_manifest), separators=(",", ":")).encode("ascii")).hexdigest()
+        crlf_digest = hashlib.sha256(json.dumps(sorted(crlf_manifest), separators=(",", ":")).encode("ascii")).hexdigest()
+        if prior_digest not in (raw_digest, crlf_digest):
+            return False
+        # Confirm the prior commit itself enforced legacy health-only mode for legacy 9444 configs.
+        if (b"legacy_health_only=True" not in runner_bytes
+                or b"observe_only = not isinstance(chrome, _SupervisorChrome)" not in runner_bytes):
+            return False
+        return True
+    except (Denied, OSError, ValueError, UnicodeError):
+        return False
 
 
 def _probe_protected_supervisor_read(event, operation, inspect):
@@ -2007,12 +2373,16 @@ def _probe_protected_supervisor_task(event):
             return ("PRESENT", value) if type(value) is str else ("UNKNOWN", None)
 
         result["code"] = "SUPERVISOR_RUNTIME_UNAVAILABLE"
+        _, prior_arguments = _supervisor_prior_registration(acquisition, root)
         pending_before = read_pending()
         if pending_before[0] != "PRESENT":
-            task_code = _supervisor_task_probe(acquisition, executable, arguments, root, owner)
+            task_code = _supervisor_task_probe(
+                acquisition, executable, arguments, root, owner, prior_arguments=prior_arguments,
+            )
             recheck_identity()
             result["code"] = "SUPERVISOR_RUNTIME_UNAVAILABLE"
-            if _supervisor_expected_registration(acquisition, root) != (executable, arguments):
+            if (_supervisor_expected_registration(acquisition, root) != (executable, arguments)
+                    or _supervisor_prior_registration(acquisition, root) != (executable, prior_arguments)):
                 deny("SUPERVISOR_RUNTIME_UNAVAILABLE")
             pending_after = read_pending()
             if pending_after != pending_before:
@@ -2039,7 +2409,8 @@ def _probe_protected_supervisor_task(event):
             else ""
         )
         task_code, history_code, log_code = _supervisor_task_probe_pending(
-            acquisition, executable, arguments, root, owner, pending_guid=pending_guid,
+            acquisition, executable, arguments, root, owner,
+            pending_guid=pending_guid, prior_arguments=prior_arguments,
         )
         if correlatable is None:
             log_code = "LOG_NA"
@@ -2048,9 +2419,11 @@ def _probe_protected_supervisor_task(event):
             runtime, correlatable, executable, owner, mutex_active=(mutex_state == "MUTEX_ACTIVE"),
         )
         run_state = _probe_supervisor_run_state(runtime, correlatable)
+        startup_state = _probe_supervisor_startup_receipt(runtime, correlatable)
         recheck_identity()
         result["code"] = "SUPERVISOR_RUNTIME_UNAVAILABLE"
-        if _supervisor_expected_registration(acquisition, root) != (executable, arguments):
+        if (_supervisor_expected_registration(acquisition, root) != (executable, arguments)
+                or _supervisor_prior_registration(acquisition, root) != (executable, prior_arguments)):
             deny("SUPERVISOR_RUNTIME_UNAVAILABLE")
         pending_after = read_pending()
         if pending_after != pending_before:
@@ -2058,6 +2431,7 @@ def _probe_protected_supervisor_task(event):
             return
         code = _supervisor_pending_public_code(
             task_code, pending_shape, mutex_state, health_state, run_state, history_code, log_code,
+            startup_state=startup_state,
         )
         if not _is_valid_supervisor_task_probe_code(code):
             deny("SUPERVISOR_RUNTIME_UNAVAILABLE")
@@ -2210,6 +2584,8 @@ def _deploy_protected_supervisor(event):
             failure = "SUPERVISOR_START_UNKNOWN"
             intent = {**intent_pins, "nonce": secrets.token_hex(16)}
             pending = json.dumps(intent)
+            if runtime._supervisor_deployment_value("StartupReceipt") is not None:
+                runtime._store_supervisor_deployment_value("StartupReceipt", None)
             runtime._store_supervisor_deployment_value("StartPending", pending)
             instance = task(mode="start", nonce=intent["nonce"])
             if instance in {"NOT_ATTEMPTED", "MISSING", "CONFLICT"}:
@@ -2231,6 +2607,294 @@ def _deploy_protected_supervisor(event):
         # Exception text can include private config, paths and native diagnostics.
         pass
     return _supervisor_receipt(failure, issue_number, sha)
+
+
+def _recover_protected_supervisor_health_only(event):
+    """Explicitly retire one unresolved prior legacy health-only pending intent and start one fresh attempt.
+
+    Requires its own owner-authenticated WRITE grant (attempt 1 only), independently
+    verified prior pending identity with GUID, proven legacy health-only mode from
+    original source and config pins, repeated idle/zero-instance task verification,
+    inactive supervisor mutex, absent Run/Health, and durable archival of the
+    verbatim original pending bytes as HISTORICAL_UNKNOWN before any mutation.
+    """
+    request = parse_event(event, "write")
+    if request["operation"] != _SUPERVISOR_RECOVER_HEALTH_ONLY:
+        deny("WRITE_SCOPE_DENIED")
+    issue_number = request["issue_number"]
+    sha = None
+    failure = "PROTECTED_HOSTOPS_ONLY"
+
+    def receipt(code, source_sha=None):
+        return _supervisor_receipt(
+            code, issue_number, sha if source_sha is None else source_sha,
+            operation=_SUPERVISOR_RECOVER_HEALTH_ONLY,
+        )
+
+    receipt(failure, None)
+    try:
+        _require_protected_clean_runner("issue_comment", reconcile=False)
+        sha = _protected_clean_workflow_sha(write=True)
+        failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
+        from ai_commerce.remote import chrome_acquisition as acquisition
+        from ai_commerce.wakehub_runtime import runner as runtime
+
+        failure = "SOURCE_CUSTODY_UNVERIFIED"
+        source = _supervisor_source(runtime, acquisition, sha)
+        root = ROOTS["workspace"]
+
+        def read_owner():
+            nonlocal failure
+            try:
+                return runtime._supervisor_owner_session()
+            except runtime.RuntimeHold as exc:
+                code = str(exc)
+                if code in _SUPERVISOR_DESKTOP_HOLDS:
+                    failure = code
+                raise
+
+        failure = "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
+        owner, desktop = read_owner()
+        failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
+        executable, arguments = _supervisor_expected_registration(acquisition, root)
+        prior_executable, prior_arguments = _supervisor_prior_registration(acquisition, root)
+        if prior_executable != executable:
+            deny("SUPERVISOR_RUNTIME_UNAVAILABLE")
+
+        def resolve_health_only_config():
+            cfg, pin = runtime._resolve_runtime_config(root, owner=owner, observe_only=True, protected=True)
+            chrome, observed_pin = runtime._observe_only_config(cfg, root, owner, lambda: False, protected=True)
+            if (not isinstance(chrome, runtime.NativeChrome9444)
+                    or not getattr(chrome, "legacy_health_only", False)
+                    or observed_pin != pin):
+                deny("RECOVERY_HEALTH_ONLY_REQUIRED")
+            return cfg, pin
+
+        def recheck(*, check_source=False):
+            nonlocal failure
+            if check_source:
+                failure = "SOURCE_CUSTODY_UNVERIFIED"
+                if _persistent_clean_source(acquisition, sha, pin_runtime=True) != source:
+                    deny(failure)
+            failure = "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
+            if read_owner() != (owner, desktop):
+                deny(failure)
+            failure = "LOCAL_CONFIG_CHANGED"
+            if resolve_health_only_config() != (config, config_pin):
+                deny(failure)
+
+        def task(**kwargs):
+            return _supervisor_task(acquisition, executable, arguments, root, owner, **kwargs)
+
+        def confirmed_health(intent, instance):
+            nonlocal failure
+            proof_pins = {**expected, "nonce": intent["nonce"]}
+            proof = _read_supervisor_health(runtime, proof_pins, executable, owner)
+            if proof is None or proof.get("mode") != runtime._CHROME_HEALTH_ONLY or task() != instance:
+                return None
+            if proof["health"] not in _SUPERVISOR_DESKTOP_HOLDS:
+                proof_failure = failure
+                recheck()
+                failure = proof_failure
+            current = _read_supervisor_health(runtime, proof_pins, executable, owner)
+            if current is not None and all(current.get(key) == proof.get(key)
+                                           for key in ("pid", "created", "health", "mode")):
+                if task() == instance:
+                    return current
+            return None
+
+        def finish(intent, instance, pending):
+            if runtime._supervisor_deployment_value("StartPending") != pending:
+                return "SUPERVISOR_START_UNKNOWN"
+            proven = confirmed_health(intent, instance)
+            if proven is None:
+                return None
+            if proven["health"] in _SUPERVISOR_DESKTOP_HOLDS:
+                return proven["health"]
+            runtime._store_supervisor_deployment_value("Run", json.dumps({**intent, "instance": instance}))
+            runtime._store_supervisor_deployment_value("StartPending", None)
+            if proven["health"] in _SUPERVISOR_CHROME_HOLDS:
+                return proven["health"]
+            return "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED"
+
+        with runtime._supervisor_slot(runtime._SUPERVISOR_DEPLOY_MUTEX):
+            failure = "RECOVERY_EVIDENCE_UNAVAILABLE"
+            raw_pending = runtime._supervisor_deployment_value("StartPending")
+            if raw_pending is None:
+                return receipt("RECOVERY_PENDING_ABSENT")
+            prior_intent = _parse_supervisor_intent(raw_pending, require_instance=True)
+            if prior_intent is None:
+                if _parse_supervisor_intent(raw_pending, require_instance=False) is not None:
+                    return receipt("RECOVERY_PENDING_GUID_REQUIRED")
+                return receipt("RECOVERY_PENDING_MALFORMED")
+            if prior_intent["sid"] != owner[2]:
+                return receipt("RECOVERY_PENDING_OWNER_MISMATCH")
+
+            try:
+                config, config_pin = resolve_health_only_config()
+            except (runtime.RuntimeHold, Denied) as exc:
+                failure = str(exc)
+                raise
+
+            if prior_intent["config"] != str(config) or prior_intent["config_digest"] != config_pin:
+                return receipt("RECOVERY_PRIOR_HEALTH_ONLY_UNPROVEN")
+            if not _verify_prior_supervisor_source(
+                root, prior_intent["source_sha"], prior_intent["source_digest"], sha, source,
+            ):
+                return receipt("RECOVERY_PRIOR_SOURCE_UNPROVEN")
+
+            def check_quiescent():
+                mutex_state = _probe_supervisor_mutex(runtime)
+                if mutex_state == "MUTEX_ACTIVE":
+                    return "SUPERVISOR_ACTIVE_UNVERIFIED"
+                if mutex_state != "MUTEX_INACTIVE":
+                    return "RECOVERY_EVIDENCE_UNAVAILABLE"
+                if _probe_supervisor_run_state(runtime, prior_intent) != "RUN_ABSENT":
+                    return "RECOVERY_CONFLICTING_RUN"
+                if _probe_supervisor_health_state(
+                    runtime, prior_intent, executable, owner, mutex_active=False,
+                ) != "HEALTH_ABSENT":
+                    return "RECOVERY_CONFLICTING_HEALTH"
+                startup_state = _probe_supervisor_startup_receipt(runtime, prior_intent)
+                if startup_state == "STARTUP_UNREADABLE":
+                    return "RECOVERY_EVIDENCE_UNAVAILABLE"
+                if startup_state == "STARTUP_MATCH_FIRST_HEALTH_HEALTH_PUBLISHED":
+                    return "RECOVERY_CONFLICTING_HEALTH"
+                return None
+
+            quiescent_hold = check_quiescent()
+            if quiescent_hold is not None:
+                return receipt(quiescent_hold)
+
+            failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
+            state_1 = task(mode="inspect_recovery", prior_arguments=prior_arguments)
+            if state_1 == "BUSY":
+                return receipt("SUPERVISOR_ACTIVE_UNVERIFIED")
+            if state_1 not in ("READY", "PRIOR_READY"):
+                return receipt("SUPERVISOR_TASK_CONFLICT")
+
+            # Independent second READY/zero-instance + identity + quiescence observation.
+            recheck(check_source=True)
+            failure = "RECOVERY_STATE_CHANGED"
+            if runtime._supervisor_deployment_value("StartPending") != raw_pending:
+                return receipt("RECOVERY_STATE_CHANGED")
+            quiescent_hold = check_quiescent()
+            if quiescent_hold is not None:
+                return receipt(quiescent_hold)
+            failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
+            state_2 = task(mode="inspect_recovery", prior_arguments=prior_arguments)
+            if state_2 == "BUSY":
+                return receipt("SUPERVISOR_ACTIVE_UNVERIFIED")
+            if state_2 != state_1:
+                return receipt("RECOVERY_STATE_CHANGED")
+
+            # Durably archive original pending bytes as HISTORICAL_UNKNOWN before ANY mutation.
+            pending_sha = hashlib.sha256(raw_pending.encode("utf-8")).hexdigest()
+            archive_key = f"RetiredPending_{prior_intent['nonce']}"
+            archive_payload = {
+                "schema": "WakeHubSupervisorRetiredPending.v1",
+                "classification": "HISTORICAL_UNKNOWN",
+                "retired_by_issue": issue_number,
+                "retired_source_sha": sha,
+                "prior_nonce": prior_intent["nonce"],
+                "prior_instance": prior_intent["instance"],
+                "prior_source_sha": prior_intent["source_sha"],
+                "prior_source_digest": prior_intent["source_digest"],
+                "prior_config_digest": prior_intent["config_digest"],
+                "prior_mode": "LEGACY_CHROME_HEALTH_ONLY",
+                "pending_sha256": pending_sha,
+                "pending_raw": raw_pending,
+            }
+            archive_raw = json.dumps(archive_payload, separators=(",", ":"))
+            if len(archive_raw) > 4096:
+                return receipt("RECOVERY_ARCHIVE_FAILED")
+
+            def verify_archive(stored):
+                if type(stored) is not str:
+                    return False
+                try:
+                    parsed = json.loads(stored, object_pairs_hook=_object_unique)
+                except (Denied, ValueError, TypeError, RecursionError):
+                    return False
+                return (
+                    type(parsed) is dict
+                    and parsed.get("schema") == "WakeHubSupervisorRetiredPending.v1"
+                    and parsed.get("classification") == "HISTORICAL_UNKNOWN"
+                    and parsed.get("prior_nonce") == prior_intent["nonce"]
+                    and parsed.get("prior_instance") == prior_intent["instance"]
+                    and parsed.get("pending_sha256") == pending_sha
+                    and parsed.get("pending_raw") == raw_pending
+                )
+
+            failure = "RECOVERY_ARCHIVE_FAILED"
+            existing_archive = runtime._supervisor_deployment_value(archive_key)
+            if existing_archive is not None:
+                if not verify_archive(existing_archive):
+                    return receipt("RECOVERY_ARCHIVE_CONFLICT")
+            else:
+                runtime._store_supervisor_deployment_value(archive_key, archive_raw)
+            if not verify_archive(runtime._supervisor_deployment_value(archive_key)):
+                return receipt("RECOVERY_ARCHIVE_FAILED")
+
+            # Explicitly migrate ONLY the exact known prior registered task in place while idle.
+            if state_1 == "PRIOR_READY":
+                failure = "RECOVERY_TASK_MIGRATION_FAILED"
+                migrated = task(mode="migrate", prior_arguments=prior_arguments)
+                if migrated == "CONFLICT":
+                    return receipt("SUPERVISOR_TASK_CONFLICT")
+                if migrated == "BUSY":
+                    return receipt("SUPERVISOR_ACTIVE_UNVERIFIED")
+                if migrated != "MIGRATED":
+                    return receipt("RECOVERY_TASK_MIGRATION_FAILED")
+
+            # Final pre-start verification before replacing StartPending and invoking RunEx once.
+            recheck(check_source=True)
+            failure = "RECOVERY_STATE_CHANGED"
+            if (runtime._supervisor_deployment_value("StartPending") != raw_pending
+                    or not verify_archive(runtime._supervisor_deployment_value(archive_key))):
+                return receipt("RECOVERY_STATE_CHANGED")
+            quiescent_hold = check_quiescent()
+            if quiescent_hold is not None:
+                return receipt(quiescent_hold)
+
+            expected = {"source_sha": sha, "source_digest": source, "config_digest": config_pin,
+                        "desktop": desktop, "session": owner[1]}
+            intent_pins = {**expected, "sid": owner[2], "config": str(config)}
+            failure = "SUPERVISOR_START_UNKNOWN"
+            new_nonce = secrets.token_hex(16)
+            while new_nonce == prior_intent["nonce"]:
+                new_nonce = secrets.token_hex(16)
+            new_intent = {**intent_pins, "nonce": new_nonce}
+            new_pending = json.dumps(new_intent)
+            if runtime._supervisor_deployment_value("StartupReceipt") is not None:
+                runtime._store_supervisor_deployment_value("StartupReceipt", None)
+            runtime._store_supervisor_deployment_value("StartPending", new_pending)
+            instance = task(mode="start", nonce=new_nonce)
+            if instance in {"NOT_ATTEMPTED", "MISSING", "CONFLICT"}:
+                if runtime._supervisor_deployment_value("StartPending") == new_pending:
+                    runtime._store_supervisor_deployment_value("StartPending", None)
+                return receipt("SUPERVISOR_TASK_CONFLICT" if instance == "CONFLICT" else "SUPERVISOR_START_NOT_ATTEMPTED")
+            if not _SUPERVISOR_INSTANCE.fullmatch(instance) or instance == prior_intent["instance"]:
+                deny(failure)
+            new_intent["instance"] = instance
+            new_pending = json.dumps(new_intent)
+            runtime._store_supervisor_deployment_value("StartPending", new_pending)
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline:
+                code = finish(new_intent, instance, new_pending)
+                if code is not None:
+                    return receipt(code)
+                startup = _probe_supervisor_startup_receipt(runtime, new_intent)
+                if (startup.startswith("STARTUP_MATCH_")
+                        and startup != "STARTUP_MATCH_FIRST_HEALTH_HEALTH_PUBLISHED"
+                        and task() == "READY"
+                        and not runtime._supervisor_active()):
+                    return receipt("SUPERVISOR_START_UNKNOWN")
+                time.sleep(0.25)
+    except Exception:
+        # Exception text can include private config, paths and native diagnostics.
+        pass
+    return receipt(failure)
 
 
 def _install_protected_clean_autostart(event):
@@ -6585,7 +7249,7 @@ def perform(request):
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
         return _clean_autostart_receipt("PROTECTED_HOSTOPS_ONLY", operation=op)
-    if op in (_SUPERVISOR_DEPLOY, _SUPERVISOR_CONFIG_PROBE, _SUPERVISOR_TASK_PROBE):
+    if op in (_SUPERVISOR_DEPLOY, _SUPERVISOR_RECOVER_HEALTH_ONLY, _SUPERVISOR_CONFIG_PROBE, _SUPERVISOR_TASK_PROBE):
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
         deny("PROTECTED_HOSTOPS_ONLY")
@@ -6729,6 +7393,8 @@ def main():
             result = _probe_protected_clean_runtime(event, forensic=True)
         elif request["operation"] == _SUPERVISOR_DEPLOY:
             result = _deploy_protected_supervisor(event)
+        elif request["operation"] == _SUPERVISOR_RECOVER_HEALTH_ONLY:
+            result = _recover_protected_supervisor_health_only(event)
         elif request["operation"] == _SUPERVISOR_CONFIG_PROBE:
             result = _probe_protected_supervisor_config(event)
         elif request["operation"] == _SUPERVISOR_TASK_PROBE:
