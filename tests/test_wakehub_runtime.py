@@ -4538,7 +4538,20 @@ class Flat04Page(ReadOnlyPage):
 
 @pytest.fixture
 def flat04(supervisor, monkeypatch):
+    from ai_commerce.remote import local_completion_handoff as handoff
+
     s, i = supervisor, supervisor.i
+    sid = s.owner()[2]
+    monkeypatch.setattr(handoff, "_private_identity", lambda _: sid)
+    if os.name != "nt":
+        # Keep POSIX journal ownership and the simulated Windows SID distinct.
+        principal = r._private_identity(i["config_path"])
+        read_config = r.chrome_acquisition._read_supervised_9444_config
+
+        def read_with_fixture_sid(config, local, root, owner):
+            return read_config(config, local, root, sid if owner == principal else owner)
+
+        monkeypatch.setattr(r.chrome_acquisition, "_read_supervised_9444_config", read_with_fixture_sid)
     i["config"]["chat_preload"] = True
     sources = issue_fixture(i, monkeypatch)
     issue = sources.add(1317)
@@ -4626,27 +4639,23 @@ def shared_root_chat(flat04, monkeypatch):
     f.i["config"]["chrome_config"] = str(path)
     f.i["save"](f.i["config_path"], f.i["config"])
     env = replace(f.i["environment"], config_path=path)
-    f.custody = SimpleNamespace(mask=0x1200A9, root_owner=sid, invalid_private=None, acl_readable=True)
+    common = {root, local, r.Path(local.anchor)}
+    f.custody = SimpleNamespace(invalid_private=None, checked=[])
     f.shared_root, f.chrome_path, f.shared_env = root, path, env
     users = "S-1-5-32-545"
-
-    def acl(item):
-        if item == root:
-            if not f.custody.acl_readable:
-                raise OSError("fixture native ACL read failed")
-            return f.custody.root_owner, [(0, 0, 0x1F01FF, sid), (0, 0, f.custody.mask, users)]
-        return sid, [(0, 0, 0x1F01FF, sid)]
+    unknown_owner = "S-1-5-21-4-5-6-1001"
 
     def identity(item, expected):
+        f.custody.checked.append(item)
+        owner = unknown_owner if item in common else expected
         aces = [("allow", expected)]
-        if item in (root, f.custody.invalid_private):
-            aces.append(("allow", users))
-        handoff._check_windows_acl(expected, aces, expected)
+        if item in common or item == f.custody.invalid_private:
+            aces.append(("allow", users))  # Ordinary inherited ancestor ACE in this fixture.
+        handoff._check_windows_acl(owner, aces, expected)
         return expected
 
     monkeypatch.setattr(handoff, "_private_identity", lambda item: identity(item, sid))
     monkeypatch.setattr(r, "_private_identity", lambda item: identity(item, principal))
-    monkeypatch.setattr(acq, "_windows_ancestor_acl", acl)
     for name, check in f.i["chrome_custody"].items():
         monkeypatch.setattr(acq, name, check)
 
@@ -4654,45 +4663,65 @@ def shared_root_chat(flat04, monkeypatch):
         assert current == env
 
     monkeypatch.setattr(acq, "_probe_cdp", probe)
+    f.common_ancestors = common
     return f
 
 
-def test_exact_chat_registration_and_enrolled_tick_accept_read_only_shared_root(shared_root_chat):
+def test_exact_chat_registration_and_enrolled_tick_ignore_common_ancestor_acls(shared_root_chat):
     f = shared_root_chat
-    prepared = f.enroll()
+    before = {path: path.read_bytes() for path in f.shared_root.rglob("*") if path.is_file()}
+    prepared = f.prepare()
+    f.exact.turns = [(prepared.marker, "user")] * 2
+    assert f.observe(prepared).code == "LOCAL_USER_MARKER_AMBIGUOUS"
+    assert f.origin()["phase"] == "PREPARED"
+    f.exact.turns.pop()
+    assert f.observe(prepared).code == "LOCAL_CHAT_REGISTERED_UI_EVIDENCE"
     assert f.origin()["phase"] == "ENROLLED"
     assert f.origin()["registration_id"] == prepared.registration_id
     assert f.s.run(2).code == "EXACT_CHAT_REUSED"
-    assert f.s.requests == [] and f.state.new_pages == 0
     assert f.s.run(2).replayed
+    assert f.s.requests == [] and f.state.new_pages == 0 and f.state.navigations == []
+    assert {path: path.read_bytes() for path in f.shared_root.rglob("*") if path.is_file()} == before
+    assert f.common_ancestors.isdisjoint(f.custody.checked)
+    assert {f.chrome_path, f.chrome_path.parent, f.shared_env.user_data_dir,
+            f.shared_env.user_data_dir / f.shared_env.profile_directory, f.s.path} <= set(f.custody.checked)
 
-    # Revalidate custody during later normal enrolled consumption.
-    f.custody.mask |= 0x40  # FILE_DELETE_CHILD
+    f.custody.invalid_private = f.chrome_path.parent
     attachments = f.state.attachments
-    assert f.s.run().chrome_health == "CHROME_CONFIG_ANCESTOR_MUTATION_ALLOWED"
+    assert f.s.run().chrome_health == "HANDOFF_PERMISSIONS_INVALID"
     assert f.state.attachments == attachments and f.origin()["phase"] == "ENROLLED"
 
 
+def test_protected_supervisor_resolves_enrolled_chat_with_common_ancestor_acls(shared_root_chat):
+    f = shared_root_chat
+    prepared = f.enroll()
+    f.i["config"]["ui_delivery"] = {
+        "schema": r._UI_DELIVERY_SCHEMA, "transport": "playwright", "grants": [],
+        "route_marker": f.i["registration"].marker, "registration_id": prepared.registration_id,
+        "marker_digest": f.origin()["marker_digest"],
+        "standing_issue": {"repository_id": 3101, "creator_id": 711, "title_prefix": "[WAKEHUB PROJECT] ",
+                           "not_before": "2026-11-15T00:00:00Z", "account_id": "fixture-account"},
+    }
+    f.i["save"](f.i["config_path"], f.i["config"])
+    chrome, _ = r._observe_only_config(f.i["config_path"], f.i["root"], f.s.owner(),
+                                      lambda: False, protected=True)
+    assert isinstance(chrome, r._SupervisorChrome)
+    assert chrome.run_once(start_after=0).code == "CHROME_OWNED"
+    assert f.common_ancestors.isdisjoint(f.custody.checked) and f.s.requests == []
+
+
 @pytest.mark.parametrize("fault, code", [
-    ("root_write", "CHROME_CONFIG_ANCESTOR_MUTATION_ALLOWED"),
-    ("root_owner", "CHROME_CONFIG_ANCESTOR_OWNER_UNPROVEN"),
-    ("root_acl_unreadable", "CHROME_CONFIG_ANCESTOR_ACL_UNPROVEN"),
     ("root_reparse", "CONFIG_PATH_INVALID"),
     ("config", "HANDOFF_PERMISSIONS_INVALID"),
     ("config_parent", "HANDOFF_PERMISSIONS_INVALID"),
     ("profile", "OPERATOR_OWNERSHIP_UNPROVEN"),
     ("journal", "HANDOFF_PERMISSIONS_INVALID"),
+    ("runtime", "HANDOFF_PERMISSIONS_INVALID"),
 ])
 def test_shared_root_chat_registration_refuses_unsafe_custody_before_marker(shared_root_chat, monkeypatch,
                                                                           fault, code):
     f, acq = shared_root_chat, r.chrome_acquisition
-    if fault == "root_write":
-        f.custody.mask |= 0x04  # FILE_ADD_SUBDIRECTORY
-    elif fault == "root_owner":
-        f.custody.root_owner = "S-1-5-18"
-    elif fault == "root_acl_unreadable":
-        f.custody.acl_readable = False
-    elif fault == "root_reparse":
+    if fault == "root_reparse":
         no_links = acq._no_links
         monkeypatch.setattr(acq, "_no_links", lambda path:
                             f.shared_root not in (path, *path.parents) and no_links(path))
@@ -4702,7 +4731,7 @@ def test_shared_root_chat_registration_refuses_unsafe_custody_before_marker(shar
                 pass
         f.custody.invalid_private = {"config": f.chrome_path, "config_parent": f.chrome_path.parent,
                                      "profile": f.shared_env.user_data_dir / f.shared_env.profile_directory,
-                                     "journal": f.s.path}[fault]
+                                     "journal": f.s.path, "runtime": f.i["config_path"]}[fault]
     result = r.register_local_chat(f.i["config_path"], f.i["root"])
     assert (result.status, result.code) == ("HOLD", code)
     assert f.state.attachments == 0 and f.s.requests == []
@@ -4711,16 +4740,29 @@ def test_shared_root_chat_registration_refuses_unsafe_custody_before_marker(shar
             assert db.execute("SELECT name FROM sqlite_master WHERE name='local_origin'").fetchall() == []
 
 
-def test_shared_root_owner_drift_during_exact_chat_read_prevents_marker(shared_root_chat):
+@pytest.mark.parametrize("fault, code", [
+    ("config-content", "CHROME_ENROLLMENT_DRIFT"),
+    ("config-replaced", "HANDOFF_PERMISSIONS_INVALID"),
+    ("session", "CHROME_OBSERVATION_CHANGED"),
+])
+def test_shared_root_drift_during_exact_chat_read_prevents_marker(shared_root_chat, fault, code):
     f = shared_root_chat
 
-    def change_owner():
-        f.custody.root_owner = "S-1-5-18"
+    def drift():
+        if fault == "config-content":
+            f.i["save"](f.chrome_path, {**f.i["chrome"], "allow_launch": True})
+        elif fault == "config-replaced":
+            replacement = f.chrome_path.with_suffix(".new")
+            f.i["save"](replacement, f.i["chrome"])
+            replacement.replace(f.chrome_path)
+            f.custody.invalid_private = f.chrome_path
+        else:
+            f.s.new_logon(8)
 
-    f.state.before_attach = change_owner
+    f.state.before_attach = drift
     result = r.register_local_chat(f.i["config_path"], f.i["root"])
-    assert (result.status, result.code) == ("HOLD", "CHROME_CONFIG_ANCESTOR_OWNER_UNPROVEN")
-    assert f.state.attachments == 1
+    assert (result.status, result.code) == ("HOLD", code)
+    assert f.state.attachments == 1 and f.s.requests == []
     with sqlite3.connect(f.s.path) as db:
         assert db.execute("SELECT name FROM sqlite_master WHERE name='local_origin'").fetchall() == []
 
@@ -5139,8 +5181,8 @@ class SimulatedWakeHubCrash(BaseException):
 
 
 @pytest.fixture
-def flat05(flat04, r3a_ingress, monkeypatch):
-    f = flat04
+def flat05(request, flat04, r3a_ingress, monkeypatch):
+    f = request.getfixturevalue("shared_root_chat") if getattr(request, "param", False) else flat04
     prepared = f.enroll()
     event = f.i["event"]
     f.ef02 = r.SourceIdentity("ef02-completion", event["repository"], event["run_id"], event["run_attempt"])
@@ -5301,6 +5343,7 @@ def flat05(flat04, r3a_ingress, monkeypatch):
     return f
 
 
+@pytest.mark.parametrize("flat05", [False, True], indirect=True, ids=["private-root", "shared-root"])
 def test_flat05_supervisor_sends_each_authenticated_source_once(flat05):
     f = flat05
     observed = "LOCAL_UI_OWNER_AUTHORIZED_TURN_OBSERVED"
@@ -6527,9 +6570,6 @@ def test_protected_legacy_health_only_liveness_counterexamples_and_recovery(obse
         ("PROCESS_IDENTITY_UNKNOWN", "PROCESS_IDENTITY_UNKNOWN"),
         ("POWERSHELL_UNAVAILABLE", "POWERSHELL_UNAVAILABLE"),
         ("CDP_NOT_LOOPBACK_OWNED", "CDP_NOT_LOOPBACK_OWNED"),
-        ("CHROME_CONFIG_ANCESTOR_OWNER_UNPROVEN", "CHROME_OWNER_UNPROVEN"),
-        ("CHROME_CONFIG_ANCESTOR_ACL_UNPROVEN", "CHROME_OWNER_UNPROVEN"),
-        ("CHROME_CONFIG_ANCESTOR_MUTATION_ALLOWED", "CHROME_OWNER_UNPROVEN"),
         ("CHROME_CONFIG_ANCESTOR_PIN_UNPROVEN", "CHROME_OWNER_UNPROVEN"),
         ("UNENUMERATED_SYNTHETIC_CODE", "FIRST_HEALTH_HOLD"),
     ):

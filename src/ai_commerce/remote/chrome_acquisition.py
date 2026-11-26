@@ -1018,21 +1018,16 @@ def _existing_9444_candidate(inventory: dict, *, local: Path, checkout: Path,
 
 
 def _check_enrollment_custody(env: ChromeEnvironment, local: Path, sid: str, *,
-                              marker_proof=None, shared_root: bool = False) -> None:
+                              marker_proof=None, existing_config: bool = False) -> None:
     from .local_completion_handoff import HandoffBlocked, _private_identity
     root = (local / "AI-Commerce").resolve(strict=True)
-    if not shared_root:
-        # Creation requires a private root before there is a config to check.
+    paths = {env.user_data_dir, env.user_data_dir / env.profile_directory}
+    if not existing_config:
         _require_operator_control(replace(env, config_path=root))
-    # Existing shared-root reads prove root custody while pinned. Every
-    # directory below that root still has to pass the strict private check.
-    paths = {env.user_data_dir, env.user_data_dir / env.profile_directory,
-             *env.user_data_dir.parents}
-    paths = {p for p in paths if _inside(p, root)}
-    if not shared_root:
+        paths.update(p for p in env.user_data_dir.parents if _inside(p, root))
         paths.add(root)
-    if env.config_path.parent.exists():
-        paths.add(env.config_path.parent)
+        if env.config_path.parent.exists():
+            paths.add(env.config_path.parent)
     try:
         unsafe = any(not _no_links(p) or _private_identity(p) != sid for p in paths)
     except (HandoffBlocked, OSError, ValueError):
@@ -1566,112 +1561,17 @@ def _logon_result(code: str) -> dict:
             "chat_identity_proven": False, "send_authorized": False}
 
 
-def _windows_ancestor_acl(path: Path) -> tuple[str, list[tuple[int, int, int, str]]]:
-    """Read ordinary Windows DACL entries including the flags and access mask."""
-    import ctypes as c
-    from ctypes import wintypes as w
-
-    ptr = c.c_void_p
-    adv = c.WinDLL("advapi32", winmode=0x800)
-    kernel = c.WinDLL("kernel32", winmode=0x800)
-    bindings = (
-        (adv, "GetNamedSecurityInfoW", w.DWORD, [w.LPWSTR, w.DWORD, w.DWORD,
-            c.POINTER(ptr), ptr, c.POINTER(ptr), ptr, c.POINTER(ptr)]),
-        (adv, "GetAclInformation", w.BOOL, [ptr, ptr, w.DWORD, c.c_int]),
-        (adv, "GetAce", w.BOOL, [ptr, w.DWORD, c.POINTER(ptr)]),
-        (adv, "IsValidSid", w.BOOL, [ptr]),
-        (adv, "GetLengthSid", w.DWORD, [ptr]),
-        (adv, "ConvertSidToStringSidW", w.BOOL, [ptr, c.POINTER(w.LPWSTR)]),
-        (kernel, "LocalFree", ptr, [ptr]),
-    )
-    for library, name, result, args in bindings:
-        function = getattr(library, name)
-        function.restype, function.argtypes = result, args
-
-    def sid_text(sid):
-        value = w.LPWSTR()
-        if not sid or not adv.IsValidSid(sid) or not adv.ConvertSidToStringSidW(sid, c.byref(value)):
-            raise _EnrollmentHold("CHROME_CONFIG_ANCESTOR_ACL_UNPROVEN")
-        try:
-            return value.value
-        finally:
-            kernel.LocalFree(c.cast(value, ptr))
-
-    owner, acl, descriptor = ptr(), ptr(), ptr()
-    try:
-        info = (w.DWORD * 3)()
-        if (adv.GetNamedSecurityInfoW(str(path), 1, 5, c.byref(owner), None,
-                                     c.byref(acl), None, c.byref(descriptor))
-                or not acl or not adv.GetAclInformation(acl, info, c.sizeof(info), 2)
-                or not 1 <= info[0] <= 128):
-            raise _EnrollmentHold("CHROME_CONFIG_ANCESTOR_ACL_UNPROVEN")
-        aces = []
-        for index in range(info[0]):
-            ace = ptr()
-            if not adv.GetAce(acl, index, c.byref(ace)):
-                raise _EnrollmentHold("CHROME_CONFIG_ANCESTOR_ACL_UNPROVEN")
-            header = c.string_at(ace, 4)
-            kind, flags = header[:2]
-            size = int.from_bytes(header[2:], "little")
-            if kind not in (0, 1) or flags & ~0x1F or size < 16:
-                raise _EnrollmentHold("CHROME_CONFIG_ANCESTOR_ACL_UNPROVEN")
-            sid = ptr(ace.value + 8)
-            if not adv.IsValidSid(sid) or adv.GetLengthSid(sid) != size - 8:
-                raise _EnrollmentHold("CHROME_CONFIG_ANCESTOR_ACL_UNPROVEN")
-            aces.append((kind, flags, w.DWORD.from_address(ace.value + 4).value, sid_text(sid)))
-        return sid_text(owner), aces
-    finally:
-        if descriptor:
-            kernel.LocalFree(descriptor)
-
-
-def _check_shared_9444_root(root: Path, sid: str) -> None:
-    """Prove shared-root and parent custody while the config ancestors are pinned."""
-    # Only read/traverse rights (including generic RX) are harmless here.
-    read_traverse = 0xA01200A9
-    # System-owned ancestors such as the drive and Users directory can allow
-    # creating subdirectories. That right cannot replace an existing child.
-    add_subdirectory = 0x00000004
-    for path in (*reversed(root.parents), root):
-        at_root = path == root
-        try:
-            owner, aces = _windows_ancestor_acl(path)
-        except _EnrollmentHold:
-            raise
-        except (AttributeError, OSError, ValueError):
-            raise _EnrollmentHold("CHROME_CONFIG_ANCESTOR_ACL_UNPROVEN") from None
-        trusted = {sid, "S-1-5-18", "S-1-5-32-544"} if at_root else {sid, *_WINDOWS_INSTALL_OWNERS}
-        if owner not in ({sid} if at_root else trusted):
-            raise _EnrollmentHold("CHROME_CONFIG_ANCESTOR_OWNER_UNPROVEN")
-        if at_root and not any(kind == 0 and not flags & 0x08 and mask and trustee == sid
-                               for kind, flags, mask, trustee in aces):
-            raise _EnrollmentHold("CHROME_CONFIG_ANCESTOR_ACL_UNPROVEN")
-        safe_mask = read_traverse
-        if not at_root and owner in _WINDOWS_INSTALL_OWNERS:
-            safe_mask |= add_subdirectory
-        for kind, flags, mask, trustee in aces:
-            if kind == 1 or (not at_root and flags & 0x08):  # Deny or inherit-only above root.
-                continue
-            if trustee not in trusted and trustee != "S-1-3-4" and mask & ~safe_mask:
-                raise _EnrollmentHold("CHROME_CONFIG_ANCESTOR_MUTATION_ALLOWED")
-
-
-def _read_9444_config(config: Path, local: Path, checkout: Path, sid: str, *,
-                      shared_root: bool = False) -> ChromeEnvironment:
-    """Validate existing private inputs without enrolling or changing launch policy."""
+def _read_9444_config(config: Path, local: Path, checkout: Path, sid: str) -> ChromeEnvironment:
+    """Validate existing private inputs for the strict D5 lifecycle."""
     root = local / "AI-Commerce"
     from .local_completion_handoff import _private_identity
-    if shared_root:
-        value = _read_pinned_legacy_json(config, local, checkout, sid, shared_root=True)
-        env = _environment_from_value(value, config, checkout, local_app_data=local)
-    else:
-        for path, check in ((root, _SupervisorConfigCheck.CONFIG_ROOT_CUSTODY),
-                            (config.parent, _SupervisorConfigCheck.CONFIG_PARENT_CUSTODY),
-                            (config, _SupervisorConfigCheck.CONFIG_FILE_CUSTODY)):
-            with _supervisor_config_check(check):
-                if not _no_links(path) or _private_identity(path) != sid:
-                    raise _EnrollmentHold("CONFIG_UNTRUSTED")
-        env = load_environment(config, checkout, local_app_data=local)
+    for path, check in ((root, _SupervisorConfigCheck.CONFIG_ROOT_CUSTODY),
+                        (config.parent, _SupervisorConfigCheck.CONFIG_PARENT_CUSTODY),
+                        (config, _SupervisorConfigCheck.CONFIG_FILE_CUSTODY)):
+        with _supervisor_config_check(check):
+            if not _no_links(path) or _private_identity(path) != sid:
+                raise _EnrollmentHold("CONFIG_UNTRUSTED")
+    env = load_environment(config, checkout, local_app_data=local)
     with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_SCHEMA):
         if env.port != 9444 or env.endpoint != "http://127.0.0.1:9444":
             raise _EnrollmentHold("CONFIG_UNTRUSTED")
@@ -1679,19 +1579,16 @@ def _read_9444_config(config: Path, local: Path, checkout: Path, sid: str, *,
 
 
 def _read_pinned_legacy_json(config: Path, local: Path, checkout: Path, sid: str, *,
-                             shared_root: bool = False) -> object:
-    """Bounded, pinned, non-reparse read of one existing 9444 config file.
+                             require_private_parent: bool = False) -> object:
+    """Read a bounded JSON file under pinned, non-reparse ancestors.
 
-    Skips broad AI-Commerce root and intermediate parent strict ACL checks for
-    protected legacy health-only observation only. Enforces strict actual file
-    SID/ACL custody before and after reading while ancestor handles are pinned.
-    An operational read additionally proves shared-root and private-parent custody.
+    Always prove exact file custody. Operational adoption also requires a
+    private immediate parent, including when the config is directly in the root.
     """
     from . import _private_state
     from .local_completion_handoff import _private_identity
 
     real_os = _private_state.os
-    root = local / "AI-Commerce"
     with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_PATH):
         if (not all(p.is_absolute() for p in (config, local, checkout))
                 or ".." in config.parts or config.drive.startswith("\\\\")
@@ -1714,22 +1611,25 @@ def _read_pinned_legacy_json(config: Path, local: Path, checkout: Path, sid: str
             raise AcquisitionBlocked("CONFIG_IN_REPOSITORY")
         if not _inside(resolved_config, owned_config_root):
             raise AcquisitionBlocked("CONFIG_NOT_OPERATOR_OWNED")
-        if shared_root and (root not in config.parent.parents or not _no_links(root)):
-            raise AcquisitionBlocked("CONFIG_PATH_INVALID")
 
-    def check_custody():
-        if shared_root:
-            with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_ROOT_CUSTODY):
-                _check_shared_9444_root(root, sid)
+    def check_custody(fd=None):
+        if require_private_parent:
             with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_PARENT_CUSTODY):
-                for path in config.parents:
-                    if path == root:
-                        break
-                    if not _no_links(path) or _private_identity(path) != sid:
-                        raise _EnrollmentHold("CONFIG_UNTRUSTED")
+                if not _no_links(config.parent) or _private_identity(config.parent) != sid:
+                    raise _EnrollmentHold("CONFIG_UNTRUSTED")
         with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_FILE_CUSTODY):
-            if not _no_links(config) or _private_identity(config) != sid:
+            if (not _no_links(config) or _private_identity(config) != sid
+                    or (fd is not None and real_os.name != "nt"
+                        and not real_os.path.samestat(real_os.fstat(fd), config.lstat()))):
                 raise _EnrollmentHold("CONFIG_UNTRUSTED")
+
+    def unique(pairs):
+        obj = {}
+        for key, value in pairs:
+            if key in obj:
+                raise AcquisitionBlocked("CONFIG_DUPLICATE_KEY")
+            obj[key] = value
+        return obj
 
     handles = []
     try:
@@ -1749,7 +1649,7 @@ def _read_pinned_legacy_json(config: Path, local: Path, checkout: Path, sid: str
                             dir_fd=directory_fd)
                         handles.append(directory_fd)
             except (OSError, _private_state.PrivateStateError):
-                if shared_root:
+                if require_private_parent:
                     raise _EnrollmentHold("CHROME_CONFIG_ANCESTOR_PIN_UNPROVEN") from None
                 raise
         check_custody()
@@ -1757,36 +1657,42 @@ def _read_pinned_legacy_json(config: Path, local: Path, checkout: Path, sid: str
             try:
                 txn = _private_state._Transaction(SimpleNamespace(path=config), directory_fd)
                 fd = txn.open(config.name, real_os.O_RDONLY)
-                with real_os.fdopen(fd, "rb") as stream:
-                    raw = stream.read(8193)
             except (OSError, _private_state.PrivateStateError):
                 raise AcquisitionBlocked("CONFIG_INVALID") from None
-            if len(raw) > 8192:
-                raise AcquisitionBlocked("CONFIG_INVALID")
-
-        def unique(pairs):
-            obj = {}
-            for key, value in pairs:
-                if key in obj:
-                    raise AcquisitionBlocked("CONFIG_DUPLICATE_KEY")
-                obj[key] = value
-            return obj
-
-        with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_JSON):
-            try:
-                value = json.loads(raw.decode("utf-8-sig"), object_pairs_hook=unique)
-            except AcquisitionBlocked:
-                raise
-            except (ValueError, UnicodeError, RecursionError):
-                raise AcquisitionBlocked("CONFIG_INVALID") from None
-        check_custody()
-        return value
+        with real_os.fdopen(fd, "rb") as stream:
+            with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_FILE_READ):
+                try:
+                    raw = stream.read(8193)
+                except OSError:
+                    raise AcquisitionBlocked("CONFIG_INVALID") from None
+                if len(raw) > 8192:
+                    raise AcquisitionBlocked("CONFIG_INVALID")
+            with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_JSON):
+                try:
+                    value = json.loads(raw.decode("utf-8-sig"), object_pairs_hook=unique)
+                except AcquisitionBlocked:
+                    raise
+                except (ValueError, UnicodeError, RecursionError):
+                    raise AcquisitionBlocked("CONFIG_INVALID") from None
+            check_custody(fd)
+            return value
     finally:
         for handle in reversed(handles):
             if real_os.name == "nt":
                 handle[1](handle[0])
             else:
                 real_os.close(handle)
+
+
+def _read_supervised_9444_config(config: Path, local: Path, checkout: Path,
+                                 sid: str) -> tuple[ChromeEnvironment, dict]:
+    """Read the existing Chrome config for supervised local registration and delivery."""
+    value = _read_pinned_legacy_json(config, local, checkout, sid, require_private_parent=True)
+    env = _environment_from_value(value, config, checkout, local_app_data=local)
+    with _supervisor_config_check(_SupervisorConfigCheck.CONFIG_SCHEMA):
+        if env.port != 9444 or env.endpoint != "http://127.0.0.1:9444":
+            raise _EnrollmentHold("CONFIG_UNTRUSTED")
+    return env, value
 
 
 def _validate_legacy_health_9444_value(value, config: Path, local: Path, checkout: Path,
