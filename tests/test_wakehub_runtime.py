@@ -1282,9 +1282,11 @@ def native_ingress(ingress, monkeypatch):
     monkeypatch.setattr(acq, "_enrollment_operator",
                         lambda: (r.Path(os.environ["LOCALAPPDATA"]), 7, sid))
     # These three operations require actual Windows custody/signature evidence.
-    monkeypatch.setattr(acq, "_read_9444_config", lambda *a: env)
+    i["chrome_custody"] = {name: getattr(acq, name) for name in (
+        "_read_9444_config", "_require_operator_control", "_check_enrollment_custody")}
+    monkeypatch.setattr(acq, "_read_9444_config", lambda *a, **kw: env)
     monkeypatch.setattr(acq, "_require_operator_control", lambda *a: None)
-    monkeypatch.setattr(acq, "_check_enrollment_custody", lambda *a: None)
+    monkeypatch.setattr(acq, "_check_enrollment_custody", lambda *a, **kw: None)
     monkeypatch.setattr(acq, "_commandline_argv", json.loads)
 
     def query(port):
@@ -1343,7 +1345,7 @@ def test_r2_clean_absence_never_launches_even_with_launch_config(native_ingress,
     i["chrome"]["allow_launch"] = allow_launch
     i["save"](r.Path(i["config"]["chrome_config"]), i["chrome"])
     env = replace(i["environment"], allow_launch=allow_launch)
-    monkeypatch.setattr(r.chrome_acquisition, "_read_9444_config", lambda *a: env)
+    monkeypatch.setattr(r.chrome_acquisition, "_read_9444_config", lambda *a, **kw: env)
     result = r.run_read_only(i["config_path"], i["root"])
     assert result == r.Result("HOLD", "CHROME_NOT_RUNNING_NATIVE_LAUNCH_CAPABILITY_REQUIRED",
                               "GITHUB_AUTHENTICATED")
@@ -1404,12 +1406,12 @@ def test_r2_rejects_native_identity_failures_before_browser_read(native_ingress,
 def test_r2_owner_dependencies_return_typed_holds(native_ingress, monkeypatch, fault, code):
     i = native_ingress
 
-    def blocked(*args):
+    def blocked(*args, **kwargs):
         raise r.chrome_acquisition.AcquisitionBlocked(code)
 
     if fault == "config":
         monkeypatch.setattr(r.chrome_acquisition, "_read_9444_config",
-                            lambda *a: replace(i["environment"], profile_directory="Other"))
+                            lambda *a, **kw: replace(i["environment"], profile_directory="Other"))
     elif fault == "profile_lock":
         (i["environment"].user_data_dir / i["environment"].profile_directory /
          r.chrome_acquisition._MARKERS[0]).touch()
@@ -1472,7 +1474,7 @@ def test_r2_no_preload_capability_even_with_launch_enabled_config(native_ingress
     i["chrome"]["allow_launch"] = True
     i["save"](r.Path(i["config"]["chrome_config"]), i["chrome"])
     env = replace(i["environment"], allow_launch=True)
-    monkeypatch.setattr(r.chrome_acquisition, "_read_9444_config", lambda *a: env)
+    monkeypatch.setattr(r.chrome_acquisition, "_read_9444_config", lambda *a, **kw: env)
     # The protocol mock checks the original fixture environment by design.
     monkeypatch.setattr(r.chrome_acquisition, "_probe_cdp", lambda *a: None)
     assert r.run_read_only(i["config_path"], i["root"]).code == (
@@ -3735,8 +3737,8 @@ def test_flat02_rejects_stable_owner_drift_even_when_absent(supervisor, monkeypa
         s.i["chrome"]["profile_directory"] = "Other"
         s.i["save"](env.config_path, s.i["chrome"])
         acq = r.chrome_acquisition
-        monkeypatch.setattr(acq, "_read_9444_config",
-                            lambda config, local, root, sid: acq.load_environment(config, root, local_app_data=local))
+        monkeypatch.setattr(acq, "_read_9444_config", lambda config, local, root, sid, **kw:
+                            acq.load_environment(config, root, local_app_data=local))
     assert s.run().code == "CHROME_OWNER_SCOPE_CHANGED"
     assert chrome_record(s) == current and s.requests == []
 
@@ -4607,6 +4609,120 @@ def flat04(supervisor, monkeypatch):
     return SimpleNamespace(s=s, i=i, issue=issue, sources=sources, browser=browser, context=context,
                            exact=exact, unrelated=unrelated, state=state, origin=origin,
                            prepare=prepare, observe=observe, enroll=enroll)
+
+
+@pytest.fixture
+def shared_root_chat(flat04, monkeypatch):
+    from ai_commerce.remote import local_completion_handoff as handoff
+
+    f, acq = flat04, r.chrome_acquisition
+    local, _, sid = f.s.owner()
+    principal = r._private_identity(f.i["config_path"])
+    root = local / "AI-Commerce"
+    path = root / "D5-Isolated-9444-Trial" / "config.json"
+    path.parent.mkdir()
+    f.i["save"](path, f.i["chrome"])
+    (root / "chrome.json").unlink()
+    f.i["config"]["chrome_config"] = str(path)
+    f.i["save"](f.i["config_path"], f.i["config"])
+    env = replace(f.i["environment"], config_path=path)
+    f.custody = SimpleNamespace(mask=0x1200A9, root_owner=sid, invalid_private=None, acl_readable=True)
+    f.shared_root, f.chrome_path, f.shared_env = root, path, env
+    users = "S-1-5-32-545"
+
+    def acl(item):
+        if item == root:
+            if not f.custody.acl_readable:
+                raise OSError("fixture native ACL read failed")
+            return f.custody.root_owner, [(0, 0, 0x1F01FF, sid), (0, 0, f.custody.mask, users)]
+        return sid, [(0, 0, 0x1F01FF, sid)]
+
+    def identity(item, expected):
+        aces = [("allow", expected)]
+        if item in (root, f.custody.invalid_private):
+            aces.append(("allow", users))
+        handoff._check_windows_acl(expected, aces, expected)
+        return expected
+
+    monkeypatch.setattr(handoff, "_private_identity", lambda item: identity(item, sid))
+    monkeypatch.setattr(r, "_private_identity", lambda item: identity(item, principal))
+    monkeypatch.setattr(acq, "_windows_ancestor_acl", acl)
+    for name, check in f.i["chrome_custody"].items():
+        monkeypatch.setattr(acq, name, check)
+
+    def probe(current):
+        assert current == env
+
+    monkeypatch.setattr(acq, "_probe_cdp", probe)
+    return f
+
+
+def test_exact_chat_registration_and_enrolled_tick_accept_read_only_shared_root(shared_root_chat):
+    f = shared_root_chat
+    prepared = f.enroll()
+    assert f.origin()["phase"] == "ENROLLED"
+    assert f.origin()["registration_id"] == prepared.registration_id
+    assert f.s.run(2).code == "EXACT_CHAT_REUSED"
+    assert f.s.requests == [] and f.state.new_pages == 0
+    assert f.s.run(2).replayed
+
+    # Revalidate custody during later normal enrolled consumption.
+    f.custody.mask |= 0x40  # FILE_DELETE_CHILD
+    attachments = f.state.attachments
+    assert f.s.run().chrome_health == "CHROME_CONFIG_ANCESTOR_MUTATION_ALLOWED"
+    assert f.state.attachments == attachments and f.origin()["phase"] == "ENROLLED"
+
+
+@pytest.mark.parametrize("fault, code", [
+    ("root_write", "CHROME_CONFIG_ANCESTOR_MUTATION_ALLOWED"),
+    ("root_owner", "CHROME_CONFIG_ANCESTOR_OWNER_UNPROVEN"),
+    ("root_acl_unreadable", "CHROME_CONFIG_ANCESTOR_ACL_UNPROVEN"),
+    ("root_reparse", "CONFIG_PATH_INVALID"),
+    ("config", "HANDOFF_PERMISSIONS_INVALID"),
+    ("config_parent", "HANDOFF_PERMISSIONS_INVALID"),
+    ("profile", "OPERATOR_OWNERSHIP_UNPROVEN"),
+    ("journal", "HANDOFF_PERMISSIONS_INVALID"),
+])
+def test_shared_root_chat_registration_refuses_unsafe_custody_before_marker(shared_root_chat, monkeypatch,
+                                                                          fault, code):
+    f, acq = shared_root_chat, r.chrome_acquisition
+    if fault == "root_write":
+        f.custody.mask |= 0x04  # FILE_ADD_SUBDIRECTORY
+    elif fault == "root_owner":
+        f.custody.root_owner = "S-1-5-18"
+    elif fault == "root_acl_unreadable":
+        f.custody.acl_readable = False
+    elif fault == "root_reparse":
+        no_links = acq._no_links
+        monkeypatch.setattr(acq, "_no_links", lambda path:
+                            f.shared_root not in (path, *path.parents) and no_links(path))
+    else:
+        if fault == "journal":
+            with r.Journal(f.s.path, f.i["root"]).locked(f.i["registration"]):
+                pass
+        f.custody.invalid_private = {"config": f.chrome_path, "config_parent": f.chrome_path.parent,
+                                     "profile": f.shared_env.user_data_dir / f.shared_env.profile_directory,
+                                     "journal": f.s.path}[fault]
+    result = r.register_local_chat(f.i["config_path"], f.i["root"])
+    assert (result.status, result.code) == ("HOLD", code)
+    assert f.state.attachments == 0 and f.s.requests == []
+    if f.s.path.exists():
+        with sqlite3.connect(f.s.path) as db:
+            assert db.execute("SELECT name FROM sqlite_master WHERE name='local_origin'").fetchall() == []
+
+
+def test_shared_root_owner_drift_during_exact_chat_read_prevents_marker(shared_root_chat):
+    f = shared_root_chat
+
+    def change_owner():
+        f.custody.root_owner = "S-1-5-18"
+
+    f.state.before_attach = change_owner
+    result = r.register_local_chat(f.i["config_path"], f.i["root"])
+    assert (result.status, result.code) == ("HOLD", "CHROME_CONFIG_ANCESTOR_OWNER_UNPROVEN")
+    assert f.state.attachments == 1
+    with sqlite3.connect(f.s.path) as db:
+        assert db.execute("SELECT name FROM sqlite_master WHERE name='local_origin'").fetchall() == []
 
 
 def test_legacy_health_transition_requires_exact_enrollment_and_preserves_existing_journal(flat04, monkeypatch):
@@ -6411,6 +6527,10 @@ def test_protected_legacy_health_only_liveness_counterexamples_and_recovery(obse
         ("PROCESS_IDENTITY_UNKNOWN", "PROCESS_IDENTITY_UNKNOWN"),
         ("POWERSHELL_UNAVAILABLE", "POWERSHELL_UNAVAILABLE"),
         ("CDP_NOT_LOOPBACK_OWNED", "CDP_NOT_LOOPBACK_OWNED"),
+        ("CHROME_CONFIG_ANCESTOR_OWNER_UNPROVEN", "CHROME_OWNER_UNPROVEN"),
+        ("CHROME_CONFIG_ANCESTOR_ACL_UNPROVEN", "CHROME_OWNER_UNPROVEN"),
+        ("CHROME_CONFIG_ANCESTOR_MUTATION_ALLOWED", "CHROME_OWNER_UNPROVEN"),
+        ("CHROME_CONFIG_ANCESTOR_PIN_UNPROVEN", "CHROME_OWNER_UNPROVEN"),
         ("UNENUMERATED_SYNTHETIC_CODE", "FIRST_HEALTH_HOLD"),
     ):
         events.clear()
