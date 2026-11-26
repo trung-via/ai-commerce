@@ -887,7 +887,7 @@ class NativeChrome9444:
         self.adopted_config = adopted_config
         self.adapter = None if legacy_health_only else LocalChromeDoorbellAdapter(allow_submit=False)
 
-    def _owner_snapshot(self) -> tuple:
+    def _owner_snapshot(self, *, require_launch_identity: bool = False) -> tuple:
         env = self.environment
         _require(type(env) is chrome_acquisition.ChromeEnvironment
                  and env.port == 9444 and env.endpoint == "http://127.0.0.1:9444",
@@ -934,14 +934,22 @@ class NativeChrome9444:
             current = chrome_acquisition._read_9444_config(env.config_path, local, self.repository_root, sid)
             _require(current == env, "CHROME_ENROLLMENT_DRIFT")
         inventory = chrome_acquisition._query_windows(9444)
-        # Evaluate first so a live profile without CDP remains a distinct HOLD,
-        # rather than treating a missing listener or HTTP failure as clean OFF.
-        state, pid = chrome_acquisition.evaluate(
-            env, inventory, session_id=session, expected_sid=sid,
-            parse=chrome_acquisition._commandline_argv)
-        lifecycle_state, identity = chrome_acquisition._lifecycle_inventory(
-            env, inventory, session=session, sid=sid)
-        _require(lifecycle_state == state, "CHROME_OWNER_UNPROVEN")
+        if self.adopted_config is not None:
+            state, identity = chrome_acquisition._observe_9444_inventory(
+                env, inventory, session=session, sid=sid)
+            if state == "ABSENT" or require_launch_identity:
+                # Demand-start and request reconciliation require strict lifecycle proof.
+                strict_state, identity = chrome_acquisition._lifecycle_inventory(
+                    env, inventory, session=session, sid=sid)
+                _require(strict_state == state, "CHROME_OWNER_UNPROVEN")
+        else:
+            # Keep the exact launch command and full lifecycle checks for D5-style ownership.
+            state, _ = chrome_acquisition.evaluate(
+                env, inventory, session_id=session, expected_sid=sid,
+                parse=chrome_acquisition._commandline_argv)
+            strict_state, identity = chrome_acquisition._lifecycle_inventory(
+                env, inventory, session=session, sid=sid)
+            _require(strict_state == state, "CHROME_OWNER_UNPROVEN")
         if self.adopted_config is None:
             chrome_acquisition._require_operator_control(env)
         chrome_acquisition._check_enrollment_custody(
@@ -964,12 +972,12 @@ class NativeChrome9444:
             _require(current == env and config == self.adopted_config, "CHROME_ENROLLMENT_DRIFT")
         if self.supervised:
             _require(_supervised_desktop(session, sid) == desktop, "CHROME_OBSERVATION_CHANGED")
-            # Inventory checks still reject a foreign listener or profile
-            # claimant. Unrelated processes cannot invalidate a stable target.
+            # Keep the same target-only receipt for adoption and strict proof.
+            pid = identity[0][0][2] if state == "OWNED" else None
             identity = identity[0], tuple(row for row in identity[1] if row[0] == pid)
         return state, (local, session, sid, env, identity, desktop)
 
-    def lifecycle_snapshot(self) -> tuple:
+    def lifecycle_snapshot(self, *, require_launch_identity: bool = False) -> tuple:
         """Read the native launch marker around two independent owner observations."""
         if self.legacy_health_only:
             # Protected legacy health-only observation does not depend on the
@@ -977,9 +985,9 @@ class NativeChrome9444:
             observed = self._owner_snapshot()
             _require(self._owner_snapshot() == observed, "CHROME_OBSERVATION_CHANGED")
             return (*observed, False)
-        observed = self._owner_snapshot()
+        observed = self._owner_snapshot(require_launch_identity=require_launch_identity)
         pending = chrome_acquisition._clean_launch_pending()
-        _require(self._owner_snapshot() == observed
+        _require(self._owner_snapshot(require_launch_identity=require_launch_identity) == observed
                  and chrome_acquisition._clean_launch_pending() == pending,
                  "CHROME_OBSERVATION_CHANGED")
         return (*observed, pending)
@@ -2206,6 +2214,7 @@ class Runner:
         # Health has observed the current Chrome process. The old process and
         # document commitments remain historical evidence in the reservation.
         process = data["chrome"]["process"]
+        initial = None
         excluded_refs = set(scope["prior_refs"])
         for row in data["events"].values():
             for field in ("user_turn_ref", "user_turn_id"):
@@ -2214,6 +2223,7 @@ class Runner:
                     excluded_refs.add(ref)
 
         def revalidate() -> None:
+            nonlocal initial
             _require(grant.get("expires_ms", 2**63 - 1) > time.time_ns() // 1_000_000,
                      "LOCAL_UI_DELIVERY_GRANT_EXPIRED")
             _require(data["chrome"]["launch"] is None and not chrome_acquisition._clean_launch_pending(),
@@ -2221,6 +2231,9 @@ class Runner:
             current = chrome._route_snapshot(txn, origin)
             _require(process is not None and _owned_chrome_process(current[4], current[5])[0] == process,
                      "CHROME_OBSERVATION_CHANGED")
+            if initial is None:
+                initial = current
+            _require(current == initial, "CHROME_OBSERVATION_CHANGED")
             # The exact v2 owner opt-in and current source route permission
             # gate the read. The EF02 deliver_wake operation is only for Send.
             self._authorize_local_source(event)
@@ -3497,8 +3510,10 @@ class _SupervisorChrome:
                     task = _ready_demand_task(owner, *_demand_target(owner, env))
                 except (OSError, ValueError):
                     task = None
-                _require(self.sender.lifecycle_snapshot() == snapshot, "CHROME_OBSERVATION_CHANGED")
-                if task == request["task"]:
+                task_matches = task == request["task"]
+                _require(self.sender.lifecycle_snapshot(require_launch_identity=task_matches) == snapshot,
+                         "CHROME_OBSERVATION_CHANGED")
+                if task_matches:
                     # RunEx acknowledged the request, the exact task is idle,
                     # and the verified current browser and launch lane are usable.
                     # The task does not publish a causal per-request STARTED receipt.
@@ -3516,7 +3531,8 @@ class _SupervisorChrome:
         return None
 
     def _acquire_chrome(self, txn, saved: dict, snapshot: tuple, start_after: float) -> str:
-        _, (local, session, sid, env, _, desktop), _ = snapshot
+        state, (local, session, sid, env, _, desktop), _ = snapshot
+        _require(state == "ABSENT", "CHROME_OWNER_UNPROVEN")
         owner = (local, session, sid)
         runtime = self.runtime
         if runtime.chrome_lifecycle == "paused":

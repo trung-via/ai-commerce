@@ -4692,6 +4692,99 @@ def test_exact_chat_registration_and_enrolled_tick_ignore_common_ancestor_acls(s
     assert f.state.attachments == attachments and f.origin()["phase"] == "ENROLLED"
 
 
+def test_existing_chat_adopts_owned_9444_across_ordinary_chrome_churn(shared_root_chat, monkeypatch):
+    f = shared_root_chat
+    acq = r.chrome_acquisition
+    env = f.shared_env
+    f.i["process"]["CommandLine"] = json.dumps(env.command() + ["--start-maximized", "--disable-background-mode"])
+    ordinary = {"ProcessId": 401, "CommandLine": json.dumps([str(env.executable)])}
+    helpers = [
+        dict(f.i["process"], ProcessId=pid, CommandLine=json.dumps([
+            str(env.executable), f"--user-data-dir={env.user_data_dir}", f"--type={kind}",
+        ]))
+        for pid, kind in ((501, "crashpad-handler"), (502, "future-helper"))
+    ]
+    f.i["inventory"]["processes"].extend([ordinary, *helpers])
+    query = acq._query_windows
+
+    def changing_inventory(port):
+        ordinary["ProcessId"] += 1
+        return query(port)
+
+    def strict_inventory(*args, **kwargs):
+        pytest.fail("A running adopted browser must not go through strict lifecycle inventory")
+
+    monkeypatch.setattr(acq, "_query_windows", changing_inventory)
+    monkeypatch.setattr(acq, "_lifecycle_inventory", strict_inventory)
+    prepared = f.prepare()
+    f.exact.turns.append((prepared.marker, "user"))
+    assert f.observe(prepared).code == "LOCAL_CHAT_REGISTERED_UI_EVIDENCE"
+    result = f.s.run(2)
+    assert (result.chrome_health, result.code) == ("CHROME_OWNED", "EXACT_CHAT_REUSED")
+    assert f.s.run(2).replayed
+    assert f.origin()["phase"] == "ENROLLED" and f.origin()["navigation"] is None
+    assert f.s.requests == [] and f.state.new_pages == 0 and f.state.navigations == []
+
+
+@pytest.mark.parametrize("drift", ["pid", "creation", "logon"])
+def test_adopted_9444_target_drift_during_marker_read_holds(shared_root_chat, drift):
+    f = shared_root_chat
+    prepared = f.prepare()
+    f.exact.turns.append((prepared.marker, "user"))
+
+    def change_target():
+        if drift == "pid":
+            f.i["process"]["ProcessId"] += 1
+            f.i["inventory"]["listeners"][0]["OwningProcess"] += 1
+        elif drift == "creation":
+            f.i["process"]["CreationDate"] = "2026-11-17T00:01:00Z"
+        else:
+            f.s.slot.logon += 1
+
+    f.state.before_attach = change_target
+    result = f.observe(prepared)
+    assert (result.status, result.code) == ("HOLD", "CHROME_OBSERVATION_CHANGED")
+    assert f.origin()["phase"] == "PREPARED"
+    assert f.s.requests == [] and f.state.new_pages == 0
+
+
+@pytest.mark.parametrize("malformed", [False, True])
+def test_adopted_9444_demand_start_requires_strict_absence(flat04, malformed):
+    f = flat04
+    f.s.set_policy()
+    f.s.set_owned(False)
+    if malformed:
+        f.i["inventory"]["listeners"] = None
+    else:
+        f.i["inventory"]["processes"] = [dict(
+            f.i["process"], CommandLine=json.dumps([str(f.i["environment"].executable)]),
+        )]
+    result = f.s.run()
+    assert result.chrome_health == ("WINDOWS_PROBE_INVALID" if malformed else "PROCESS_IDENTITY_UNKNOWN")
+    assert f.s.requests == [] and f.state.attachments == 0
+
+
+def test_adopted_9444_cannot_reconcile_demand_request_with_extra_flags(flat04):
+    f = flat04
+    f.s.set_policy()
+    runtime = r._read_runtime_config(f.i["config_path"], f.i["root"])
+    chrome = r._compose_supervisor_chrome(runtime, lambda: False)
+    owner = f.s.owner()
+    env = chrome.sender.environment
+    task = r._ready_demand_task(owner, *r._demand_target(owner, env))
+    requested = {"scope": r._chrome_scope(owner[0], owner[2], env), "process": None, "launch": "REQUESTED",
+                 "request": {"desktop": r._supervised_desktop(*owner[1:]), "task": task,
+                             "after": r.chrome_acquisition._creation_ticks("2026-11-16T00:00:00Z")}}
+    with runtime.journal.locked(runtime.registration) as (txn, _):
+        txn.write_chrome(requested, migrate=True)
+    f.i["process"]["CommandLine"] = json.dumps(env.command() + ["--start-maximized"])
+    assert chrome.run_once(start_after=0).code == "PROCESS_IDENTITY_UNKNOWN"
+    assert chrome_record(f.s) == requested
+    f.i["process"]["CommandLine"] = json.dumps(env.command())
+    assert chrome.run_once(start_after=0).code == "CHROME_OWNED"
+    assert chrome_record(f.s)["launch"] is None and f.s.requests == []
+
+
 def test_protected_supervisor_resolves_enrolled_chat_with_common_ancestor_acls(shared_root_chat):
     f = shared_root_chat
     prepared = f.enroll()
