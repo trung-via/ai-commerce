@@ -6661,6 +6661,47 @@ def test_flat05_other_modes_and_legacy_unknown_do_not_send(flat05):
     assert f.rows()[event_id] == legacy and f.ui.clicks == 1
 
 
+@pytest.mark.parametrize("opened_created,wait_result,terminate", [(456, 258, True), (456, 0, False), (789, 258, False)])
+def test_supervisor_upgrade_targets_only_the_verified_process_handle(monkeypatch, opened_created, wait_result, terminate):
+    from unittest.mock import Mock
+
+    kernel = SimpleNamespace(WaitForSingleObject=Mock(return_value=wait_result), TerminateProcess=Mock(return_value=0))
+    handle = object()
+    owner = (r.Path("local"), 7, "S-1-5-21-101-202-303-1001")
+    executable = r.Path("pythonw.exe")
+    order = []
+
+    @contextmanager
+    def open_process(pid, *, for_stop):
+        assert (pid, for_stop) == (123, True)
+        order.append("open")
+        try:
+            yield kernel, handle, opened_created
+        finally:
+            order.append("close")
+
+    def verify(api, target, pid, image, context):
+        assert (api, target, pid, image, context) == (kernel, handle, 123, executable, owner)
+        order.append("verify")
+
+    def stop(target, code):
+        assert (target, code) == (handle, 1)
+        order.append("terminate")
+        return 0  # HostOps requires observed stop regardless of the API return.
+
+    kernel.TerminateProcess.side_effect = stop
+    monkeypatch.setattr(r, "_supervisor_process_handle", open_process)
+    monkeypatch.setattr(r, "_verify_supervisor_process", verify)
+    if opened_created != 456:
+        with pytest.raises(r.RuntimeHold, match="SUPERVISOR_PROCESS_UNVERIFIED"):
+            r._stop_health_only_supervisor(123, 456, executable, owner, lambda: order.append("checkpoint"))
+        assert order == ["open", "close"]
+    else:
+        r._stop_health_only_supervisor(123, 456, executable, owner, lambda: order.append("checkpoint"))
+        assert order == ["open", "verify", "checkpoint", *(["terminate"] if terminate else []), "close"]
+    assert kernel.TerminateProcess.call_count == int(terminate)
+
+
 def test_protected_supervisor_startup_receipt_owner_config_and_first_health_boundaries(observe_only, monkeypatch):
     s = observe_only
     local, session, sid = s.owner()

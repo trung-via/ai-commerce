@@ -4200,12 +4200,10 @@ def _supervisor_active() -> bool:
     return False
 
 
-def _supervisor_process(pid: int, executable: Path, owner: tuple[Path, int, str]) -> int:
-    """Verify the live image, non-elevated token and session, and return creation time."""
+@contextmanager
+def _supervisor_process_handle(pid: int, *, for_stop: bool = False):
     import ctypes as c
     from ctypes import wintypes as w
-
-    from ai_commerce.hostops_v3.security import windows_identity
 
     kernel = c.WinDLL("kernel32", use_last_error=True)
     kernel.OpenProcess.argtypes = [w.DWORD, w.BOOL, w.DWORD]
@@ -4215,27 +4213,73 @@ def _supervisor_process(pid: int, executable: Path, owner: tuple[Path, int, str]
     kernel.WaitForSingleObject.restype = w.DWORD
     kernel.GetProcessTimes.argtypes = [w.HANDLE, *([c.POINTER(w.FILETIME)] * 4)]
     kernel.GetProcessTimes.restype = w.BOOL
+    access = 0x101000 | (1 if for_stop else 0)  # SYNCHRONIZE | QUERY_LIMITED_INFORMATION | optional PROCESS_TERMINATE
+    handle = kernel.OpenProcess(access, False, pid)
+    if not handle:
+        if not for_stop and c.get_last_error() == 87:  # No such process ID.
+            yield None
+            return
+        raise RuntimeHold("SUPERVISOR_PROCESS_UNVERIFIED")
+    try:
+        times = [w.FILETIME() for _ in range(4)]
+        _require(kernel.GetProcessTimes(handle, *(c.byref(t) for t in times)), "SUPERVISOR_PROCESS_UNVERIFIED")
+        created = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+        yield kernel, handle, created
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def _verify_supervisor_process(kernel, handle, pid, executable, owner):
+    import ctypes as c
+    from ctypes import wintypes as w
+
+    from ai_commerce.hostops_v3.security import windows_identity
+
     kernel.QueryFullProcessImageNameW.argtypes = [w.HANDLE, w.DWORD, w.LPWSTR, c.POINTER(w.DWORD)]
     kernel.QueryFullProcessImageNameW.restype = w.BOOL
     kernel.ProcessIdToSessionId.argtypes = [w.DWORD, c.POINTER(w.DWORD)]
     kernel.ProcessIdToSessionId.restype = w.BOOL
 
-    code = "SUPERVISOR_PROCESS_UNVERIFIED"
-    handle = kernel.OpenProcess(0x101000, False, pid)  # SYNCHRONIZE | QUERY_LIMITED_INFORMATION
-    _require(bool(handle), code)
-    try:
-        image = c.create_unicode_buffer(32768)
-        size, session = w.DWORD(len(image)), w.DWORD()
-        times = [w.FILETIME() for _ in range(4)]
-        _require(kernel.QueryFullProcessImageNameW(handle, 0, image, c.byref(size))
-                 and Path(image.value) == executable
-                 and kernel.GetProcessTimes(handle, *(c.byref(t) for t in times))
-                 and kernel.ProcessIdToSessionId(pid, c.byref(session)) and session.value == owner[1]
-                 and windows_identity(handle) == (owner[2], False)
-                 and kernel.WaitForSingleObject(handle, 0) == 258, code)
-        return (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
-    finally:
-        kernel.CloseHandle(handle)
+    image = c.create_unicode_buffer(32768)
+    size, session = w.DWORD(len(image)), w.DWORD()
+    _require(kernel.QueryFullProcessImageNameW(handle, 0, image, c.byref(size))
+             and Path(image.value) == executable
+             and kernel.ProcessIdToSessionId(pid, c.byref(session)) and session.value == owner[1]
+             and windows_identity(handle) == (owner[2], False)
+             and kernel.WaitForSingleObject(handle, 0) == 258, "SUPERVISOR_PROCESS_UNVERIFIED")
+
+
+def _supervisor_process(pid: int, executable: Path, owner: tuple[Path, int, str]) -> int:
+    """Verify the live image, non-elevated token and session, and return creation time."""
+    with _supervisor_process_handle(pid) as process:
+        _require(process is not None, "SUPERVISOR_PROCESS_UNVERIFIED")
+        kernel, handle, created = process
+        _verify_supervisor_process(kernel, handle, pid, executable, owner)
+        return created
+
+
+def _supervisor_process_exited(pid: int, created: int) -> bool:
+    with _supervisor_process_handle(pid) as process:
+        if process is None:
+            return True
+        kernel, handle, opened_created = process
+        return opened_created != created or kernel.WaitForSingleObject(handle, 0) == 0
+
+
+def _stop_health_only_supervisor(pid, created, executable, owner, before_stop):
+    from ctypes import wintypes as w
+
+    with _supervisor_process_handle(pid, for_stop=True) as (kernel, handle, opened_created):
+        _require(opened_created == created, "SUPERVISOR_PROCESS_UNVERIFIED")
+        _verify_supervisor_process(kernel, handle, pid, executable, owner)
+        kernel.TerminateProcess.argtypes = [w.HANDLE, w.UINT]
+        kernel.TerminateProcess.restype = w.BOOL
+        before_stop()
+        # Holding the verified handle avoids PID reuse. TerminateProcess targets
+        # one process object, with no task-wide, job, or descendant termination.
+        if kernel.WaitForSingleObject(handle, 0) == 258:
+            kernel.TerminateProcess(handle, 1)
+        # Treat the API return as inconclusive. HostOps observes exit and task idleness.
 
 
 def _supervisor_deployment_value(name: str) -> str | None:
@@ -4246,7 +4290,7 @@ def _supervisor_deployment_value(name: str) -> str | None:
             value, kind = winreg.QueryValueEx(key, name)
     except FileNotFoundError:
         return None
-    limit = 4096 if name.startswith("RetiredPending_") else 2048
+    limit = 4096 if name == "UpgradePending" or name.startswith("RetiredPending_") else 2048
     _require(kind == winreg.REG_SZ and 0 < len(value) <= limit, "SUPERVISOR_EVIDENCE_INVALID")
     return value
 
@@ -4264,7 +4308,7 @@ def _store_supervisor_deployment_value(name: str, value: str | None) -> None:
                     raise
         else:
             winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
-        if name in {"StartPending", "Run", "StartupReceipt", _ENROLLMENT_INTENT, _ENROLLMENT_RECEIPT
+        if name in {"StartPending", "Run", "StartupReceipt", "UpgradePending", _ENROLLMENT_INTENT, _ENROLLMENT_RECEIPT
                     } or name.startswith("RetiredPending_"):
             winreg.FlushKey(key)
 
