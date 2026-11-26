@@ -497,14 +497,30 @@ def _trusted_powershells() -> tuple[Path, ...]:
         raise AcquisitionBlocked("POWERSHELL_UNAVAILABLE") from None
 
 
+_read_only_powershell_owner_action: ContextVar[Callable[[Path], Path] | None] = ContextVar(
+    "read_only_powershell_owner_action", default=None,
+)
+
+
+@contextmanager
+def _prefer_installed_powershell():
+    """Select a verified installed PowerShell without consulting the clean 9444 task."""
+    token = _read_only_powershell_owner_action.set(lambda bootstrap: bootstrap)
+    try:
+        yield
+    finally:
+        _read_only_powershell_owner_action.reset(token)
+
+
 def _powershell(*, owner_action: Callable[[Path], Path] | None = None) -> Path:
     """Resolve one verified installation, using the relevant owner action if needed."""
     candidates = _trusted_powershells()
     if len(candidates) == 1:
         return candidates[0]
     try:
+        selector = owner_action or _read_only_powershell_owner_action.get() or _clean_task_powershell
         # Only the fixed, read-only task probe uses the bootstrap image.
-        action = (owner_action or _clean_task_powershell)(candidates[0])
+        action = selector(candidates[0])
         return candidates[candidates.index(action)]
     except (OSError, ValueError, subprocess.TimeoutExpired):
         raise AcquisitionBlocked("POWERSHELL_UNAVAILABLE") from None
@@ -1882,6 +1898,87 @@ class _Lifecycle9444Assessment:
     observation: tuple | None = None
     status: Literal["HOLD"] = "HOLD"
     native_adapter: Literal["BLOCKED_NOT_DEPLOYED"] = "BLOCKED_NOT_DEPLOYED"
+
+
+def _legacy_health_inventory(env: ChromeEnvironment, inventory: dict, *,
+                             session: int, sid: str) -> tuple[str, tuple]:
+    """Read-only 9444 observation for protected legacy health-only monitoring.
+
+    Reuses evaluate() so unrelated ordinary Chrome processes without
+    --user-data-dir do not fail clean absence, while never treating failed,
+    ambiguous, or contradictory inventory as ABSENT or OWNED.
+    """
+    if (type(inventory) is not dict or set(inventory) != {"listeners", "processes"}
+            or any(type(inventory[k]) not in (list, dict) for k in inventory)):
+        raise AcquisitionBlocked("WINDOWS_PROBE_INVALID")
+    listeners = _rows(inventory["listeners"])
+    processes = _rows(inventory["processes"])
+    pids = [p.get("ProcessId") for p in processes]
+    if (len(listeners) > 1 or len(processes) > 256
+            or any(type(pid) is not int or pid <= 0 for pid in pids)
+            or len(set(pids)) != len(pids)):
+        raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
+    for row in listeners:
+        if type(row.get("LocalPort")) is not int or row["LocalPort"] != env.port:
+            raise AcquisitionBlocked("WINDOWS_PROBE_INVALID")
+    state, pid = evaluate(
+        env, inventory, session_id=session, expected_sid=sid, parse=_commandline_argv,
+    )
+    port_claimants: list[int] = []
+    profile_helpers = False
+    for proc in processes:
+        argv = _commandline_argv(proc["CommandLine"])
+        if (not isinstance(argv, list) or not 1 <= len(argv) <= 256
+                or any(not isinstance(a, str) or not a for a in argv)):
+            raise AcquisitionBlocked("PROCESS_IDENTITY_UNKNOWN")
+        type_switches = [a for a in argv if a.lower() == "--type" or a.lower().startswith("--type=")]
+        if type_switches and (len(type_switches) != 1 or not type_switches[0].startswith("--type=")
+                              or not type_switches[0][len("--type="):]):
+            raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
+        child = bool(type_switches)
+        if child:
+            profile_args = [a for a in argv if a.lower() == "--user-data-dir"
+                            or a.lower().startswith("--user-data-dir=")]
+            if profile_args:
+                if len(profile_args) != 1 or not profile_args[0].startswith("--user-data-dir="):
+                    raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
+                path_arg = _switch(argv, "--user-data-dir")
+                if not path_arg:
+                    raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
+                try:
+                    if Path(path_arg).resolve(strict=True) == env.user_data_dir:
+                        profile_helpers = True
+                except OSError:
+                    raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN") from None
+            continue
+        port_switches = [a for a in argv if a.lower() == "--remote-debugging-port"
+                         or a.lower().startswith("--remote-debugging-port=")]
+        if port_switches:
+            port = _switch(argv, "--remote-debugging-port")
+            if (len(port_switches) != 1 or not port_switches[0].startswith("--remote-debugging-port=")
+                    or port is None or re.fullmatch(r"[0-9]{1,5}", port) is None
+                    or not 1 <= int(port) <= 65535):
+                raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
+            if int(port) == env.port:
+                port_claimants.append(proc["ProcessId"])
+    if state == "ABSENT":
+        if profile_helpers:
+            raise AcquisitionBlocked("PROFILE_ALREADY_ACTIVE_NO_CDP")
+        if port_claimants:
+            raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
+        return "ABSENT", ((), ())
+    if state != "OWNED" or pid is None or port_claimants != [pid]:
+        raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
+    owned = next(p for p in processes if p["ProcessId"] == pid)
+    try:
+        if _creation_ticks(owned["CreationDate"]) <= 0:
+            raise ValueError
+    except Exception:
+        raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN") from None
+    listener_tuple = ((listeners[0]["LocalAddress"], listeners[0]["LocalPort"], listeners[0]["OwningProcess"]),)
+    proc_tuple = (tuple(owned.get(k) for k in (
+        "ProcessId", "ExecutablePath", "CommandLine", "SessionId", "OwnerSid", "CreationDate")),)
+    return "OWNED", (listener_tuple, proc_tuple)
 
 
 def _lifecycle_inventory(env: ChromeEnvironment, inventory: dict, *,
