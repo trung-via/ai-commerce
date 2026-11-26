@@ -6099,3 +6099,134 @@ def test_flat05_other_modes_and_legacy_unknown_do_not_send(flat05):
     f.save()
     assert f.s.run().code == "LOCAL_UI_OWNER_AUTHORIZED_TURN_OBSERVED"
     assert f.rows()[event_id] == legacy and f.ui.clicks == 1
+
+
+def test_protected_supervisor_startup_receipt_owner_config_and_first_health_boundaries(observe_only, monkeypatch):
+    s = observe_only
+    local, session, sid = s.owner()
+    desktop = r._supervised_desktop(session, sid)
+    cfg = r.Path(s.i["config"]["chrome_config"])
+    monkeypatch.delenv("AI_COMMERCE_WAKEHUB_CONFIG", raising=False)
+    monkeypatch.setattr(r, "_user_runtime_config", lambda _: None)
+    path, pin = r._resolve_runtime_config(s.i["root"], owner=s.owner(), observe_only=True, protected=True)
+    assert path == cfg
+    deployment = {
+        "source_sha": "a" * 40, "source_digest": "b" * 64, "config_digest": pin,
+        "desktop": desktop, "session": session, "sid": sid, "config": str(path), "nonce": "c" * 32,
+    }
+
+    # 1. Owner _EnrollmentHold is preserved (not collapsed into LOCAL_CONFIG_INVALID) and recorded.
+    events = []
+    with monkeypatch.context() as mp:
+        mp.setattr(r.chrome_acquisition, "_enrollment_operator",
+                   lambda **_: (_ for _ in ()).throw(r.chrome_acquisition._EnrollmentHold("WINDOWS_INTERACTIVE_REQUIRED")))
+        res = r.run_supervisor(path, s.i["root"], max_ticks=1, observe_only=True,
+                               _deployment=deployment, _startup_receipt=lambda st, rsn: events.append((st, rsn)))
+    assert res.code == "WINDOWS_INTERACTIVE_REQUIRED"
+    assert events == [("OWNER_CONFIG", "WINDOWS_INTERACTIVE_REQUIRED")]
+
+    # 2. Config pin drift is recorded at OWNER_CONFIG.
+    events.clear()
+    res = r.run_supervisor(path, s.i["root"], max_ticks=1, observe_only=True,
+                           _deployment={**deployment, "config_digest": "9" * 64},
+                           _startup_receipt=lambda st, rsn: events.append((st, rsn)))
+    assert res.code == "LOCAL_CONFIG_CHANGED"
+    assert events == [("OWNER_CONFIG", "LOCAL_CONFIG_CHANGED")]
+
+    # 3. Active supervisor mutex is recorded at FIRST_HEALTH.
+    events.clear()
+    s.slot.active = True
+    res = r.run_supervisor(path, s.i["root"], max_ticks=1, observe_only=True,
+                           _deployment=deployment, _startup_receipt=lambda st, rsn: events.append((st, rsn)))
+    s.slot.active = False
+    assert res.code == "SUPERVISOR_ACTIVE"
+    assert events == [("FIRST_HEALTH", "SUPERVISOR_ACTIVE")]
+
+    # 4. First health publish works even when LOCALAPPDATA is omitted from os.environ (falls back to native folder).
+    events.clear()
+    stored = {}
+    with monkeypatch.context() as mp:
+        mp.delenv("LOCALAPPDATA", raising=False)
+        mp.setattr(r.chrome_acquisition, "_native_local_app_data", lambda: local)
+        mp.setattr(r, "_supervisor_process", lambda pid, exe, own: 654321)
+        mp.setattr(r, "_supervisor_deployment_value", stored.get)
+        mp.setattr(r, "_store_supervisor_deployment_value", lambda k, v: stored.__setitem__(k, v))
+        res = r.run_supervisor(path, s.i["root"], max_ticks=1, observe_only=True,
+                               _deployment=deployment, _startup_receipt=lambda st, rsn: events.append((st, rsn)))
+    assert res.code == "CHROME_OWNED"
+    assert events == [("FIRST_HEALTH", "HEALTH_PUBLISHED")]
+    assert s.requests == [] and s.ticks == [] and not s.path.exists()
+
+    # 5. Failure while publishing Health is recorded as FIRST_HEALTH/HEALTH_PUBLISH_FAILED.
+    events.clear()
+    with monkeypatch.context() as mp:
+        mp.setattr(r, "_supervisor_process",
+                   lambda pid, exe, own: (_ for _ in ()).throw(r.RuntimeHold("SUPERVISOR_PROCESS_UNVERIFIED")))
+        res = r.run_supervisor(path, s.i["root"], max_ticks=1, observe_only=True,
+                               _deployment=deployment, _startup_receipt=lambda st, rsn: events.append((st, rsn)))
+    assert res.code == "SUPERVISOR_PROCESS_UNVERIFIED"
+    assert events == [("FIRST_HEALTH", "HEALTH_PUBLISH_FAILED")]
+
+
+def test_protected_supervisor_cli_startup_receipt_boundary_offline(observe_only, monkeypatch, capsys):
+    """Exercise canonical CLI main() with _PROTECTED_DEPLOYMENT and _PROTECTED_STARTUP_RECEIPT offline."""
+    from ai_commerce.wakehub_runtime import __main__ as cli
+
+    s = observe_only
+    local, session, sid = s.owner()
+    desktop = r._supervised_desktop(session, sid)
+    cfg = r.Path(s.i["config"]["chrome_config"])
+    monkeypatch.delenv("AI_COMMERCE_WAKEHUB_CONFIG", raising=False)
+    monkeypatch.setattr(r, "_user_runtime_config", lambda _: None)
+    path, pin = r._resolve_runtime_config(s.i["root"], owner=s.owner(), observe_only=True, protected=True)
+    assert path == cfg
+    deployment = {
+        "source_sha": "a" * 40, "source_digest": "b" * 64, "config_digest": pin,
+        "desktop": desktop, "session": session, "sid": sid, "config": str(path), "nonce": "c" * 32,
+    }
+    argv = ["supervise", "--observe-only", "--max-ticks", "1",
+            "--config", str(path), "--repository-root", str(s.i["root"])]
+
+    # 1. Healthy legacy health-only CLI run publishes first health and emits no intake/send/journal effects.
+    events = []
+    stored = {}
+    with monkeypatch.context() as mp:
+        mp.delenv("LOCALAPPDATA", raising=False)
+        mp.setattr(r.chrome_acquisition, "_native_local_app_data", lambda: local)
+        mp.setattr(r, "_supervisor_process", lambda pid, exe, own: 654321)
+        mp.setattr(r, "_supervisor_deployment_value", stored.get)
+        mp.setattr(r, "_store_supervisor_deployment_value", lambda k, v: stored.pop(k, None) if v is None else stored.__setitem__(k, v))
+        mp.setattr(cli, "_PROTECTED_DEPLOYMENT", deployment, raising=False)
+        mp.setattr(cli, "_PROTECTED_STARTUP_RECEIPT", lambda st, rsn: events.append((st, rsn)), raising=False)
+        rc = cli.main(argv)
+    assert rc == 2  # max_ticks=1 HOLD returns 2
+    assert json.loads(capsys.readouterr().out)["code"] == "CHROME_OWNED"
+    assert events == [("FIRST_HEALTH", "HEALTH_PUBLISHED")]
+    assert "Health" not in stored
+    assert s.requests == [] and s.ticks == [] and not s.path.exists()
+
+    # 2. Owner/config boundary failure through CLI reports exact OWNER_CONFIG reason without leaking paths.
+    events.clear()
+    with monkeypatch.context() as mp:
+        mp.setattr(cli, "_PROTECTED_DEPLOYMENT", {**deployment, "config_digest": "9" * 64}, raising=False)
+        mp.setattr(cli, "_PROTECTED_STARTUP_RECEIPT", lambda st, rsn: events.append((st, rsn)), raising=False)
+        rc = cli.main(argv)
+    out = capsys.readouterr().out
+    assert rc == 2
+    assert json.loads(out)["code"] == "LOCAL_CONFIG_CHANGED"
+    assert str(cfg) not in out
+    assert events == [("OWNER_CONFIG", "LOCAL_CONFIG_CHANGED")]
+
+    # 3. Publish failure through CLI reports only FIRST_HEALTH/HEALTH_PUBLISH_FAILED (never overwritten).
+    events.clear()
+    with monkeypatch.context() as mp:
+        mp.setattr(r, "_supervisor_process",
+                   lambda pid, exe, own: (_ for _ in ()).throw(r.RuntimeHold("SUPERVISOR_PROCESS_UNVERIFIED")))
+        mp.setattr(cli, "_PROTECTED_DEPLOYMENT", deployment, raising=False)
+        mp.setattr(cli, "_PROTECTED_STARTUP_RECEIPT", lambda st, rsn: events.append((st, rsn)), raising=False)
+        rc = cli.main(argv)
+    assert rc == 2
+    assert json.loads(capsys.readouterr().out)["code"] == "SUPERVISOR_PROCESS_UNVERIFIED"
+    assert events == [("FIRST_HEALTH", "HEALTH_PUBLISH_FAILED")]
+
+
