@@ -56,6 +56,7 @@ _CLEAN_TASK_RESET = "reset_clean_9444_tasks"
 _CLEAN_TASK_WRITES = (_CLEAN_AUTOSTART, _CLEAN_DEMAND_MIGRATION, _CLEAN_TASK_RESET)
 _SUPERVISOR_DEPLOY = "deploy_wakehub_supervisor"
 _SUPERVISOR_CONFIG_PROBE = "wakehub_supervisor_config_probe"
+_SUPERVISOR_TASK_PROBE = "wakehub_supervisor_task_probe"
 _CLEAN_RUNTIME_PROBE = "clean_9444_runtime_probe"
 _CLEAN_1270_FORENSIC_READ = "clean_9444_1270_forensic_read"
 _A10_READINESS = "a10_codex_native_readiness"
@@ -194,7 +195,7 @@ def parse_event(event, mode):
     params = _dict(request["parameters"])
     operation = request["operation"]
     if mode == "read":
-        if operation in (_A10_READINESS, _CLEAN_1270_FORENSIC_READ, _SUPERVISOR_CONFIG_PROBE):
+        if operation in (_A10_READINESS, _CLEAN_1270_FORENSIC_READ, _SUPERVISOR_CONFIG_PROBE, _SUPERVISOR_TASK_PROBE):
             if params:
                 deny("INVALID_PARAMETERS")
             if number > 2**53 - 1:
@@ -965,7 +966,231 @@ _SUPERVISOR_HOLDS = frozenset({
     "SUPERVISOR_START_UNKNOWN", "SUPERVISOR_TASK_CONFLICT", "SUPERVISOR_START_NOT_ATTEMPTED",
 }) | _SUPERVISOR_DESKTOP_HOLDS | _SUPERVISOR_CHROME_HOLDS
 
-_SUPERVISOR_TASK_SCRIPT = r"""
+_SUPERVISOR_TASK_MISMATCH_CODES = frozenset({
+    "TASK_MISSING", "TASK_DISABLED", "TASK_PATH_MISMATCH",
+    "TASK_SD_UNVERIFIED", "TASK_OWNER_MISMATCH",
+    "TASK_DACL_SEMANTIC_MISMATCH", "TASK_DACL_REPR_MISMATCH",
+    "TASK_DEFINITION_UNVERIFIED",
+    "TASK_PRINCIPAL_USER_MISMATCH", "TASK_PRINCIPAL_GROUP_MISMATCH",
+    "TASK_PRINCIPAL_ID_MISMATCH", "TASK_PRINCIPAL_LOGON_MISMATCH",
+    "TASK_PRINCIPAL_RUNLEVEL_MISMATCH", "TASK_ACTIONS_CONTEXT_MISMATCH",
+    "TASK_TRIGGERS_PRESENT",
+    "TASK_ACTION_COUNT_MISMATCH", "TASK_ACTION_TYPE_MISMATCH",
+    "TASK_ACTION_PATH_MISMATCH", "TASK_ACTION_ARGS_MISMATCH", "TASK_ACTION_CWD_MISMATCH",
+    "TASK_SETTING_ALLOW_DEMAND_START", "TASK_SETTING_MULTIPLE_INSTANCES",
+    "TASK_SETTING_DISALLOW_ON_BATTERIES", "TASK_SETTING_STOP_ON_BATTERIES",
+    "TASK_SETTING_EXEC_TIME_LIMIT", "TASK_SETTING_ALLOW_HARD_TERMINATE",
+    "TASK_SETTING_RESTART_COUNT", "TASK_SETTING_RESTART_INTERVAL",
+    "TASK_SETTING_RUN_ONLY_IF_IDLE", "TASK_SETTING_RUN_ONLY_IF_NETWORK",
+    "TASK_SETTING_START_WHEN_AVAILABLE", "TASK_SETTING_WAKE_TO_RUN",
+    "TASK_SETTING_DELETE_EXPIRED", "TASK_SETTING_HIDDEN", "TASK_SETTING_COMPATIBILITY",
+})
+_SUPERVISOR_TASK_PROBE_OBSERVED = frozenset({"TASK_READY", "TASK_INSTANCE_PRESENT"})
+_SUPERVISOR_TASK_BASE_CODES = _SUPERVISOR_TASK_MISMATCH_CODES | _SUPERVISOR_TASK_PROBE_OBSERVED | {"TASK_BUSY"}
+_SUPERVISOR_TASK_PROBE_CODES = _SUPERVISOR_TASK_BASE_CODES | {
+    "PENDING_INTENT_CHANGED",
+    *(f"PENDING_INTENT_PRESENT_{code}" for code in _SUPERVISOR_TASK_BASE_CODES),
+    *(f"PENDING_INTENT_UNKNOWN_{code}" for code in _SUPERVISOR_TASK_BASE_CODES),
+}
+
+# Pure comparator functions shared verbatim by protected task probe and deploy.
+_SUPERVISOR_TASK_COMPARATOR_FUNCTIONS = r"""
+function Test-SupervisorInt($value, [int]$want) {
+    if ($null -eq $value -or $value -is [bool] -or $value -is [string] -or
+        $value -is [float] -or $value -is [double] -or $value -is [decimal]) {
+        return $false
+    }
+    try { return [int]$value -eq $want } catch { return $false }
+}
+
+function Test-SupervisorCompatibility($value) {
+    if ($null -eq $value -or $value -is [bool] -or $value -is [string] -or
+        $value -is [float] -or $value -is [double] -or $value -is [decimal]) {
+        return $false
+    }
+    try { return [int]$value -ge 2 } catch { return $false }
+}
+
+function Test-SupervisorZeroDuration($value) {
+    if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value)) { return $false }
+    if ($value.Trim() -cne $value) { return $false }
+    try {
+        return [Xml.XmlConvert]::ToTimeSpan($value) -eq [TimeSpan]::Zero
+    } catch {
+        return $false
+    }
+}
+
+function Test-SupervisorEmptySetting($value) {
+    if ($null -eq $value) { return $true }
+    return $value -is [string] -and $value.Length -eq 0
+}
+
+function Get-SupervisorDaclStatus($sddlText, $expectedSid) {
+    if ($sddlText -isnot [string] -or [string]::IsNullOrEmpty($sddlText)) { return 'TASK_SD_UNVERIFIED' }
+    try {
+        $acl = [Security.AccessControl.RawSecurityDescriptor]::new($sddlText)
+    } catch {
+        return 'TASK_SD_UNVERIFIED'
+    }
+    if ($null -eq $acl.Owner -or [string]::IsNullOrEmpty($acl.Owner.Value)) {
+        return 'TASK_SD_UNVERIFIED'
+    }
+    if ($acl.Owner.Value -cne $expectedSid) {
+        return 'TASK_OWNER_MISMATCH'
+    }
+    if ($null -eq $acl.DiscretionaryAcl -or $acl.DiscretionaryAcl.Count -eq 0) {
+        return 'TASK_DACL_SEMANTIC_MISMATCH'
+    }
+    $protected = ($acl.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -ne 0
+    if (!$protected) {
+        return 'TASK_DACL_SEMANTIC_MISMATCH'
+    }
+    $allowedTrustees = @('S-1-5-18', 'S-1-5-32-544', $expectedSid)
+    $seen = @{}
+    $reprMismatch = $false
+    foreach ($ace in $acl.DiscretionaryAcl) {
+        if (($ace.AceFlags -band [Security.AccessControl.AceFlags]::Inherited) -ne 0) {
+            return 'TASK_DACL_SEMANTIC_MISMATCH'
+        }
+        if ($ace.AceType -ne [Security.AccessControl.AceType]::AccessAllowed) {
+            return 'TASK_DACL_SEMANTIC_MISMATCH'
+        }
+        if ($ace -isnot [Security.AccessControl.KnownAce]) {
+            return 'TASK_DACL_SEMANTIC_MISMATCH'
+        }
+        $trustee = if ($null -ne $ace.SecurityIdentifier) { $ace.SecurityIdentifier.Value } else { '' }
+        if ($trustee -cnotin $allowedTrustees) {
+            return 'TASK_DACL_SEMANTIC_MISMATCH'
+        }
+        $mask = [int]$ace.AccessMask
+        # Task Scheduler maps GENERIC_ALL (0x10000000) to FILE_ALL_ACCESS (0x001F01FF) on persisted tasks.
+        if ($mask -ne 0x10000000 -and $mask -ne 0x001F01FF -and $mask -ne 0x101F01FF) {
+            return 'TASK_DACL_SEMANTIC_MISMATCH'
+        }
+        if ($ace -isnot [Security.AccessControl.CommonAce] -or
+            $ace.AceFlags -ne [Security.AccessControl.AceFlags]::None -or
+            $mask -eq 0x101F01FF -or
+            $seen.ContainsKey($trustee)) {
+            $reprMismatch = $true
+        }
+        $seen[$trustee] = $true
+    }
+    foreach ($required in $allowedTrustees) {
+        if (!$seen.ContainsKey($required)) {
+            return 'TASK_DACL_SEMANTIC_MISMATCH'
+        }
+    }
+    if ($reprMismatch) {
+        return 'TASK_DACL_REPR_MISMATCH'
+    }
+    return 'OK'
+}
+
+function Get-SupervisorRegistrationStatus($registered, $expected, $expectedAction, $name, $sid) {
+    if ($registered.Enabled -isnot [bool] -or !$registered.Enabled) { return 'TASK_DISABLED' }
+    if ($registered.Path -isnot [string] -or $registered.Path -cne ('\' + $name)) { return 'TASK_PATH_MISMATCH' }
+    try {
+        $sdText = $registered.GetSecurityDescriptor(5)
+    } catch {
+        return 'TASK_SD_UNVERIFIED'
+    }
+    $daclStatus = Get-SupervisorDaclStatus $sdText $sid
+    if ($daclStatus -cne 'OK') { return $daclStatus }
+    $definition = $registered.Definition
+    if (!$definition -or !$definition.Principal -or !$definition.Triggers -or
+        !$definition.Actions -or !$definition.Settings) {
+        return 'TASK_DEFINITION_UNVERIFIED'
+    }
+    $principal = $definition.Principal
+    $principalSid = $principal.UserId
+    if ($principalSid -isnot [string] -or $principalSid -cne $sid) {
+        if ($principalSid -isnot [string] -or [string]::IsNullOrEmpty($principalSid)) {
+            return 'TASK_PRINCIPAL_USER_MISMATCH'
+        }
+        try {
+            $principalSid = [Security.Principal.NTAccount]::new($principalSid).Translate(
+                [Security.Principal.SecurityIdentifier]).Value
+        } catch {
+            return 'TASK_PRINCIPAL_USER_MISMATCH'
+        }
+    }
+    if ($principalSid -cne $sid) { return 'TASK_PRINCIPAL_USER_MISMATCH' }
+    if ($principal.GroupId) { return 'TASK_PRINCIPAL_GROUP_MISMATCH' }
+    if ($principal.Id -isnot [string] -or $principal.Id -cne $expected.Principal.Id) {
+        return 'TASK_PRINCIPAL_ID_MISMATCH'
+    }
+    if (!(Test-SupervisorInt $principal.LogonType 3)) { return 'TASK_PRINCIPAL_LOGON_MISMATCH' }
+    if (!(Test-SupervisorInt $principal.RunLevel 0)) { return 'TASK_PRINCIPAL_RUNLEVEL_MISMATCH' }
+    if ($definition.Actions.Context -isnot [string] -or $definition.Actions.Context -cne $expected.Actions.Context) {
+        return 'TASK_ACTIONS_CONTEXT_MISMATCH'
+    }
+    if (!(Test-SupervisorInt $definition.Triggers.Count 0)) { return 'TASK_TRIGGERS_PRESENT' }
+    if (!(Test-SupervisorInt $definition.Actions.Count 1)) { return 'TASK_ACTION_COUNT_MISMATCH' }
+    $actual = $definition.Actions.Item(1)
+    if (!$actual -or !(Test-SupervisorInt $actual.Type 0)) { return 'TASK_ACTION_TYPE_MISMATCH' }
+    if ($actual.Path -isnot [string] -or [string]::IsNullOrEmpty($actual.Path) -or
+        $actual.Path -ine $expectedAction.Path) {
+        return 'TASK_ACTION_PATH_MISMATCH'
+    }
+    if ($actual.Arguments -isnot [string] -or $actual.Arguments -cne $expectedAction.Arguments) {
+        return 'TASK_ACTION_ARGS_MISMATCH'
+    }
+    if ($actual.WorkingDirectory -isnot [string] -or [string]::IsNullOrEmpty($actual.WorkingDirectory) -or
+        $actual.WorkingDirectory -ine $expectedAction.WorkingDirectory) {
+        return 'TASK_ACTION_CWD_MISMATCH'
+    }
+    $settings = $definition.Settings
+    if ($settings.AllowDemandStart -isnot [bool] -or !$settings.AllowDemandStart) {
+        return 'TASK_SETTING_ALLOW_DEMAND_START'
+    }
+    if (!(Test-SupervisorInt $settings.MultipleInstances 2)) {
+        return 'TASK_SETTING_MULTIPLE_INSTANCES'
+    }
+    if ($settings.DisallowStartIfOnBatteries -isnot [bool] -or $settings.DisallowStartIfOnBatteries) {
+        return 'TASK_SETTING_DISALLOW_ON_BATTERIES'
+    }
+    if ($settings.StopIfGoingOnBatteries -isnot [bool] -or $settings.StopIfGoingOnBatteries) {
+        return 'TASK_SETTING_STOP_ON_BATTERIES'
+    }
+    if (!(Test-SupervisorZeroDuration $settings.ExecutionTimeLimit)) {
+        return 'TASK_SETTING_EXEC_TIME_LIMIT'
+    }
+    if ($settings.AllowHardTerminate -isnot [bool] -or !$settings.AllowHardTerminate) {
+        return 'TASK_SETTING_ALLOW_HARD_TERMINATE'
+    }
+    if (!(Test-SupervisorInt $settings.RestartCount 0)) {
+        return 'TASK_SETTING_RESTART_COUNT'
+    }
+    if (!(Test-SupervisorEmptySetting $settings.RestartInterval)) {
+        return 'TASK_SETTING_RESTART_INTERVAL'
+    }
+    if ($settings.RunOnlyIfIdle -isnot [bool] -or $settings.RunOnlyIfIdle) {
+        return 'TASK_SETTING_RUN_ONLY_IF_IDLE'
+    }
+    if ($settings.RunOnlyIfNetworkAvailable -isnot [bool] -or $settings.RunOnlyIfNetworkAvailable) {
+        return 'TASK_SETTING_RUN_ONLY_IF_NETWORK'
+    }
+    if ($settings.StartWhenAvailable -isnot [bool] -or $settings.StartWhenAvailable) {
+        return 'TASK_SETTING_START_WHEN_AVAILABLE'
+    }
+    if ($settings.WakeToRun -isnot [bool] -or $settings.WakeToRun) {
+        return 'TASK_SETTING_WAKE_TO_RUN'
+    }
+    if (!(Test-SupervisorEmptySetting $settings.DeleteExpiredTaskAfter)) {
+        return 'TASK_SETTING_DELETE_EXPIRED'
+    }
+    if ($settings.Hidden -isnot [bool] -or $settings.Hidden) {
+        return 'TASK_SETTING_HIDDEN'
+    }
+    if (!(Test-SupervisorCompatibility $settings.Compatibility)) {
+        return 'TASK_SETTING_COMPATIBILITY'
+    }
+    return 'OK'
+}
+"""
+
+_SUPERVISOR_TASK_SETUP_SCRIPT = r"""
 $sid = $env:AI_COMMERCE_SUPERVISOR_SID
 if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -cne $sid) { throw 'Owner changed' }
 $name = 'AI-Commerce-WakeHub-Supervisor'
@@ -995,38 +1220,31 @@ function Read-Registration {
         if ($_.Exception.GetBaseException().HResult -ne -2147024894) { throw }
     }
 }
+"""
 
-function Test-Registration($registered) {
-    if (!$registered.Enabled -or $registered.Path -cne ('\' + $name)) { return $false }
-    $acl = [Security.AccessControl.RawSecurityDescriptor]::new($registered.GetSecurityDescriptor(5))
-    $want = [Security.AccessControl.RawSecurityDescriptor]::new($sddl)
-    if ($acl.Owner.Value -cne $sid -or $acl.GetSddlForm('Access') -cne $want.GetSddlForm('Access')) {
-        return $false
+_SUPERVISOR_TASK_PROBE_SCRIPT = _SUPERVISOR_TASK_COMPARATOR_FUNCTIONS + _SUPERVISOR_TASK_SETUP_SCRIPT + r"""
+if ($env:AI_COMMERCE_SUPERVISOR_MODE -cne 'probe') { throw 'Read-only probe mode required' }
+$task = Read-Registration
+if (!$task) { 'TASK_MISSING'; exit }
+$status = Get-SupervisorRegistrationStatus $task $expected $action $name $sid
+if ($status -cne 'OK') { $status; exit }
+$instances = $task.GetInstances(0)
+if ($null -eq $instances) { throw 'Instances unavailable' }
+if ($task.State -eq 3 -and $instances.Count -eq 0) {
+    'TASK_READY'; exit
+} elseif ($instances.Count -eq 1 -and $instances.Item(1).State -eq 4) {
+    $instance = $instances.Item(1)
+    if (!$instance -or $instance.Path -cne ('\' + $name) -or !$instance.InstanceGuid) {
+        throw 'Instance unavailable'
     }
-    $definition = $registered.Definition
-    $principal = $definition.Principal
-    $principalSid = $principal.UserId
-    if ($principalSid -ne $sid) {
-        try {
-            $principalSid = [Security.Principal.NTAccount]::new($principalSid).Translate(
-                [Security.Principal.SecurityIdentifier]).Value
-        } catch { return $false }
-    }
-    if ($principalSid -cne $sid -or $principal.Id -cne $expected.Principal.Id -or
-        $principal.LogonType -ne 3 -or $principal.RunLevel -ne 0 -or $principal.GroupId -or
-        $definition.Triggers.Count -ne 0 -or $definition.Actions.Count -ne 1 -or
-        $definition.Actions.Context -cne $expected.Actions.Context) { return $false }
-    foreach ($key in @('AllowDemandStart', 'AllowHardTerminate', 'DisallowStartIfOnBatteries',
-        'Enabled', 'ExecutionTimeLimit', 'Hidden', 'MultipleInstances', 'RestartCount', 'RestartInterval',
-        'RunOnlyIfIdle', 'RunOnlyIfNetworkAvailable', 'StartWhenAvailable',
-        'StopIfGoingOnBatteries', 'WakeToRun', 'DeleteExpiredTaskAfter', 'Compatibility', 'Priority')) {
-        if ($definition.Settings.$key -cne $expected.Settings.$key) { return $false }
-    }
-    $actual = $definition.Actions.Item(1)
-    return $actual.Type -eq 0 -and $actual.Path -ieq $action.Path -and
-        $actual.Arguments -ceq $action.Arguments -and $actual.WorkingDirectory -ieq $action.WorkingDirectory
+    $null = [Guid]::Parse($instance.InstanceGuid)
+    'TASK_INSTANCE_PRESENT'; exit
+} else {
+    'TASK_BUSY'; exit
 }
+"""
 
+_SUPERVISOR_TASK_SCRIPT = _SUPERVISOR_TASK_COMPARATOR_FUNCTIONS + _SUPERVISOR_TASK_SETUP_SCRIPT + r"""
 $task = Read-Registration
 $mode = $env:AI_COMMERCE_SUPERVISOR_MODE
 if (!$task -and $mode -ceq 'install') {
@@ -1038,7 +1256,7 @@ if (!$task -and $mode -ceq 'install') {
     $task = Read-Registration
 }
 if (!$task) { 'MISSING'; exit }
-if (!(Test-Registration $task)) { 'CONFLICT'; exit }
+if ((Get-SupervisorRegistrationStatus $task $expected $action $name $sid) -cne 'OK') { 'CONFLICT'; exit }
 $instances = $task.GetInstances(0)
 if ($null -eq $instances) { throw 'Instances unavailable' }
 if ($mode -ceq 'start') {
@@ -1102,7 +1320,7 @@ runpy.run_module('ai_commerce.wakehub_runtime', run_name='__main__', alter_sys=T
 _SUPERVISOR_INSTANCE = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
 
 
-def _supervisor_task(acquisition, executable, arguments, root, owner, *, mode="inspect", nonce=""):
+def _run_supervisor_task_script(acquisition, script, executable, arguments, root, owner, *, mode="inspect", nonce=""):
     # Select a verified native PowerShell without consulting a Chrome task.
     shell = acquisition._powershell(owner_action=lambda bootstrap: bootstrap)
     env = acquisition._child_environment()
@@ -1114,13 +1332,28 @@ def _supervisor_task(acquisition, executable, arguments, root, owner, *, mode="i
     )
     result = subprocess.run(
         [str(shell), "-NoProfile", "-NonInteractive", "-Command",
-         acquisition._POWERSHELL_TASK_READ_PREAMBLE + _SUPERVISOR_TASK_SCRIPT],
+         acquisition._POWERSHELL_TASK_READ_PREAMBLE + script],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15, check=True, env=env,
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
-    code = result.stdout.strip().decode("ascii")
+    return result.stdout.strip().decode("ascii")
+
+
+def _supervisor_task(acquisition, executable, arguments, root, owner, *, mode="inspect", nonce=""):
+    code = _run_supervisor_task_script(
+        acquisition, _SUPERVISOR_TASK_SCRIPT, executable, arguments, root, owner, mode=mode, nonce=nonce,
+    )
     if (code not in {"MISSING", "CONFLICT", "READY", "BUSY", "NOT_ATTEMPTED"}
             and not _SUPERVISOR_INSTANCE.fullmatch(code)):
+        deny("SUPERVISOR_RUNTIME_UNAVAILABLE")
+    return code
+
+
+def _supervisor_task_probe(acquisition, executable, arguments, root, owner):
+    code = _run_supervisor_task_script(
+        acquisition, _SUPERVISOR_TASK_PROBE_SCRIPT, executable, arguments, root, owner, mode="probe", nonce="",
+    )
+    if code not in _SUPERVISOR_TASK_BASE_CODES:
         deny("SUPERVISOR_RUNTIME_UNAVAILABLE")
     return code
 
@@ -1189,12 +1422,22 @@ def _supervisor_interpreter(acquisition, root):
     return executable, dependencies
 
 
-def _probe_protected_supervisor_config(event):
+def _supervisor_expected_registration(acquisition, root):
+    executable, dependencies = _supervisor_interpreter(acquisition, root)
+    bootstrap = base64.b64encode(_SUPERVISOR_BOOTSTRAP.encode("ascii")).decode("ascii")
+    arguments = subprocess.list2cmdline([
+        "-I", "-B", "-S", "-c", f"import base64;exec(base64.b64decode('{bootstrap}'))",
+        str(root), str(dependencies), "$(Arg0)",
+    ])
+    return executable, arguments
+
+
+def _probe_protected_supervisor_read(event, operation, inspect):
     request = parse_event(event, "read")
-    if request["operation"] != _SUPERVISOR_CONFIG_PROBE:
+    if request["operation"] != operation:
         deny("READ_OPERATION_DENIED")
     result = {
-        "status": "HOLD", "code": "PROTECTED_HOSTOPS_ONLY", "operation": _SUPERVISOR_CONFIG_PROBE,
+        "status": "HOLD", "code": "PROTECTED_HOSTOPS_ONLY", "operation": operation,
         "issue_number": request["issue_number"], "approval_channel": "CHATGPT_TO_AI_COMMERCE_ISSUE",
         "remote_shell_enabled": False,
     }
@@ -1223,6 +1466,30 @@ def _probe_protected_supervisor_config(event):
                     result["code"] = code
                 raise
 
+        result["code"] = "SOURCE_CUSTODY_UNVERIFIED"
+        source = _supervisor_source(runtime, acquisition, sha)
+        owner, desktop = read_owner()
+        result["code"] = "SUPERVISOR_RUNTIME_UNAVAILABLE"
+        executable, arguments = _supervisor_expected_registration(acquisition, root)
+
+        def recheck_identity():
+            result["code"] = "SOURCE_CUSTODY_UNVERIFIED"
+            if _supervisor_source(runtime, acquisition, sha) != source:
+                deny(result["code"])
+            if read_owner() != (owner, desktop):
+                deny(result["code"])
+
+        inspect(result, runtime, acquisition, root, owner, executable, arguments, recheck_identity)
+    except Exception:
+        # The active check's fixed code is the entire public diagnostic.
+        pass
+    finally:
+        sys.dont_write_bytecode = bytecode
+    return result
+
+
+def _probe_protected_supervisor_config(event):
+    def inspect(result, runtime, _acquisition, root, owner, _executable, _arguments, recheck_identity):
         def resolve_config():
             result["code"] = "SUPERVISOR_RUNTIME_UNAVAILABLE"
             config, code = runtime._probe_supervisor_config(root, owner)
@@ -1234,28 +1501,51 @@ def _probe_protected_supervisor_config(event):
                 deny(code)
             return config, code
 
-        result["code"] = "SOURCE_CUSTODY_UNVERIFIED"
-        source = _supervisor_source(runtime, acquisition, sha)
-        owner, desktop = read_owner()
-        result["code"] = "SUPERVISOR_RUNTIME_UNAVAILABLE"
-        _supervisor_interpreter(acquisition, root)
         config, code = resolve_config()
-        result["code"] = "SOURCE_CUSTODY_UNVERIFIED"
-        if _supervisor_source(runtime, acquisition, sha) != source:
-            deny(result["code"])
-        if read_owner() != (owner, desktop):
-            deny(result["code"])
+        recheck_identity()
         current, _ = resolve_config()
         if current != config:
             result["code"] = "LOCAL_CONFIG_CHANGED"
         else:
             result.update(status="OBSERVED", code=code)
-    except Exception:
-        # The active check's fixed code is the entire public diagnostic.
-        pass
-    finally:
-        sys.dont_write_bytecode = bytecode
-    return result
+
+    return _probe_protected_supervisor_read(event, _SUPERVISOR_CONFIG_PROBE, inspect)
+
+
+def _probe_protected_supervisor_task(event):
+    def inspect(result, runtime, acquisition, root, owner, executable, arguments, recheck_identity):
+        def read_pending():
+            try:
+                value = runtime._supervisor_deployment_value("StartPending")
+            except Exception:
+                return "UNKNOWN"
+            if value is None:
+                return "ABSENT"
+            return "PRESENT" if type(value) is str else "UNKNOWN"
+
+        result["code"] = "SUPERVISOR_RUNTIME_UNAVAILABLE"
+        pending_before = read_pending()
+        task_code = _supervisor_task_probe(acquisition, executable, arguments, root, owner)
+        recheck_identity()
+        result["code"] = "SUPERVISOR_RUNTIME_UNAVAILABLE"
+        if _supervisor_expected_registration(acquisition, root) != (executable, arguments):
+            deny("SUPERVISOR_RUNTIME_UNAVAILABLE")
+        pending_after = read_pending()
+        if pending_after != pending_before:
+            result["code"] = "PENDING_INTENT_CHANGED"
+            return
+        if pending_before == "ABSENT":
+            code = task_code
+            status = "OBSERVED" if code in _SUPERVISOR_TASK_PROBE_OBSERVED else "HOLD"
+        else:
+            prefix = "PENDING_INTENT_PRESENT_" if pending_before == "PRESENT" else "PENDING_INTENT_UNKNOWN_"
+            code = prefix + task_code
+            status = "HOLD"
+        if type(code) is not str or code not in _SUPERVISOR_TASK_PROBE_CODES:
+            deny("SUPERVISOR_RUNTIME_UNAVAILABLE")
+        result.update(status=status, code=code)
+
+    return _probe_protected_supervisor_read(event, _SUPERVISOR_TASK_PROBE, inspect)
 
 
 def _deploy_protected_supervisor(event):
@@ -1294,12 +1584,7 @@ def _deploy_protected_supervisor(event):
         failure = "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
         owner, desktop = read_owner()
         failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
-        executable, dependencies = _supervisor_interpreter(acquisition, root)
-        bootstrap = base64.b64encode(_SUPERVISOR_BOOTSTRAP.encode("ascii")).decode("ascii")
-        arguments = subprocess.list2cmdline([
-            "-I", "-B", "-S", "-c", f"import base64;exec(base64.b64decode('{bootstrap}'))",
-            str(root), str(dependencies), "$(Arg0)",
-        ])
+        executable, arguments = _supervisor_expected_registration(acquisition, root)
 
         def resolve_config():
             return runtime._resolve_runtime_config(root, owner=owner, observe_only=True, protected=True)
@@ -5782,7 +6067,7 @@ def perform(request):
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
         return _clean_autostart_receipt("PROTECTED_HOSTOPS_ONLY", operation=op)
-    if op in (_SUPERVISOR_DEPLOY, _SUPERVISOR_CONFIG_PROBE):
+    if op in (_SUPERVISOR_DEPLOY, _SUPERVISOR_CONFIG_PROBE, _SUPERVISOR_TASK_PROBE):
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
         deny("PROTECTED_HOSTOPS_ONLY")
@@ -5928,6 +6213,8 @@ def main():
             result = _deploy_protected_supervisor(event)
         elif request["operation"] == _SUPERVISOR_CONFIG_PROBE:
             result = _probe_protected_supervisor_config(event)
+        elif request["operation"] == _SUPERVISOR_TASK_PROBE:
+            result = _probe_protected_supervisor_task(event)
         else:
             if request["operation"] == _CLEAN_AUTOSTART:
                 outcome = _install_protected_clean_autostart(event)

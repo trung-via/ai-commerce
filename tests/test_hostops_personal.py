@@ -3275,6 +3275,20 @@ class PersonalCdp9444ConfigRegistryTests(unittest.TestCase):
                         "issue_number": 17, "source_sha": "f" * 40, "remote_shell_enabled": False,
                         "approval_channel": "CHATGPT_TO_AI_COMMERCE_ISSUE"}
             cases.append({"name": code, "body": encode(expected), "request": probe_request, "expected": expected})
+        task_probe = "wakehub_supervisor_task_probe"
+        task_probe_request = encode({"schema": hostops.SCHEMA, "operation": task_probe, "parameters": {}})
+        for status, code in (("OBSERVED", "TASK_READY"),
+                             ("OBSERVED", "TASK_INSTANCE_PRESENT"),
+                             ("HOLD", "TASK_MISSING"),
+                             ("HOLD", "TASK_DACL_REPR_MISMATCH"),
+                             ("HOLD", "PENDING_INTENT_PRESENT_TASK_READY")):
+            expected = {"status": status, "code": code, "operation": task_probe,
+                        "issue_number": 17, "source_sha": "f" * 40, "remote_shell_enabled": False,
+                        "approval_channel": "CHATGPT_TO_AI_COMMERCE_ISSUE"}
+            leaked = {**expected, "xml": "PRIVATE_SECRET", "sddl": "PRIVATE_SECRET",
+                      "sid": "PRIVATE_SECRET", "instance_guid": "PRIVATE_SECRET", "nonce": "PRIVATE_SECRET"}
+            cases.append({"name": "task_probe_" + code, "body": encode(leaked),
+                          "request": task_probe_request, "expected": expected})
         harness = r"""
 const fs = require('fs'), path = require('path'), vm = require('vm');
 const cases = JSON.parse(fs.readFileSync(process.argv[1],'utf8'));
@@ -3361,7 +3375,9 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.instance = "8c7770e8-3c62-4163-9c9f-d75621d3ca52"
         self.nonce = "e" * 32
         self.state = "MISSING"
+        self.probe_state = "TASK_READY"
         self.modes = []
+        self.captured_task_envs = []
         clock = count()
         self.mock(hostops, "time", new=SimpleNamespace(monotonic=lambda: next(clock), sleep=Mock()))
         self.mock(hostops, "os", new=SimpleNamespace(name="nt", environ=self.env))
@@ -3392,7 +3408,6 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
     def task_transport(self, argv, *, env, **kwargs):
         self.assertIn("AI-Commerce-WakeHub-Supervisor", argv[-1])
         self.assertIn("TASK_LOGON_INTERACTIVE_TOKEN", argv[-1])
-        self.assertIn("$task.RunEx($nonce, 12, $session, $sid)", argv[-1])
         self.assertNotIn("AI-Commerce-WakeHub-9444-Clean", argv[-1])
         self.assertEqual(env["AI_COMMERCE_SUPERVISOR_SID"], self.owner[2])
         self.assertEqual(env["AI_COMMERCE_SUPERVISOR_SESSION"], "7")
@@ -3402,6 +3417,19 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.assertNotIn(str(self.config), action)
         mode = env["AI_COMMERCE_SUPERVISOR_MODE"]
         self.modes.append(mode)
+        self.captured_task_envs.append({k: env[k] for k in (
+            "AI_COMMERCE_SUPERVISOR_SID", "AI_COMMERCE_SUPERVISOR_SESSION",
+            "AI_COMMERCE_SUPERVISOR_IMAGE", "AI_COMMERCE_SUPERVISOR_ARGUMENTS",
+            "AI_COMMERCE_SUPERVISOR_ROOT",
+        )})
+        if mode == "probe":
+            self.assertTrue(argv[-1].endswith(hostops._SUPERVISOR_TASK_PROBE_SCRIPT))
+            for forbidden in ("RegisterTaskDefinition", "RunEx", "DeleteTask", ".Stop("):
+                self.assertNotIn(forbidden, argv[-1])
+            self.assertEqual(env["AI_COMMERCE_SUPERVISOR_NONCE"], "")
+            return SimpleNamespace(stdout=self.probe_state.encode("ascii"))
+        self.assertTrue(argv[-1].endswith(hostops._SUPERVISOR_TASK_SCRIPT))
+        self.assertIn("$task.RunEx($nonce, 12, $session, $sid)", argv[-1])
         if mode == "install":
             self.assertEqual(self.state, "MISSING")
             self.state = "READY"
@@ -3544,6 +3572,324 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         held = self.dispatch_config_probe()
         self.assertEqual((held["status"], held["code"]), ("HOLD", "LEGACY_9444_CONFIG_FILE_CUSTODY"))
         self.assert_config_probe_has_no_effects()
+
+    def dispatch_task_probe(self):
+        self.env["GITHUB_EVENT_NAME"] = "issues"
+        self.approval = event("read", "wakehub_supervisor_task_probe", {})
+        return self.dispatch(mode="read")
+
+    def assert_task_probe_has_no_effects(self):
+        self.runtime._supervisor_active.assert_not_called()
+        self.runtime._supervisor_slot.assert_not_called()
+        self.config_read.assert_not_called()
+        self.user_config.assert_not_called()
+        self.store.assert_not_called()
+        self.spawn.assert_not_called()
+        self.launch.assert_not_called()
+        self.assertNotIn("install", self.modes)
+        self.assertNotIn("start", self.modes)
+
+    def test_task_probe_requires_protected_parameterless_owner_read(self):
+        operation = "wakehub_supervisor_task_probe"
+        with self.assertRaisesRegex(hostops.Denied, "WRITE_SCOPE_DENIED"):
+            hostops.parse_event(event("write", operation, {}), "write")
+        for parameters in ({"task": "PRIVATE"}, [], None):
+            with self.subTest(parameters=parameters), self.assertRaises(hostops.Denied):
+                hostops.parse_event(event("read", operation, parameters), "read")
+        payload = event("read", operation, {})
+        with self.assertRaisesRegex(hostops.Denied, "PROTECTED_HOSTOPS_ONLY"):
+            hostops.perform(hostops.parse_event(payload, "read"))
+        payload["sender"]["login"] = "unexpected"
+        with self.assertRaisesRegex(hostops.Denied, "NON_OWNER_EVENT"):
+            hostops._probe_protected_supervisor_task(payload)
+        for key, value in (("GITHUB_ACTOR", "unexpected"), ("GITHUB_WORKFLOW_SHA", "e" * 40),
+                           ("GITHUB_RUN_ATTEMPT", "2"), ("AI_COMMERCE_GIT_GUARD_TEST", "1")):
+            with self.subTest(key=key), patch.dict(self.env, {key: value}):
+                receipt = self.dispatch_task_probe()
+                self.assertEqual(receipt["code"], "PROTECTED_HOSTOPS_ONLY")
+                self.assertNotIn("source_sha", receipt)
+        hostops._persistent_clean_source.assert_not_called()
+        self.owner_session.assert_not_called()
+        self.assertEqual(self.modes, [])
+        self.assert_task_probe_has_no_effects()
+
+    def test_task_probe_shares_deploy_comparator_and_emits_finite_scalar_codes(self):
+        shared_prefix = hostops._SUPERVISOR_TASK_COMPARATOR_FUNCTIONS + hostops._SUPERVISOR_TASK_SETUP_SCRIPT
+        self.assertTrue(hostops._SUPERVISOR_TASK_PROBE_SCRIPT.startswith(shared_prefix))
+        self.assertTrue(hostops._SUPERVISOR_TASK_SCRIPT.startswith(shared_prefix))
+        for forbidden in ("RegisterTaskDefinition", "RunEx", "DeleteTask", ".Stop("):
+            self.assertNotIn(forbidden, hostops._SUPERVISOR_TASK_PROBE_SCRIPT)
+
+        receipt = self.dispatch_task_probe()
+        self.assertEqual(receipt, {
+            "status": "OBSERVED", "code": "TASK_READY", "source_sha": self.sha,
+            "issue_number": 17, "operation": "wakehub_supervisor_task_probe",
+            "approval_channel": "CHATGPT_TO_AI_COMMERCE_ISSUE", "remote_shell_enabled": False,
+        })
+        probe_env = self.captured_task_envs[-1]
+        self.assertEqual(hostops._persistent_clean_source.call_args_list,
+                         [call(acquisition, self.sha, pin_runtime=True)] * 2)
+        self.assertEqual(self.owner_session.call_args_list, [call()] * 2)
+
+        self.probe_state = "TASK_INSTANCE_PRESENT"
+        self.assertEqual(
+            (self.dispatch_task_probe()["status"], self.dispatch_task_probe()["code"]),
+            ("OBSERVED", "TASK_INSTANCE_PRESENT"),
+        )
+        for code in sorted(hostops._SUPERVISOR_TASK_MISMATCH_CODES | {"TASK_BUSY"}):
+            with self.subTest(code=code):
+                self.probe_state = code
+                observed = self.dispatch_task_probe()
+                self.assertEqual((observed["status"], observed["code"]), ("HOLD", code))
+        for raw in (self.instance, "O:S-1-5-21-101-202-303-1001", "PRIVATE_XML", ""):
+            with self.subTest(raw=raw):
+                self.probe_state = raw
+                observed = self.dispatch_task_probe()
+                self.assertEqual((observed["status"], observed["code"]), ("HOLD", "SUPERVISOR_RUNTIME_UNAVAILABLE"))
+        self.assert_task_probe_has_no_effects()
+        self.assertEqual(set(self.modes), {"probe"})
+
+        # Verify deploy passes the exact same owner, executable, arguments and root.
+        self.env["GITHUB_EVENT_NAME"] = "issue_comment"
+        self.approval = event("write", self.op, {})
+        self.state = "CONFLICT"
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_TASK_CONFLICT")
+        self.assertEqual(self.captured_task_envs[-1], probe_env)
+
+    def test_task_probe_reports_pending_intent_states_and_preflight_holds(self):
+        self.values["StartPending"] = json.dumps(self.intent(self.nonce))
+        for task_code in ("TASK_READY", "TASK_INSTANCE_PRESENT", "TASK_MISSING", "TASK_DACL_SEMANTIC_MISMATCH"):
+            with self.subTest(pending="present", task_code=task_code):
+                self.probe_state = task_code
+                receipt = self.dispatch_task_probe()
+                self.assertEqual((receipt["status"], receipt["code"]),
+                                 ("HOLD", f"PENDING_INTENT_PRESENT_{task_code}"))
+                self.assertNotIn(self.nonce, json.dumps(receipt))
+
+        self.values.clear()
+        with patch.object(self.runtime, "_supervisor_deployment_value",
+                          side_effect=self.runtime.RuntimeHold("SUPERVISOR_EVIDENCE_INVALID")):
+            self.probe_state = "TASK_READY"
+            receipt = self.dispatch_task_probe()
+            self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "PENDING_INTENT_UNKNOWN_TASK_READY"))
+        with patch.object(self.runtime, "_supervisor_deployment_value", side_effect=OSError("PRIVATE reg error")):
+            self.probe_state = "TASK_MISSING"
+            receipt = self.dispatch_task_probe()
+            self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "PENDING_INTENT_UNKNOWN_TASK_MISSING"))
+        with patch.object(self.runtime, "_supervisor_deployment_value",
+                          side_effect=[None, json.dumps(self.intent(self.nonce))]):
+            self.probe_state = "TASK_READY"
+            receipt = self.dispatch_task_probe()
+            self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "PENDING_INTENT_CHANGED"))
+
+        hostops._persistent_clean_source.side_effect = OSError("PRIVATE checkout")
+        self.assertEqual(self.dispatch_task_probe()["code"], "SOURCE_CUSTODY_UNVERIFIED")
+        hostops._persistent_clean_source.side_effect = [self.source, "f" * 64]
+        self.assertEqual(self.dispatch_task_probe()["code"], "SOURCE_CUSTODY_UNVERIFIED")
+        hostops._persistent_clean_source.side_effect = None
+        self.owner_session.side_effect = self.runtime.RuntimeHold("WINDOWS_INTERACTIVE_REQUIRED")
+        self.assertEqual(self.dispatch_task_probe()["code"], "WINDOWS_INTERACTIVE_REQUIRED")
+        self.owner_session.side_effect = [(self.owner, self.desktop), (self.owner, "f" * 64)]
+        self.assertEqual(self.dispatch_task_probe()["code"], "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+        self.owner_session.side_effect = None
+        self.assert_task_probe_has_no_effects()
+
+    def test_supervisor_task_comparator_matrix_equivalent_and_strict_negatives(self):
+        """Exercise the exact shared PowerShell comparator on controlled in-memory fixtures (no COM)."""
+        import os
+        import shutil
+
+        if os.name != "nt":
+            self.skipTest("Windows PowerShell .NET ACL/XmlConvert required for comparator matrix")
+        shell = shutil.which("pwsh") or shutil.which("pwsh.exe") or shutil.which("powershell.exe")
+        if not shell:
+            self.skipTest("PowerShell CLI unavailable for offline comparator matrix")
+
+        # Unpatch setUp mocks so this offline in-memory PowerShell check runs real pwsh.
+        self.stack.close()
+        harness = hostops._SUPERVISOR_TASK_COMPARATOR_FUNCTIONS + r"""
+$sid = 'S-1-5-21-101-202-303-1001'
+$otherSid = 'S-1-5-21-999-888-777-1002'
+$name = 'AI-Commerce-WakeHub-Supervisor'
+$expected = [pscustomobject]@{
+    Principal = [pscustomobject]@{ Id = 'WakeHubSupervisorOwner' }
+    Actions = [pscustomobject]@{ Context = 'WakeHubSupervisorOwner' }
+}
+$expectedAction = [pscustomobject]@{
+    Path = 'C:\Python311\pythonw.exe'
+    Arguments = '-I -B -S -c "import base64;exec(base64.b64decode(''QWJj''))" C:\TOOL\ai-commerce C:\venv\Lib\site-packages $(Arg0)'
+    WorkingDirectory = 'C:\TOOL\ai-commerce'
+}
+
+function New-FakeTask {
+    param(
+        [object]$Enabled = $true,
+        [object]$Path = '\AI-Commerce-WakeHub-Supervisor',
+        [object]$Sddl = ('O:' + $sid + 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;' + $sid + ')'),
+        [bool]$ThrowSd = $false,
+        [bool]$NullDefinition = $false,
+        [object]$UserId = $sid,
+        [object]$GroupId = '',
+        [object]$PrincipalId = 'WakeHubSupervisorOwner',
+        [object]$LogonType = 3,
+        [object]$RunLevel = 0,
+        [object]$ActionsContext = 'WakeHubSupervisorOwner',
+        [object]$TriggerCount = 0,
+        [object]$ActionCount = 1,
+        [object]$ActionType = 0,
+        [object]$ActionPath = $expectedAction.Path,
+        [object]$ActionArguments = $expectedAction.Arguments,
+        [object]$ActionCwd = $expectedAction.WorkingDirectory,
+        [object]$AllowDemandStart = $true,
+        [object]$MultipleInstances = 2,
+        [object]$DisallowStartIfOnBatteries = $false,
+        [object]$StopIfGoingOnBatteries = $false,
+        [object]$ExecutionTimeLimit = 'PT0S',
+        [object]$AllowHardTerminate = $true,
+        [object]$RestartCount = 0,
+        [object]$RestartInterval = '',
+        [object]$RunOnlyIfIdle = $false,
+        [object]$RunOnlyIfNetworkAvailable = $false,
+        [object]$StartWhenAvailable = $false,
+        [object]$WakeToRun = $false,
+        [object]$DeleteExpiredTaskAfter = '',
+        [object]$Hidden = $false,
+        [object]$Compatibility = 2,
+        [object]$SettingsEnabled = $true,
+        [object]$Priority = 7
+    )
+    $actItem = [pscustomobject]@{
+        Type = $ActionType
+        Path = $ActionPath
+        Arguments = $ActionArguments
+        WorkingDirectory = $ActionCwd
+    }
+    $actions = [pscustomobject]@{
+        Context = $ActionsContext
+        Count = $ActionCount
+    }
+    $actions | Add-Member -MemberType ScriptMethod -Name Item -Value { param($idx) if ($idx -eq 1) { return $actItem } return $null }.GetNewClosure()
+    $definition = if ($NullDefinition) { $null } else {
+        [pscustomobject]@{
+            Principal = [pscustomobject]@{
+                UserId = $UserId
+                GroupId = $GroupId
+                Id = $PrincipalId
+                LogonType = $LogonType
+                RunLevel = $RunLevel
+            }
+            Triggers = [pscustomobject]@{ Count = $TriggerCount }
+            Actions = $actions
+            Settings = [pscustomobject]@{
+                Enabled = $SettingsEnabled
+                AllowDemandStart = $AllowDemandStart
+                MultipleInstances = $MultipleInstances
+                DisallowStartIfOnBatteries = $DisallowStartIfOnBatteries
+                StopIfGoingOnBatteries = $StopIfGoingOnBatteries
+                ExecutionTimeLimit = $ExecutionTimeLimit
+                AllowHardTerminate = $AllowHardTerminate
+                RestartCount = $RestartCount
+                RestartInterval = $RestartInterval
+                RunOnlyIfIdle = $RunOnlyIfIdle
+                RunOnlyIfNetworkAvailable = $RunOnlyIfNetworkAvailable
+                StartWhenAvailable = $StartWhenAvailable
+                WakeToRun = $WakeToRun
+                DeleteExpiredTaskAfter = $DeleteExpiredTaskAfter
+                Hidden = $Hidden
+                Compatibility = $Compatibility
+                Priority = $Priority
+            }
+        }
+    }
+    $task = [pscustomobject]@{
+        Enabled = $Enabled
+        Path = $Path
+        Definition = $definition
+    }
+    $task | Add-Member -MemberType ScriptMethod -Name GetSecurityDescriptor -Value {
+        param($info)
+        if ($ThrowSd) { throw 'SD read denied' }
+        return $Sddl
+    }.GetNewClosure()
+    return $task
+}
+
+$cases = @(
+    @{ name = 'canonical_exact'; task = (New-FakeTask); want = 'OK' },
+    @{ name = 'equiv_dacl_fa'; task = (New-FakeTask -Sddl ('O:' + $sid + 'D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;' + $sid + ')')); want = 'OK' },
+    @{ name = 'equiv_dacl_pai_reordered'; task = (New-FakeTask -Sddl ('O:' + $sid + 'D:PAI(A;;FA;;;BA)(A;;GA;;;SY)(A;;FA;;;' + $sid + ')')); want = 'OK' },
+    @{ name = 'equiv_zero_duration_p0d'; task = (New-FakeTask -ExecutionTimeLimit 'P0D'); want = 'OK' },
+    @{ name = 'equiv_zero_duration_pt0m'; task = (New-FakeTask -ExecutionTimeLimit 'PT0M'); want = 'OK' },
+    @{ name = 'equiv_null_empty_settings'; task = (New-FakeTask -RestartInterval $null -DeleteExpiredTaskAfter $null); want = 'OK' },
+    @{ name = 'equiv_compat_v2_4'; task = (New-FakeTask -Compatibility 6); want = 'OK' },
+    @{ name = 'dropped_priority_diff'; task = (New-FakeTask -Priority 4); want = 'OK' },
+    @{ name = 'dropped_dup_settings_enabled'; task = (New-FakeTask -SettingsEnabled $false); want = 'OK' },
+    @{ name = 'equiv_path_case'; task = (New-FakeTask -ActionPath 'c:\python311\PYTHONW.EXE' -ActionCwd 'c:\tool\AI-COMMERCE'); want = 'OK' },
+
+    @{ name = 'neg_disabled'; task = (New-FakeTask -Enabled $false); want = 'TASK_DISABLED' },
+    @{ name = 'neg_path'; task = (New-FakeTask -Path '\Other\AI-Commerce-WakeHub-Supervisor'); want = 'TASK_PATH_MISMATCH' },
+    @{ name = 'neg_sd_throw'; task = (New-FakeTask -ThrowSd $true); want = 'TASK_SD_UNVERIFIED' },
+    @{ name = 'neg_sd_invalid'; task = (New-FakeTask -Sddl 'NOT-VALID-SDDL'); want = 'TASK_SD_UNVERIFIED' },
+    @{ name = 'neg_owner'; task = (New-FakeTask -Sddl ('O:' + $otherSid + 'D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;' + $sid + ')')); want = 'TASK_OWNER_MISMATCH' },
+    @{ name = 'neg_dacl_unprotected'; task = (New-FakeTask -Sddl ('O:' + $sid + 'D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;' + $sid + ')')); want = 'TASK_DACL_SEMANTIC_MISMATCH' },
+    @{ name = 'neg_dacl_foreign_trustee'; task = (New-FakeTask -Sddl ('O:' + $sid + 'D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;' + $sid + ')(A;;FR;;;WD)')); want = 'TASK_DACL_SEMANTIC_MISMATCH' },
+    @{ name = 'neg_dacl_missing_ba'; task = (New-FakeTask -Sddl ('O:' + $sid + 'D:P(A;;FA;;;SY)(A;;FA;;;' + $sid + ')')); want = 'TASK_DACL_SEMANTIC_MISMATCH' },
+    @{ name = 'neg_dacl_inherited_ace'; task = (New-FakeTask -Sddl ('O:' + $sid + 'D:P(A;ID;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;' + $sid + ')')); want = 'TASK_DACL_SEMANTIC_MISMATCH' },
+    @{ name = 'neg_dacl_deny_ace'; task = (New-FakeTask -Sddl ('O:' + $sid + 'D:P(D;;GA;;;WD)(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;' + $sid + ')')); want = 'TASK_DACL_SEMANTIC_MISMATCH' },
+    @{ name = 'neg_dacl_weak_rights'; task = (New-FakeTask -Sddl ('O:' + $sid + 'D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;' + $sid + ')')); want = 'TASK_DACL_SEMANTIC_MISMATCH' },
+    @{ name = 'neg_dacl_repr_flags'; task = (New-FakeTask -Sddl ('O:' + $sid + 'D:P(A;OICI;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;' + $sid + ')')); want = 'TASK_DACL_REPR_MISMATCH' },
+    @{ name = 'neg_dacl_repr_dup'; task = (New-FakeTask -Sddl ('O:' + $sid + 'D:P(A;;FA;;;SY)(A;;GA;;;SY)(A;;FA;;;BA)(A;;FA;;;' + $sid + ')')); want = 'TASK_DACL_REPR_MISMATCH' },
+    @{ name = 'neg_dacl_repr_combined_mask'; task = (New-FakeTask -Sddl ('O:' + $sid + 'D:P(A;;0x101f01ff;;;SY)(A;;FA;;;BA)(A;;FA;;;' + $sid + ')')); want = 'TASK_DACL_REPR_MISMATCH' },
+    @{ name = 'neg_null_def'; task = (New-FakeTask -NullDefinition $true); want = 'TASK_DEFINITION_UNVERIFIED' },
+    @{ name = 'neg_principal_user'; task = (New-FakeTask -UserId $otherSid); want = 'TASK_PRINCIPAL_USER_MISMATCH' },
+    @{ name = 'neg_principal_group'; task = (New-FakeTask -GroupId 'S-1-5-32-544'); want = 'TASK_PRINCIPAL_GROUP_MISMATCH' },
+    @{ name = 'neg_principal_id'; task = (New-FakeTask -PrincipalId 'Author'); want = 'TASK_PRINCIPAL_ID_MISMATCH' },
+    @{ name = 'neg_principal_logon'; task = (New-FakeTask -LogonType 2); want = 'TASK_PRINCIPAL_LOGON_MISMATCH' },
+    @{ name = 'neg_principal_runlevel'; task = (New-FakeTask -RunLevel 1); want = 'TASK_PRINCIPAL_RUNLEVEL_MISMATCH' },
+    @{ name = 'neg_actions_context'; task = (New-FakeTask -ActionsContext 'Author'); want = 'TASK_ACTIONS_CONTEXT_MISMATCH' },
+    @{ name = 'neg_triggers'; task = (New-FakeTask -TriggerCount 1); want = 'TASK_TRIGGERS_PRESENT' },
+    @{ name = 'neg_action_count'; task = (New-FakeTask -ActionCount 2); want = 'TASK_ACTION_COUNT_MISMATCH' },
+    @{ name = 'neg_action_type'; task = (New-FakeTask -ActionType 5); want = 'TASK_ACTION_TYPE_MISMATCH' },
+    @{ name = 'neg_action_path'; task = (New-FakeTask -ActionPath 'C:\Windows\System32\cmd.exe'); want = 'TASK_ACTION_PATH_MISMATCH' },
+    @{ name = 'neg_action_args_case'; task = (New-FakeTask -ActionArguments ($expectedAction.Arguments.ToLower())); want = 'TASK_ACTION_ARGS_MISMATCH' },
+    @{ name = 'neg_action_cwd'; task = (New-FakeTask -ActionCwd 'C:\Other'); want = 'TASK_ACTION_CWD_MISMATCH' },
+    @{ name = 'neg_allow_demand'; task = (New-FakeTask -AllowDemandStart $false); want = 'TASK_SETTING_ALLOW_DEMAND_START' },
+    @{ name = 'neg_multi_inst'; task = (New-FakeTask -MultipleInstances 0); want = 'TASK_SETTING_MULTIPLE_INSTANCES' },
+    @{ name = 'neg_disallow_batt'; task = (New-FakeTask -DisallowStartIfOnBatteries $true); want = 'TASK_SETTING_DISALLOW_ON_BATTERIES' },
+    @{ name = 'neg_stop_batt'; task = (New-FakeTask -StopIfGoingOnBatteries $true); want = 'TASK_SETTING_STOP_ON_BATTERIES' },
+    @{ name = 'neg_exec_limit_72h'; task = (New-FakeTask -ExecutionTimeLimit 'PT72H'); want = 'TASK_SETTING_EXEC_TIME_LIMIT' },
+    @{ name = 'neg_exec_limit_empty'; task = (New-FakeTask -ExecutionTimeLimit ''); want = 'TASK_SETTING_EXEC_TIME_LIMIT' },
+    @{ name = 'neg_hard_term'; task = (New-FakeTask -AllowHardTerminate $false); want = 'TASK_SETTING_ALLOW_HARD_TERMINATE' },
+    @{ name = 'neg_restart_count'; task = (New-FakeTask -RestartCount 1); want = 'TASK_SETTING_RESTART_COUNT' },
+    @{ name = 'neg_restart_interval'; task = (New-FakeTask -RestartInterval 'PT1M'); want = 'TASK_SETTING_RESTART_INTERVAL' },
+    @{ name = 'neg_idle'; task = (New-FakeTask -RunOnlyIfIdle $true); want = 'TASK_SETTING_RUN_ONLY_IF_IDLE' },
+    @{ name = 'neg_network'; task = (New-FakeTask -RunOnlyIfNetworkAvailable $true); want = 'TASK_SETTING_RUN_ONLY_IF_NETWORK' },
+    @{ name = 'neg_start_avail'; task = (New-FakeTask -StartWhenAvailable $true); want = 'TASK_SETTING_START_WHEN_AVAILABLE' },
+    @{ name = 'neg_wake'; task = (New-FakeTask -WakeToRun $true); want = 'TASK_SETTING_WAKE_TO_RUN' },
+    @{ name = 'neg_delete_exp'; task = (New-FakeTask -DeleteExpiredTaskAfter 'P1D'); want = 'TASK_SETTING_DELETE_EXPIRED' },
+    @{ name = 'neg_hidden'; task = (New-FakeTask -Hidden $true); want = 'TASK_SETTING_HIDDEN' },
+    @{ name = 'neg_compat_v1'; task = (New-FakeTask -Compatibility 1); want = 'TASK_SETTING_COMPATIBILITY' }
+)
+
+$out = foreach ($c in $cases) {
+    $got = Get-SupervisorRegistrationStatus $c.task $expected $expectedAction $name $sid
+    [pscustomobject]@{ name = $c.name; want = $c.want; got = $got }
+}
+$out | ConvertTo-Json -Compress
+"""
+        completed = subprocess.run(
+            [shell, "-NoProfile", "-NonInteractive", "-Command", harness],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr[-3000:])
+        rows = json.loads(completed.stdout)
+        observed_mismatches = set()
+        for row in rows:
+            with self.subTest(case=row["name"]):
+                self.assertEqual(row["got"], row["want"])
+            if row["got"] != "OK":
+                observed_mismatches.add(row["got"])
+        self.assertEqual(observed_mismatches, hostops._SUPERVISOR_TASK_MISMATCH_CODES - {"TASK_MISSING"})
 
     def test_authorization_and_parameters_are_fixed(self):
         with self.assertRaisesRegex(hostops.Denied, "READ_OPERATION_DENIED"):
