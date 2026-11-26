@@ -896,10 +896,41 @@ class NativeChrome9444:
         if self.legacy_health_only:
             selected = chrome_acquisition._supervisor_9444_config(local, self.repository_root, sid)
             _require(selected is not None and selected[0] == env, "CHROME_ENROLLMENT_DRIFT")
-        else:
-            current = chrome_acquisition._read_9444_config(
-                env.config_path, local, self.repository_root, sid)
-            _require(current == env, "CHROME_ENROLLMENT_DRIFT")
+            try:
+                with chrome_acquisition._prefer_installed_powershell():
+                    inventory = chrome_acquisition._query_windows(9444)
+                    state, identity = chrome_acquisition._legacy_health_inventory(
+                        env, inventory, session=session, sid=sid)
+                    chrome_acquisition._require_operator_control(env)
+                    # Protected legacy health skips broad root and intermediate parent
+                    # ACLs while keeping strict file/profile custody, lock markers and
+                    # executable signature verification on each observation.
+                    for name in chrome_acquisition._MARKERS:
+                        try:
+                            (env.user_data_dir / name).lstat()
+                        except FileNotFoundError:
+                            continue
+                        raise chrome_acquisition._EnrollmentHold("ENROLLMENT_PROFILE_LOCK_UNPROVEN")
+                    chrome_acquisition._verify_google_chrome(env)
+                    for name in chrome_acquisition._MARKERS:
+                        try:
+                            (env.user_data_dir / env.profile_directory / name).lstat()
+                        except FileNotFoundError:
+                            continue
+                        raise RuntimeHold("PROFILE_LOCK_HOLD")
+                    if state == "OWNED":
+                        chrome_acquisition._probe_cdp(env)
+                    _require(state in ("ABSENT", "OWNED"), "CHROME_OWNER_UNPROVEN")
+            except (chrome_acquisition.AcquisitionBlocked, chrome_acquisition._EnrollmentHold,
+                    chrome_acquisition._Lifecycle9444Hold, RuntimeHold, HandoffBlocked):
+                raise
+            except Exception:
+                raise RuntimeHold("CHROME_OBSERVATION_HOLD") from None
+            _require(_supervised_desktop(session, sid) == desktop, "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+            return state, (local, session, sid, env, identity, desktop)
+        current = chrome_acquisition._read_9444_config(
+            env.config_path, local, self.repository_root, sid)
+        _require(current == env, "CHROME_ENROLLMENT_DRIFT")
         inventory = chrome_acquisition._query_windows(9444)
         # Evaluate first so a live profile without CDP remains a distinct HOLD,
         # rather than treating a missing listener or HTTP failure as clean OFF.
@@ -910,19 +941,7 @@ class NativeChrome9444:
             env, inventory, session=session, sid=sid)
         _require(lifecycle_state == state, "CHROME_OWNER_UNPROVEN")
         chrome_acquisition._require_operator_control(env)
-        if self.legacy_health_only:
-            # Protected legacy health skips broad root and intermediate parent
-            # ACLs while keeping strict file/profile custody, lock markers and
-            # executable signature verification on each observation.
-            for name in chrome_acquisition._MARKERS:
-                try:
-                    (env.user_data_dir / name).lstat()
-                except FileNotFoundError:
-                    continue
-                raise chrome_acquisition._EnrollmentHold("ENROLLMENT_PROFILE_LOCK_UNPROVEN")
-            chrome_acquisition._verify_google_chrome(env)
-        else:
-            chrome_acquisition._check_enrollment_custody(env, local, sid)
+        chrome_acquisition._check_enrollment_custody(env, local, sid)
         # The enrollment helper checks root markers; a selected-profile marker
         # also needs an independently proven holder, which R2 cannot supply.
         for name in chrome_acquisition._MARKERS:
@@ -943,6 +962,12 @@ class NativeChrome9444:
 
     def lifecycle_snapshot(self) -> tuple:
         """Read the native launch marker around two independent owner observations."""
+        if self.legacy_health_only:
+            # Protected legacy health-only observation does not depend on the
+            # unrelated clean 9444 demand-task launch marker.
+            observed = self._owner_snapshot()
+            _require(self._owner_snapshot() == observed, "CHROME_OBSERVATION_CHANGED")
+            return (*observed, False)
         observed = self._owner_snapshot()
         pending = chrome_acquisition._clean_launch_pending()
         _require(self._owner_snapshot() == observed
@@ -3787,7 +3812,13 @@ _SUPERVISOR_DESKTOP_HOLDS = frozenset({
 })
 _SUPERVISOR_CHROME_HOLDS = frozenset({
     "CDP_PROTOCOL_UNAVAILABLE", "PROFILE_LOCK_HOLD", "ENROLLMENT_PROFILE_LOCK_UNPROVEN",
-    "PROFILE_ALREADY_ACTIVE_NO_CDP", "WINDOWS_PROBE_INVALID",
+    "PROFILE_ALREADY_ACTIVE_NO_CDP", "WINDOWS_PROBE_INVALID", "CHROME_OBSERVATION_HOLD",
+})
+_LEGACY_BROWSER_OBSERVATION_HOLDS = frozenset({
+    "BROWSER_OWNERSHIP_UNPROVEN", "CDP_NOT_LOOPBACK_OWNED", "FOREIGN_PORT_OWNER",
+    "PROCESS_IDENTITY_UNKNOWN", "WINDOWS_PROBE_UNAVAILABLE", "POWERSHELL_UNAVAILABLE",
+    "CHROME_OBSERVATION_CHANGED", "CHROME_OWNER_UNPROVEN",
+    "CHROME_OBSERVATION_HOLD",
 })
 _STARTUP_RECEIPT_SCHEMA = "WakeHubSupervisorStartupReceipt.v1"
 _STARTUP_STAGE_REASONS = {
@@ -3809,10 +3840,21 @@ _STARTUP_STAGE_REASONS = {
     "FIRST_HEALTH": frozenset({
         "SUPERVISOR_ACTIVE", "SLOT_UNAVAILABLE",
         "WINDOWS_INTERACTIVE_REQUIRED", "CHROME_INTERACTIVE_SESSION_CONFLICT",
-        "WINDOWS_OWNER_CONTEXT_UNVERIFIED", "LOCAL_CONFIG_CHANGED", "LOCAL_CONFIG_INVALID",
+        "WINDOWS_OWNER_CONTEXT_UNVERIFIED", "LOCAL_OPERATOR_ONLY", "ELEVATED_CHROME_DISALLOWED",
+        "WINDOWS_TOKEN_UNAVAILABLE", "ENROLLMENT_IDENTITY_UNPROVEN",
+        "LOCAL_CONFIG_CHANGED", "LOCAL_CONFIG_REQUIRED", "LOCAL_CONFIG_STALE",
+        "LOCAL_CONFIG_AMBIGUOUS", "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED", "LOCAL_CONFIG_INVALID",
+        "LOCAL_AUTHORITY_MISSING", "LOCAL_AUTHORITY_INVALID", "LOCAL_AUTHORITY_UNPROVEN",
+        "LOCAL_AUTHORITY_DRIFT", "CDP_OWNER_MISMATCH", "SUPERVISOR_STOPPED",
         "CHROME_OWNER_UNPROVEN", "CHROME_ENROLLMENT_DRIFT", "BROWSER_OWNERSHIP_UNPROVEN",
-        "CHROME_EXECUTABLE_UNTRUSTED", "WINDOWS_PROBE_UNAVAILABLE", "WINDOWS_PROBE_INVALID",
+        "CDP_NOT_LOOPBACK_OWNED", "FOREIGN_PORT_OWNER", "PROCESS_IDENTITY_UNKNOWN",
+        "OPERATOR_OWNERSHIP_UNPROVEN", "POWERSHELL_UNAVAILABLE", "CHROME_EXECUTABLE_UNTRUSTED",
+        "CDP_PROTOCOL_UNAVAILABLE", "PROFILE_LOCK_HOLD", "ENROLLMENT_PROFILE_LOCK_UNPROVEN",
+        "PROFILE_ALREADY_ACTIVE_NO_CDP", "CHROME_OBSERVATION_HOLD",
+        "WINDOWS_PROBE_UNAVAILABLE", "WINDOWS_PROBE_INVALID",
         "CHROME_OBSERVATION_CHANGED", "CHROME_LAUNCH_RECONCILE_REQUIRED",
+        "JOURNAL_OWNER_DRIFT", "JOURNAL_BUSY", "JOURNAL_CORRUPT", "JOURNAL_INVALID",
+        "JOURNAL_SCHEMA_INCOMPATIBLE", "REGISTRATION_DRIFT",
         "HEALTH_PUBLISH_FAILED", "FIRST_HEALTH_HOLD", "HEALTH_PUBLISHED",
     }),
 }
@@ -4134,7 +4176,7 @@ def _resolve_runtime_config(repository_root: Path, *, owner: tuple[Path, int, st
         if observe_only:
             chrome, pin = _observe_only_config(path, repository_root, owner, lambda: False, protected=protected)
             if protected and isinstance(chrome, NativeChrome9444) and chrome.environment.config_path == path:
-                with _config_check(_ConfigCheck.CHROME_SIGNATURE):
+                with _config_check(_ConfigCheck.CHROME_SIGNATURE), chrome_acquisition._prefer_installed_powershell():
                     chrome_acquisition._verify_google_chrome(chrome.environment)
             return pin
         runtime = _read_runtime_config(path, repository_root, registration_only=registration_only)
@@ -4190,7 +4232,7 @@ def _resolve_runtime_config(repository_root: Path, *, owner: tuple[Path, int, st
         if not found and observe_only and protected:
             select(_ConfigSelection.LEGACY_9444)
             env, pin = _legacy_health_config(repository_root, owner)
-            with _config_check(_ConfigCheck.CHROME_SIGNATURE):
+            with _config_check(_ConfigCheck.CHROME_SIGNATURE), chrome_acquisition._prefer_installed_powershell():
                 chrome_acquisition._verify_google_chrome(env)
             return env.config_path, pin
         _require(found, "LOCAL_CONFIG_REQUIRED")
@@ -4379,30 +4421,30 @@ def _observe_only_supervisor(config_path: Path | None, repository_root: Path, *,
     desktop_pin = deployment["desktop"] if deployment is not None else None
     protected = deployment is not None
     raw_publish, clear_health = _deployment_health(deployment, health_only=True) if protected else (None, None)
-    first_health_published = False
-    tick_startup_reported = False
+    first_health_reported = False
+    legacy_browser_phase = False
 
-    def publish(code: str) -> None:
-        nonlocal first_health_published, tick_startup_reported
+    def publish(code: str, *, startup_reason: str = "HEALTH_PUBLISHED") -> None:
+        nonlocal first_health_reported
         assert raw_publish is not None
         try:
             raw_publish(code)
         except Exception:
-            if not first_health_published and not tick_startup_reported:
-                tick_startup_reported = True
+            if not first_health_reported:
+                first_health_reported = True
                 _report_startup_stage(startup_receipt, "FIRST_HEALTH", "HEALTH_PUBLISH_FAILED",
                                       fallback="HEALTH_PUBLISH_FAILED")
             raise
-        if not first_health_published:
-            first_health_published = True
-            tick_startup_reported = True
-            _report_startup_stage(startup_receipt, "FIRST_HEALTH", "HEALTH_PUBLISHED",
-                                  fallback="HEALTH_PUBLISHED")
+        if not first_health_reported:
+            first_health_reported = True
+            _report_startup_stage(startup_receipt, "FIRST_HEALTH", startup_reason,
+                                  fallback="FIRST_HEALTH_HOLD")
 
     publish_fn = publish if raw_publish is not None else None
 
     def observe() -> Result:
-        nonlocal config_pin, desktop_pin
+        nonlocal config_pin, desktop_pin, legacy_browser_phase
+        legacy_browser_phase = False
         _require(config_path is not None, "LOCAL_CONFIG_REQUIRED")
         owner = chrome_acquisition._enrollment_operator(attended=False, protocol_only=True)
         _require(deployment is None or (owner[1], owner[2]) == (deployment["session"], deployment["sid"]),
@@ -4415,39 +4457,53 @@ def _observe_only_supervisor(config_path: Path | None, repository_root: Path, *,
         config_pin = pin
         # Use only the native health reader, even for a configured environment.
         sender = chrome.sender if isinstance(chrome, _SupervisorChrome) else chrome
+        is_legacy_health = protected and isinstance(sender, NativeChrome9444) and sender.legacy_health_only
+        legacy_browser_phase = is_legacy_health
         state, provenance, pending = sender.lifecycle_snapshot()
-        _require(not pending, _LAUNCH_UNKNOWN)
+        legacy_browser_phase = False
+        if not is_legacy_health:
+            _require(not pending, _LAUNCH_UNKNOWN)
         _require(state in ("OWNED", "ABSENT") and provenance[5] == desktop,
-                 "CHROME_OBSERVATION_CHANGED")
+                 "WINDOWS_OWNER_CONTEXT_UNVERIFIED" if is_legacy_health else "CHROME_OBSERVATION_CHANGED")
         _require(_observe_only_config(config_path, repository_root, owner, stop.is_set, protected=protected)[1] == pin,
                  "LOCAL_CONFIG_CHANGED")
-        _require(chrome_acquisition._enrollment_operator(attended=False, protocol_only=True) == owner
-                 and _supervised_desktop(owner[1], owner[2]) == desktop and not stop.is_set(),
-                 "CHROME_OBSERVATION_CHANGED")
+        if is_legacy_health:
+            _require(not stop.is_set(), "SUPERVISOR_STOPPED")
+            _require(chrome_acquisition._enrollment_operator(attended=False, protocol_only=True) == owner
+                     and _supervised_desktop(owner[1], owner[2]) == desktop,
+                     "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+        else:
+            _require(chrome_acquisition._enrollment_operator(attended=False, protocol_only=True) == owner
+                     and _supervised_desktop(owner[1], owner[2]) == desktop and not stop.is_set(),
+                     "CHROME_OBSERVATION_CHANGED")
         health = "CHROME_OWNED" if state == "OWNED" else "CHROME_ABSENT"
         if publish_fn is not None:
             publish_fn(health)
         return SupervisorTickResult("HOLD", health, "SOURCE_ONLY", False, chrome_health=health)
 
     def tick() -> Result:
-        nonlocal tick_startup_reported
-        tick_startup_reported = False
+        nonlocal first_health_reported
         result = _registered_result(observe)
         if publish_fn is not None:
             if result.code in _SUPERVISOR_DESKTOP_HOLDS | _SUPERVISOR_CHROME_HOLDS:
                 # Replace stale positive health while waiting for a fresh observation.
-                publish_fn(result.code)
+                publish_fn(result.code, startup_reason=result.code)
+                return result
+            if legacy_browser_phase and result.code in _LEGACY_BROWSER_OBSERVATION_HOLDS:
+                # Maintain verified receiver liveness with an explicit finite
+                # browser HOLD instead of terminating on unproven browser state.
+                publish_fn("CHROME_OBSERVATION_HOLD", startup_reason=result.code)
                 return result
             if result.code == _LAUNCH_UNKNOWN:
-                if not first_health_published and not tick_startup_reported:
-                    tick_startup_reported = True
+                if not first_health_reported:
+                    first_health_reported = True
                     _report_startup_stage(startup_receipt, "FIRST_HEALTH", result.code,
                                           fallback="FIRST_HEALTH_HOLD")
                 clear_health()
                 return result
         if not isinstance(result, SupervisorTickResult):
-            if not first_health_published and not tick_startup_reported:
-                tick_startup_reported = True
+            if not first_health_reported:
+                first_health_reported = True
                 _report_startup_stage(startup_receipt, "FIRST_HEALTH", result.code,
                                       fallback="FIRST_HEALTH_HOLD")
             _require(False, result.code)
@@ -4456,7 +4512,7 @@ def _observe_only_supervisor(config_path: Path | None, repository_root: Path, *,
     outcome = supervise(tick, stop=stop, max_ticks=max_ticks, idle_seconds=idle_seconds,
                         max_backoff_seconds=max_backoff_seconds, on_health=on_health,
                         _wait_after_tick=lambda: idle_seconds, _on_slot_exit=clear_health)
-    if not first_health_published and outcome.code in ("SUPERVISOR_ACTIVE", "SUPERVISOR_SLOT_UNAVAILABLE"):
+    if not first_health_reported and outcome.code in ("SUPERVISOR_ACTIVE", "SUPERVISOR_SLOT_UNAVAILABLE"):
         _report_startup_stage(
             startup_receipt, "FIRST_HEALTH",
             "SUPERVISOR_ACTIVE" if outcome.code == "SUPERVISOR_ACTIVE" else "SLOT_UNAVAILABLE",

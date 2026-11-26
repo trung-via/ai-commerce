@@ -3201,10 +3201,13 @@ def test_health_uses_existing_9444_without_route_or_journal(observe_only, monkey
     deployment = {"config_digest": pin, "session": session, "sid": sid,
                   "desktop": r._supervised_desktop(session, sid)}
     published = []
+    startup = []
     monkeypatch.setattr(r, "_deployment_health", lambda _, *, health_only: (published.append, lambda: None))
-    result = r.run_supervisor(path, s.i["root"], max_ticks=1, observe_only=True, _deployment=deployment)
-    assert result.code == expected
+    result = r.run_supervisor(path, s.i["root"], max_ticks=1, observe_only=True, _deployment=deployment,
+                              _startup_receipt=lambda stage, reason: startup.append((stage, reason)))
+    assert (result.status, result.code) == ("HOLD", expected)
     assert published == [expected]
+    assert startup == [("FIRST_HEALTH", "HEALTH_PUBLISHED" if fault is None else expected)]
     assert s.i["native_calls"].count("protocol") == (2 if fault is None else 0)
     assert not s.path.exists() and s.i["browser"].reads == 0
     assert s.requests == [] and s.ticks == []
@@ -6158,14 +6161,20 @@ def test_protected_supervisor_startup_receipt_owner_config_and_first_health_boun
     assert s.requests == [] and s.ticks == [] and not s.path.exists()
 
     # 5. Failure while publishing Health is recorded as FIRST_HEALTH/HEALTH_PUBLISH_FAILED.
-    events.clear()
-    with monkeypatch.context() as mp:
-        mp.setattr(r, "_supervisor_process",
-                   lambda pid, exe, own: (_ for _ in ()).throw(r.RuntimeHold("SUPERVISOR_PROCESS_UNVERIFIED")))
-        res = r.run_supervisor(path, s.i["root"], max_ticks=1, observe_only=True,
-                               _deployment=deployment, _startup_receipt=lambda st, rsn: events.append((st, rsn)))
-    assert res.code == "SUPERVISOR_PROCESS_UNVERIFIED"
-    assert events == [("FIRST_HEALTH", "HEALTH_PUBLISH_FAILED")]
+    def unavailable_query(_port):
+        raise r.chrome_acquisition.AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
+
+    for observation_hold in (False, True):
+        events.clear()
+        with monkeypatch.context() as mp:
+            if observation_hold:
+                mp.setattr(r.chrome_acquisition, "_query_windows", unavailable_query)
+            mp.setattr(r, "_supervisor_process",
+                       lambda pid, exe, own: (_ for _ in ()).throw(r.RuntimeHold("SUPERVISOR_PROCESS_UNVERIFIED")))
+            res = r.run_supervisor(path, s.i["root"], max_ticks=1, observe_only=True,
+                                   _deployment=deployment, _startup_receipt=lambda st, rsn: events.append((st, rsn)))
+        assert res.code == "SUPERVISOR_PROCESS_UNVERIFIED"
+        assert events == [("FIRST_HEALTH", "HEALTH_PUBLISH_FAILED")]
 
 
 def test_protected_supervisor_cli_startup_receipt_boundary_offline(observe_only, monkeypatch, capsys):
@@ -6228,5 +6237,202 @@ def test_protected_supervisor_cli_startup_receipt_boundary_offline(observe_only,
     assert rc == 2
     assert json.loads(capsys.readouterr().out)["code"] == "SUPERVISOR_PROCESS_UNVERIFIED"
     assert events == [("FIRST_HEALTH", "HEALTH_PUBLISH_FAILED")]
+
+
+def test_protected_legacy_health_only_liveness_counterexamples_and_recovery(observe_only, monkeypatch):
+    """Focused regressions for #1493/#1494/#1495 on the protected legacy health-only path.
+
+    Verifies:
+    - Positive known Chrome OFF (CHROME_ABSENT) even when unrelated clean LaunchPending is True.
+    - Ordinary unrelated Chrome without --user-data-dir (and renderer child) yields CHROME_ABSENT
+      (or CHROME_OWNED alongside owned 9444), without launch, send, or journal writes.
+    - Foreign listener / unknown process / probe read failure keeps receiver alive with finite
+      CHROME_OBSERVATION_HOLD, refreshes observed_ns across ticks, then transitions to healthy.
+    - Config/owner/session drift stops receiver and clears Health.
+    - Distinct FIRST_HEALTH error codes are preserved (not masked into generic FIRST_HEALTH_HOLD).
+    - Non-legacy observe-only LaunchPending guard remains untouched.
+    """
+    s = observe_only
+    local, session, sid = s.owner()
+    desktop = r._supervised_desktop(session, sid)
+    cfg = r.Path(s.i["config"]["chrome_config"])
+    env = s.i["environment"]
+    monkeypatch.delenv("AI_COMMERCE_WAKEHUB_CONFIG", raising=False)
+    monkeypatch.setattr(r, "_user_runtime_config", lambda _: None)
+    path, pin = r._resolve_runtime_config(s.i["root"], owner=s.owner(), observe_only=True, protected=True)
+    assert path == cfg
+    deployment = {
+        "source_sha": "a" * 40, "source_digest": "b" * 64, "config_digest": pin,
+        "desktop": desktop, "session": session, "sid": sid, "config": str(path), "nonce": "c" * 32,
+    }
+
+    # 1. Positive known Chrome OFF + ordinary unrelated Chrome without --user-data-dir,
+    #    even when unrelated clean LaunchPending=True and multiple PowerShells exist.
+    ordinary_browser = {
+        "ProcessId": 701, "ExecutablePath": str(env.executable),
+        "CommandLine": json.dumps([str(env.executable)]),
+        "SessionId": session, "OwnerSid": sid, "CreationDate": "2026-11-05T01:00:00Z",
+    }
+    ordinary_child = {
+        "ProcessId": 702, "ExecutablePath": str(env.executable),
+        "CommandLine": json.dumps([str(env.executable), "--type=renderer"]),
+        "SessionId": session, "OwnerSid": sid, "CreationDate": "2026-11-05T01:00:01Z",
+    }
+    s.slot.pending = True
+    s.i["inventory"].update(listeners=[], processes=[ordinary_browser, ordinary_child])
+    published = []
+    events = []
+    with monkeypatch.context() as mp:
+        mp.setattr(r, "_deployment_health", lambda _, *, health_only: (published.append, lambda: None))
+        res = r.run_supervisor(path, s.i["root"], max_ticks=1, observe_only=True,
+                               _deployment=deployment, _startup_receipt=lambda st, rsn: events.append((st, rsn)))
+    assert res.code == "CHROME_ABSENT" and res.chrome_health == "CHROME_ABSENT"
+    assert published == ["CHROME_ABSENT"]
+    assert events == [("FIRST_HEALTH", "HEALTH_PUBLISHED")]
+    assert not s.path.exists() and s.requests == [] and s.ticks == [] and s.i["browser"].reads == 0
+
+    # Clean empty OFF also reports CHROME_ABSENT.
+    s.slot.pending = False
+    s.i["inventory"].update(listeners=[], processes=[])
+    published.clear()
+    with monkeypatch.context() as mp:
+        mp.setattr(r, "_deployment_health", lambda _, *, health_only: (published.append, lambda: None))
+        res = r.run_supervisor(path, s.i["root"], max_ticks=1, observe_only=True, _deployment=deployment)
+    assert res.code == "CHROME_ABSENT" and published == ["CHROME_ABSENT"]
+
+    # 2. Foreign listener / unknown process / read failure -> stable live CHROME_OBSERVATION_HOLD
+    #    with refreshed observed_ns, then later healthy CHROME_ABSENT read on the same live receiver.
+    tick_counter = [0]
+    now_ns = [100_000_000]
+    stored = {}
+    records = []
+
+    def store(name, value):
+        assert name == "Health"
+        if value is None:
+            stored.pop(name, None)
+        else:
+            stored[name] = value
+            records.append(json.loads(value))
+
+    def scripted_query(_port):
+        step = tick_counter[0]
+        if step == 0:
+            raise r.chrome_acquisition.AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
+        if step == 1:
+            raise r.chrome_acquisition.AcquisitionBlocked("WINDOWS_PROBE_UNAVAILABLE")
+        if step == 2:
+            # Foreign listener on 9444 (unknown non-Chrome PID)
+            return {"listeners": [{"LocalAddress": "127.0.0.1", "LocalPort": 9444, "OwningProcess": 999}],
+                    "processes": [ordinary_browser]}
+        if step == 3:
+            # Unknown process identity (unparseable commandline)
+            raise r.chrome_acquisition.AcquisitionBlocked("PROCESS_IDENTITY_UNKNOWN")
+        return {"listeners": [], "processes": [ordinary_browser, ordinary_child]}
+
+    def advance(_delay):
+        tick_counter[0] += 1
+        now_ns[0] += 1_000_000_000
+
+    events.clear()
+    with monkeypatch.context() as mp:
+        mp.setattr(r.chrome_acquisition, "_query_windows", scripted_query)
+        mp.setattr(r, "_supervisor_process", lambda pid, exe, own: 654321)
+        mp.setattr(r, "monotonic_ns", lambda: now_ns[0])
+        mp.setattr(r, "_supervisor_deployment_value", stored.get)
+        mp.setattr(r, "_store_supervisor_deployment_value", store)
+        s.clock.on_wait = advance
+        try:
+            res = r.run_supervisor(path, s.i["root"], max_ticks=5, observe_only=True,
+                                   _deployment=deployment,
+                                   _startup_receipt=lambda st, rsn: events.append((st, rsn)))
+        finally:
+            s.clock.on_wait = None
+    assert res.code == "CHROME_ABSENT" and res.chrome_health == "CHROME_ABSENT"
+    assert [row["health"] for row in records] == [
+        "CHROME_OBSERVATION_HOLD", "CHROME_OBSERVATION_HOLD",
+        "CHROME_OBSERVATION_HOLD", "CHROME_OBSERVATION_HOLD",
+        "CHROME_ABSENT",
+    ]
+    assert all(row["mode"] == "CHROME_HEALTH_ONLY" for row in records)
+    assert [row["observed_ns"] for row in records] == sorted(row["observed_ns"] for row in records)
+    assert len({row["observed_ns"] for row in records}) == 5
+    assert events == [("FIRST_HEALTH", "POWERSHELL_UNAVAILABLE")]
+    assert "Health" not in stored
+    assert not s.path.exists() and s.requests == [] and s.ticks == []
+
+    # 3. Config / owner / session drift stops live legacy health-only receiver cleanly and clears Health.
+    for drift_kind, want_code in (
+        ("config", "LOCAL_CONFIG_CHANGED"),
+        ("session", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"),
+    ):
+        stored.clear()
+        records.clear()
+        tick_no = [0]
+        orig_cfg = cfg.read_bytes()
+        drifted_session = [False]
+
+        def drift_on_wait(_delay):
+            tick_no[0] += 1
+            if drift_kind == "config":
+                raw = json.loads(orig_cfg)
+                raw["allow_launch"] = not raw["allow_launch"]
+                cfg.write_text(json.dumps(raw), encoding="utf-8")
+            else:
+                drifted_session[0] = True
+
+        orig_op = r.chrome_acquisition._enrollment_operator
+
+        def maybe_drifted_op(*, attended=True, protocol_only=False):
+            loc, sess, owner_sid = orig_op(attended=attended, protocol_only=protocol_only)
+            return (loc, sess + 1 if drifted_session[0] else sess, owner_sid)
+
+        try:
+            with monkeypatch.context() as mp:
+                mp.setattr(r.chrome_acquisition, "_enrollment_operator", maybe_drifted_op)
+                mp.setattr(r, "_supervisor_process", lambda pid, exe, own: 654321)
+                mp.setattr(r, "_supervisor_deployment_value", stored.get)
+                mp.setattr(r, "_store_supervisor_deployment_value", store)
+                s.clock.on_wait = drift_on_wait
+                res = r.run_supervisor(path, s.i["root"], max_ticks=3, observe_only=True, _deployment=deployment)
+            assert res.code == want_code
+            assert [row["health"] for row in records] == ["CHROME_ABSENT"]
+            assert "Health" not in stored
+        finally:
+            s.clock.on_wait = None
+            cfg.write_bytes(orig_cfg)
+
+    # 4. Distinct FIRST_HEALTH error reasons are preserved instead of masked to FIRST_HEALTH_HOLD,
+    #    while truly unknown codes still fall back to FIRST_HEALTH_HOLD.
+    rt_path = s.i["config_path"]
+    _, rt_pin = r._observe_only_config(rt_path, s.i["root"], s.owner(), lambda: False, protected=True)
+    rt_deployment = {**deployment, "config": str(rt_path), "config_digest": rt_pin}
+    for error_code, expected_reason in (
+        ("PROCESS_IDENTITY_UNKNOWN", "PROCESS_IDENTITY_UNKNOWN"),
+        ("POWERSHELL_UNAVAILABLE", "POWERSHELL_UNAVAILABLE"),
+        ("CDP_NOT_LOOPBACK_OWNED", "CDP_NOT_LOOPBACK_OWNED"),
+        ("UNENUMERATED_SYNTHETIC_CODE", "FIRST_HEALTH_HOLD"),
+    ):
+        events.clear()
+        with monkeypatch.context() as mp:
+            mp.setattr(r.chrome_acquisition, "_query_windows",
+                       lambda _p, c=error_code: (_ for _ in ()).throw(r.chrome_acquisition.AcquisitionBlocked(c)))
+            res = r.run_supervisor(rt_path, s.i["root"], max_ticks=1, observe_only=True,
+                                   _deployment=rt_deployment,
+                                   _startup_receipt=lambda st, rsn: events.append((st, rsn)))
+        assert res.code == error_code
+        assert events == [("FIRST_HEALTH", expected_reason)]
+
+    # 5. Non-legacy observe-only still enforces LaunchPending (CHROME_LAUNCH_RECONCILE_REQUIRED).
+    s.slot.pending = True
+    s.i["inventory"].update(listeners=[], processes=[])
+    events.clear()
+    res = r.run_supervisor(rt_path, s.i["root"], max_ticks=1, observe_only=True,
+                           _deployment=rt_deployment,
+                           _startup_receipt=lambda st, rsn: events.append((st, rsn)))
+    assert res.code == "CHROME_LAUNCH_RECONCILE_REQUIRED"
+    assert events == [("FIRST_HEALTH", "CHROME_LAUNCH_RECONCILE_REQUIRED")]
+    s.slot.pending = False
+
 
 

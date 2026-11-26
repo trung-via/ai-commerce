@@ -4798,3 +4798,107 @@ def test_clean_9444_import_is_inert(monkeypatch):
     monkeypatch.setattr(ca.subprocess, "run", unexpected)
     loaded = runpy.run_path(ca.__file__)
     assert callable(loaded["install_clean_9444_autostart"])
+
+
+def test_source_counterexamples_legacy_health_vs_lifecycle_and_powershell(monkeypatch, tmp_path):
+    """Focused source counterexamples for #1494/#1495 without speculating native root.
+
+    Demonstrates:
+    1. Ordinary unrelated Chrome without --user-data-dir (and its renderer child
+       without --user-data-dir) is accepted as ABSENT by evaluate() (#1495 path)
+       yet rejected by strict _lifecycle_inventory() with PROCESS_IDENTITY_UNKNOWN /
+       BROWSER_OWNERSHIP_UNPROVEN, while _legacy_health_inventory() accepts it cleanly
+       and still fails closed on foreign listeners, unknown processes, and profile helpers.
+    2. Multiple trusted PowerShell 7 installations couple default _powershell() to
+       _clean_task_powershell, whereas _prefer_installed_powershell() selects an
+       attested installed PowerShell for read-only observation without touching the clean task.
+    """
+    env, repo, home, snapshot, _ = logon_fixture(monkeypatch, tmp_path, allow_launch=True, running=False)
+    sid = _OPERATOR_SID
+    ordinary_browser = {
+        "ProcessId": 401,
+        "ExecutablePath": str(env.executable),
+        "CommandLine": json.dumps([str(env.executable)]),
+        "SessionId": 1,
+        "OwnerSid": sid,
+        "CreationDate": "2026-11-05T01:00:00Z",
+    }
+    ordinary_child = {
+        "ProcessId": 402,
+        "ExecutablePath": str(env.executable),
+        "CommandLine": json.dumps([str(env.executable), "--type=renderer"]),
+        "SessionId": 1,
+        "OwnerSid": sid,
+        "CreationDate": "2026-11-05T01:00:01Z",
+    }
+
+    # Counterexample 1a: ordinary Chrome browser without --user-data-dir when 9444 is OFF.
+    inv_ordinary_only = {"listeners": [], "processes": [ordinary_browser, ordinary_child]}
+    assert ca.evaluate(env, inv_ordinary_only, session_id=1, expected_sid=sid, parse=ca._commandline_argv) == ("ABSENT", None)
+    with pytest.raises(ca._Lifecycle9444Hold, match="^PROCESS_IDENTITY_UNKNOWN$"):
+        ca._lifecycle_inventory(env, inv_ordinary_only, session=1, sid=sid)
+    assert ca._legacy_health_inventory(env, inv_ordinary_only, session=1, sid=sid) == ("ABSENT", ((), ()))
+
+    # Counterexample 1b: ordinary Chrome child without --user-data-dir alone when 9444 is OFF.
+    inv_child_only = {"listeners": [], "processes": [ordinary_child]}
+    assert ca.evaluate(env, inv_child_only, session_id=1, expected_sid=sid, parse=ca._commandline_argv) == ("ABSENT", None)
+    with pytest.raises(ca._Lifecycle9444Hold, match="^BROWSER_OWNERSHIP_UNPROVEN$"):
+        ca._lifecycle_inventory(env, inv_child_only, session=1, sid=sid)
+    assert ca._legacy_health_inventory(env, inv_child_only, session=1, sid=sid) == ("ABSENT", ((), ()))
+
+    # Positive known Chrome OFF (empty inventory) and owned 9444 alongside ordinary Chrome.
+    assert ca._legacy_health_inventory(env, {"listeners": [], "processes": []}, session=1, sid=sid) == ("ABSENT", ((), ()))
+    owned_proc = {
+        "ProcessId": 500,
+        "ExecutablePath": str(env.executable),
+        "CommandLine": json.dumps(env.command()),
+        "SessionId": 1,
+        "OwnerSid": sid,
+        "CreationDate": "2026-11-05T01:00:02Z",
+    }
+    inv_mixed_owned = {
+        "listeners": [{"LocalAddress": "127.0.0.1", "LocalPort": 9444, "OwningProcess": 500}],
+        "processes": [ordinary_browser, ordinary_child, owned_proc],
+    }
+    state, identity = ca._legacy_health_inventory(env, inv_mixed_owned, session=1, sid=sid)
+    assert state == "OWNED" and identity[0] == (("127.0.0.1", 9444, 500),) and len(identity[1]) == 1 and identity[1][0][0] == 500
+
+    # Fail-closed negatives: foreign listener, non-loopback listener, wrong port, missing/unparseable
+    # CommandLine, helper claiming dedicated profile, and foreign 9444 claimant without listener.
+    negatives = [
+        ({"listeners": [{"LocalAddress": "0.0.0.0", "LocalPort": 9444, "OwningProcess": 500}], "processes": [owned_proc]},
+         "CDP_NOT_LOOPBACK_OWNED"),
+        ({"listeners": [{"LocalAddress": "127.0.0.1", "LocalPort": 9333, "OwningProcess": 500}], "processes": [owned_proc]},
+         "WINDOWS_PROBE_INVALID"),
+        ({"listeners": [{"LocalAddress": "127.0.0.1", "LocalPort": 9444, "OwningProcess": 999}], "processes": [ordinary_browser]},
+         "BROWSER_OWNERSHIP_UNPROVEN"),
+        ({"listeners": [], "processes": [{**ordinary_browser, "CommandLine": ""}]},
+         "BROWSER_OWNERSHIP_UNPROVEN"),
+        ({"listeners": [], "processes": [{**ordinary_child, "CommandLine": json.dumps([str(env.executable), "--type=renderer", f"--user-data-dir={env.user_data_dir}"])}]},
+         "PROFILE_ALREADY_ACTIVE_NO_CDP"),
+        ({"listeners": [], "processes": [{**ordinary_browser, "CommandLine": json.dumps([str(env.executable), "--remote-debugging-port=9444"])}]},
+         "BROWSER_OWNERSHIP_UNPROVEN"),
+        ({"listeners": None, "processes": []}, "WINDOWS_PROBE_INVALID"),
+    ]
+    for bad_inventory, expected_code in negatives:
+        with pytest.raises(ca.AcquisitionBlocked, match=f"^{expected_code}$"):
+            ca._legacy_health_inventory(env, bad_inventory, session=1, sid=sid)
+
+    # Counterexample 2: multiple trusted PowerShell installations vs _prefer_installed_powershell().
+    stable = tmp_path / "PowerShell" / "7" / "pwsh.exe"
+    preview = tmp_path / "PowerShell" / "7.7" / "pwsh.exe"
+    clean_calls = []
+
+    def failing_clean_task_pwsh(bootstrap):
+        clean_calls.append(bootstrap)
+        raise ca.AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
+
+    monkeypatch.setattr(ca, "_trusted_powershells", lambda: (stable, preview))
+    monkeypatch.setattr(ca, "_clean_task_powershell", failing_clean_task_pwsh)
+    with pytest.raises(ca.AcquisitionBlocked, match="^POWERSHELL_UNAVAILABLE$"):
+        ca._powershell()
+    assert clean_calls == [stable]
+    with ca._prefer_installed_powershell():
+        assert ca._powershell() == stable
+    assert clean_calls == [stable]
+
