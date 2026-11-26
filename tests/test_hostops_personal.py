@@ -4923,7 +4923,7 @@ $out | ConvertTo-Json -Compress
         self.assertIs(archive["prior_source_digest_rehashed"], False)
         self.assertEqual(archive["prior_mode"], "LEGACY_CHROME_HEALTH_ONLY")
         # New Run has fresh identity and StartPending was promoted.
-        self.assertNotIn("StartPending", self.values)
+        self.assertIsNone(self.values.get("StartPending"))
         run_record = json.loads(self.values["Run"])
         self.assertNotEqual(run_record["nonce"], prior_nonce)
         self.assertEqual(run_record["instance"], fresh_guid)
@@ -5379,6 +5379,152 @@ $results | ConvertTo-Json -Compress -Depth 4
                 hostops._verify_prior_supervisor_source(no_git, known_sha, "not-a-digest", current_sha, current_digest),
             )
 
+    def test_recovery_exact_1493_1494_c8d77c15_and_observation_hold_classification(self):
+        """Exact #1493/#1494 regression, c8d77c15 compatibility, and CHROME_OBSERVATION_HOLD HostOps receipt."""
+        from ai_commerce.wakehub_runtime import runner as runtime
+
+        # Parity between runtime and HostOps closed enums.
+        self.assertEqual(runtime._SUPERVISOR_CHROME_HOLDS, hostops._SUPERVISOR_CHROME_HOLDS)
+        self.assertEqual(runtime._STARTUP_STAGE_REASONS, hostops._SUPERVISOR_STARTUP_STAGE_REASONS)
+        self.assertIn("CHROME_OBSERVATION_HOLD", hostops._SUPERVISOR_CHROME_HOLDS)
+        self.assertNotIn("CHROME_OBSERVATION_HOLD", hostops._SUPERVISOR_OBSERVED)
+        self.assertNotIn("CHROME_OBSERVATION_HOLD", hostops._SUPERVISOR_RECOVERY_OBSERVED)
+
+        # 1. Exact #1494 task-probe regression + distinct non-masked FIRST_HEALTH reason projection.
+        prior_sha = "c8d77c15cf8e937ea395c677ccd0ac8e20a2a1e5"
+        prior_digest = "3" * 64
+        prior_nonce = "d" * 32
+        prior_guid = "7b665f19-4c22-4191-8b42-9c2d3e4f5a6b"
+        self.sha = "e" * 40
+        self.env["GITHUB_SHA"] = self.sha
+        self.setup_legacy_health_only_config()
+        prior_intent = {
+            **self.intent(prior_nonce), "source_sha": prior_sha, "source_digest": prior_digest,
+            "instance": prior_guid,
+        }
+        raw_prior = json.dumps(prior_intent)
+        self.values["StartPending"] = raw_prior
+        self.values["StartupReceipt"] = json.dumps({
+            "schema": "WakeHubSupervisorStartupReceipt.v1",
+            "stage": "FIRST_HEALTH", "reason": "FIRST_HEALTH_HOLD", "correlated": True,
+            "source_sha": prior_sha, "source_digest": prior_digest, "config_digest": self.config_pin,
+            "desktop": self.desktop, "session": 7, "nonce": prior_nonce, "pid": 411, "observed_ns": 100,
+        })
+        self.probe_pending_state = "TASK_READY+HIST_EXIT_2+LOG_DISABLED"
+        receipt_1494 = self.dispatch_task_probe()
+        self.assertEqual((receipt_1494["status"], receipt_1494["code"]), ("HOLD", "+".join((
+            "PENDING_INTENT_PRESENT", "RUNEX_RETURNED_EXIT_UNPROVEN", "TASK_READY",
+            "PEND_WITH_GUID_PRIOR_SRC", "MUTEX_INACTIVE", "HEALTH_ABSENT",
+            "RUN_ABSENT", "HIST_EXIT_2", "LOG_DISABLED",
+            "STARTUP_MATCH_FIRST_HEALTH_FIRST_HEALTH_HOLD",
+        ))))
+        for reason in ("PROCESS_IDENTITY_UNKNOWN", "POWERSHELL_UNAVAILABLE", "CDP_NOT_LOOPBACK_OWNED"):
+            self.values["StartupReceipt"] = json.dumps({
+                "schema": "WakeHubSupervisorStartupReceipt.v1",
+                "stage": "FIRST_HEALTH", "reason": reason, "correlated": True,
+                "source_sha": prior_sha, "source_digest": prior_digest, "config_digest": self.config_pin,
+                "desktop": self.desktop, "session": 7, "nonce": prior_nonce, "pid": 411, "observed_ns": 101,
+            })
+            self.assertTrue(self.dispatch_task_probe()["code"].endswith(f"+STARTUP_MATCH_FIRST_HEALTH_{reason}"))
+
+        # 2. Exact c8d77c15 recovery: no git rehash required, preserves old hash/provenance/archive,
+        #    clears stale StartupReceipt, promotes live receiver on CHROME_OBSERVATION_HOLD with HOLD status.
+        self.values["StartupReceipt"] = json.dumps({
+            "schema": "WakeHubSupervisorStartupReceipt.v1",
+            "stage": "FIRST_HEALTH", "reason": "FIRST_HEALTH_HOLD", "correlated": True,
+            "source_sha": prior_sha, "source_digest": prior_digest, "config_digest": self.config_pin,
+            "desktop": self.desktop, "session": 7, "nonce": prior_nonce, "pid": 411, "observed_ns": 100,
+        })
+        self.state = "READY"
+        self.modes.clear()
+        fresh_guid = "baada257-28df-48ab-8af9-c61e1d86d41a"
+        self.mock(
+            hostops, "_git_bytes",
+            side_effect=AssertionError("must not require old Git history for reviewed c8d77c15 SHA"),
+        )
+
+        def start_observation_hold(nonce):
+            self.assertNotEqual(nonce, prior_nonce)
+            self.assertIn(f"RetiredPending_{prior_nonce}", self.values)
+            self.state = fresh_guid
+            self.publish_health(nonce=nonce, mode=self.runtime._CHROME_HEALTH_ONLY, health="CHROME_OBSERVATION_HOLD")
+            return fresh_guid
+
+        self.launch.side_effect = start_observation_hold
+        recovered = self.dispatch_recovery()
+        self.assertEqual((recovered["status"], recovered["code"]), ("HOLD", "CHROME_OBSERVATION_HOLD"))
+        self.assertFalse(recovered["wake_sent"])
+        self.assertFalse(recovered["exact_chat_verified"])
+        self.assertIsNone(self.values.get("StartPending"))
+        run_record = json.loads(self.values["Run"])
+        self.assertEqual(run_record["instance"], fresh_guid)
+        self.assertNotEqual(run_record["nonce"], prior_nonce)
+        archive = json.loads(self.values[f"RetiredPending_{prior_nonce}"])
+        self.assertEqual(archive["classification"], "HISTORICAL_UNKNOWN")
+        self.assertEqual(archive["prior_source_sha"], prior_sha)
+        self.assertEqual(archive["prior_source_digest"], prior_digest)
+        self.assertEqual(archive["prior_source_provenance"], "REVIEWED_PRIOR_SHA_COMPATIBILITY")
+        self.assertIs(archive["prior_source_digest_rehashed"], False)
+        self.assertEqual(archive["pending_raw"], raw_prior)
+        self.assertEqual(self.modes[:3], ["inspect_recovery", "inspect_recovery", "start"])
+        self.launch.assert_called_once()
+
+        # Subsequent deploy sees live Run with CHROME_OBSERVATION_HOLD -> HOLD (no relaunch),
+        # then once Chrome becomes cleanly OFF (CHROME_ABSENT) -> OBSERVED.
+        self.approval = event("write", hostops._SUPERVISOR_DEPLOY, {})
+        still_hold = self.dispatch()
+        self.assertEqual((still_hold["status"], still_hold["code"]), ("HOLD", "CHROME_OBSERVATION_HOLD"))
+        self.launch.assert_called_once()
+        self.publish_health(nonce=run_record["nonce"], mode=self.runtime._CHROME_HEALTH_ONLY, health="CHROME_ABSENT")
+        now_observed = self.dispatch()
+        self.assertEqual((now_observed["status"], now_observed["code"]), ("OBSERVED", "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED"))
+        self.launch.assert_called_once()
+
+        # 3. Unverified process or non-health-only mode with CHROME_OBSERVATION_HOLD MUST NOT promote to Run.
+        for label, bad_health_kwargs in (
+            ("unverified_pid", {"mode": self.runtime._CHROME_HEALTH_ONLY, "health": "CHROME_OBSERVATION_HOLD", "pid": 999}),
+            ("missing_health_only_mode", {"health": "CHROME_OBSERVATION_HOLD"}),
+        ):
+            with self.subTest(unproven=label):
+                self.values.clear()
+                self.active.return_value = False
+                self.state = "READY"
+                self.launch.reset_mock()
+
+                def launch_bad(nonce, kw=bad_health_kwargs):
+                    self.state = fresh_guid
+                    self.publish_health(nonce=nonce, **kw)
+                    return fresh_guid
+
+                self.launch.side_effect = launch_bad
+                self.approval = event("write", hostops._SUPERVISOR_DEPLOY, {})
+                res = self.dispatch()
+                self.assertEqual((res["status"], res["code"]), ("HOLD", "SUPERVISOR_START_UNKNOWN"))
+                self.assertNotIn("Run", self.values)
+                self.assertIn("StartPending", self.values)
+
+        # 4. Arbitrary unreviewed SHA and config mismatch for c8d77c15 still fail closed with zero mutations.
+        self.mock(hostops, "_git_bytes", side_effect=hostops.Denied("GIT_READ_FAILED"))
+        for bad_label, bad_pending, want_code in (
+            ("unreviewed_sha", {**prior_intent, "source_sha": "c8d77c15cf8e937ea395c677ccd0ac8e20a2a1e6"},
+             "RECOVERY_PRIOR_SOURCE_UNPROVEN"),
+            ("config_digest_drift", {**prior_intent, "config_digest": "9" * 64},
+             "RECOVERY_PRIOR_HEALTH_ONLY_UNPROVEN"),
+        ):
+            with self.subTest(fail_closed=bad_label):
+                self.values.clear()
+                raw_bad = json.dumps(bad_pending)
+                self.values["StartPending"] = raw_bad
+                self.active.return_value = False
+                self.state = "READY"
+                self.store.reset_mock()
+                self.launch.reset_mock()
+                res = self.dispatch_recovery()
+                self.assertEqual((res["status"], res["code"]), ("HOLD", want_code))
+                self.assertEqual(self.values, {"StartPending": raw_bad})
+                self.store.assert_not_called()
+                self.launch.assert_not_called()
+
     def test_real_bootstrap_controlled_offline_windows_fixture_boundaries(self):
         """Exercise real _SUPERVISOR_BOOTSTRAP + canonical CLI with fake winreg and isolated legacy 9444 data."""
         import os
@@ -5501,7 +5647,12 @@ def wrapped_run_module(mod_name, **kw):
         acq._verify_google_chrome = lambda env: (_ for _ in ()).throw(acq.AcquisitionBlocked('CHROME_EXECUTABLE_UNTRUSTED'))
     else:
         acq._verify_google_chrome = lambda env: None
-    acq._query_windows = lambda port: {{'listeners': [], 'processes': []}}
+    if fault == 'powershell_unavailable':
+        def query_windows(port):
+            raise acq.AcquisitionBlocked('POWERSHELL_UNAVAILABLE')
+        acq._query_windows = query_windows
+    else:
+        acq._query_windows = lambda port: {{'listeners': [], 'processes': []}}
     acq._clean_launch_pending = lambda: False
     handoff._private_identity = lambda path: {sid!r}
     runner._private_identity = lambda path: {sid!r}
@@ -5572,6 +5723,15 @@ runpy.run_module = wrapped_run_module
                     self.assertEqual(rec["nonce"], nonce, label)
                     self.assertEqual(rec["source_sha"], base_intent["source_sha"], label)
                     self.assertNotIn(str(cfg), json.dumps(rec), label)
+
+            rc, _, store = run_fixture(cli_fault="powershell_unavailable")
+            self.assertEqual(rc, 2)
+            self.assertNotIn("Health", store)
+            runtime = SimpleNamespace(_supervisor_deployment_value=store.get)
+            self.assertEqual(
+                hostops._probe_supervisor_startup_receipt(runtime, base_intent),
+                "STARTUP_MATCH_FIRST_HEALTH_POWERSHELL_UNAVAILABLE",
+            )
 
             # 3. Healthy legacy health-only path under real pythonw.exe -I -B -S (even without LOCALAPPDATA env).
             rc, rec, store = run_fixture(exe=pythonw_exe, omit_localappdata=True)
