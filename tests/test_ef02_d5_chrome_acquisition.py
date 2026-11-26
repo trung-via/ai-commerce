@@ -1610,6 +1610,56 @@ def test_n3a_logon_decisions_are_advisory_without_mutation(
     assert capsys.readouterr().out == ""
 
 
+@pytest.mark.parametrize("mask", [0x120089, 0x1200A9, 0xA0000000])
+def test_existing_9444_shared_root_accepts_only_proven_read_custody(monkeypatch, tmp_path, mask):
+    from ai_commerce.remote import local_completion_handoff as handoff
+
+    env, repo, home, _, _ = logon_fixture(monkeypatch, tmp_path)
+    root = home / "AI-Commerce"
+    users = "S-1-5-32-545"
+
+    def identity(path):
+        aces = [("allow", _OPERATOR_SID)]
+        if path == root:
+            aces.append(("allow", users))
+        handoff._check_windows_acl(_OPERATOR_SID, aces, _OPERATOR_SID)
+        return _OPERATOR_SID
+
+    def acl(path):
+        if path == root:
+            return _OPERATOR_SID, [(0, 0, 0x1F01FF, _OPERATOR_SID), (0, 0x10, mask, users)]
+        # An ancestor may allow creating unrelated entries and have an
+        # inherit-only CREATOR OWNER ACE without granting deletion of a child.
+        return "S-1-5-18", [(0, 0, 0x1F01FF, "S-1-5-18"), (0, 0, 0x04, users),
+                            (0, 0x0B, 0x10000000, "S-1-3-0")]
+
+    monkeypatch.setattr(handoff, "_private_identity", identity)
+    monkeypatch.setattr(ca, "_windows_ancestor_acl", acl)
+    with pytest.raises(handoff.HandoffBlocked, match="^HANDOFF_PERMISSIONS_INVALID$"):
+        ca._read_9444_config(env.config_path, home, repo, _OPERATOR_SID)
+    assert ca._read_9444_config(env.config_path, home, repo, _OPERATOR_SID, shared_root=True) == env
+
+
+@pytest.mark.parametrize("on_parent, mask", [
+    (False, 0x02), (False, 0x04), (False, 0x10), (False, 0x100),
+    (False, 0x40000000), (False, 0x10000000), (False, 0x00010000),
+    (False, 0x00040000), (False, 0x00080000), (False, 0x02000000), (True, 0x40),
+])
+def test_existing_9444_shared_root_rejects_possible_ancestor_mutation(monkeypatch, tmp_path, on_parent, mask):
+    env, repo, home, _, _ = logon_fixture(monkeypatch, tmp_path)
+    untrusted_path = home if on_parent else home / "AI-Commerce"
+
+    def acl(path):
+        aces = [(0, 0, 0x1F01FF, _OPERATOR_SID)]
+        if path == untrusted_path:
+            aces.append((0, 0, mask, "S-1-5-32-545"))
+        return _OPERATOR_SID, aces
+
+    monkeypatch.setattr(ca, "_windows_ancestor_acl", acl)
+    with pytest.raises(ca._EnrollmentHold, match="^CHROME_CONFIG_ANCESTOR_MUTATION_ALLOWED$"):
+        ca._read_9444_config(env.config_path, home, repo, _OPERATOR_SID, shared_root=True)
+
+
 @pytest.mark.parametrize("gate", ["non_windows", "noninteractive_runner", "session_zero",
     "missing_token", "wrong_token", "elevated", "github_actions", "github_event", "github_run"])
 def test_n3a_logon_requires_current_interactive_owner(monkeypatch, tmp_path, gate):

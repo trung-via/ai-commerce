@@ -877,12 +877,14 @@ class NativeChrome9444:
 
     def __init__(self, repository_root: Path,
                  environment: chrome_acquisition.ChromeEnvironment | None = None,
-                 *, supervised: bool = False, legacy_health_only: bool = False):
+                 *, supervised: bool = False, legacy_health_only: bool = False,
+                 shared_config_root: bool = False):
         _require(not legacy_health_only or supervised, "CHROME_OWNER_UNPROVEN")
         self.repository_root = repository_root
         self.environment = environment
         self.supervised = supervised
         self.legacy_health_only = legacy_health_only
+        self.shared_config_root = shared_config_root
         self.adapter = None if legacy_health_only else LocalChromeDoorbellAdapter(allow_submit=False)
 
     def _owner_snapshot(self) -> tuple:
@@ -928,8 +930,10 @@ class NativeChrome9444:
                 raise RuntimeHold("CHROME_OBSERVATION_HOLD") from None
             _require(_supervised_desktop(session, sid) == desktop, "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
             return state, (local, session, sid, env, identity, desktop)
+        # A root that directly contains the config is also its private parent.
+        shared_root = self.shared_config_root and env.config_path.parent != local / "AI-Commerce"
         current = chrome_acquisition._read_9444_config(
-            env.config_path, local, self.repository_root, sid)
+            env.config_path, local, self.repository_root, sid, shared_root=shared_root)
         _require(current == env, "CHROME_ENROLLMENT_DRIFT")
         inventory = chrome_acquisition._query_windows(9444)
         # Evaluate first so a live profile without CDP remains a distinct HOLD,
@@ -941,7 +945,7 @@ class NativeChrome9444:
             env, inventory, session=session, sid=sid)
         _require(lifecycle_state == state, "CHROME_OWNER_UNPROVEN")
         chrome_acquisition._require_operator_control(env)
-        chrome_acquisition._check_enrollment_custody(env, local, sid)
+        chrome_acquisition._check_enrollment_custody(env, local, sid, shared_root=shared_root)
         # The enrollment helper checks root markers; a selected-profile marker
         # also needs an independently proven holder, which R2 cannot supply.
         for name in chrome_acquisition._MARKERS:
@@ -3566,7 +3570,9 @@ def _compose_supervisor_chrome(runtime: _RuntimeConfig, stop: Callable[[], bool]
     _require(path not in (runtime.path, runtime.journal.path), "LOCAL_CONFIG_INVALID")
     environment, config = _chrome_environment(path, root, runtime.registration)
     _require(_private_identity(path) == runtime.principal, "CHROME_OWNER_UNPROVEN")
-    return _SupervisorChrome(runtime, NativeChrome9444(root, environment, supervised=True), config, stop)
+    local_chat = "chat_preload" in runtime.raw or "ui_delivery" in runtime.raw
+    sender = NativeChrome9444(root, environment, supervised=True, shared_config_root=local_chat)
+    return _SupervisorChrome(runtime, sender, config, stop)
 
 
 def register_local_chat(config_path: Path | None, repository_root: Path, *,
@@ -3577,7 +3583,8 @@ def register_local_chat(config_path: Path | None, repository_root: Path, *,
     def register() -> Result:
         nonlocal prepared
         _require(config_path is not None, "LOCAL_AUTHORITY_MISSING")
-        _, _, sid = chrome_acquisition._enrollment_operator()
+        operator = chrome_acquisition._enrollment_operator()
+        _, _, sid = operator
         runtime = _read_runtime_config(config_path, repository_root, registration_only=True)
         _require(os.name != "nt" or sid == runtime.principal, "CHROME_OWNER_UNPROVEN")
         _require("chat_preload" in runtime.raw, "LOCAL_CHAT_REGISTRATION_CONFIG_REQUIRED")
@@ -3591,6 +3598,7 @@ def register_local_chat(config_path: Path | None, repository_root: Path, *,
             origin = data.get("local_origin")
             _require(origin is None or origin["phase"] != "ENROLLED", "LOCAL_CHAT_ALREADY_REGISTERED")
             before = chrome._route_snapshot(txn, origin)
+            _require(before[:3] == operator, "CHROME_OBSERVATION_CHANGED")
             commitment = None
             if registration_id is not None:
                 _require(origin is not None and origin["registration_id"] == registration_id,
@@ -4406,6 +4414,12 @@ def _report_startup_stage(callback: Callable[[str, str], None] | None, stage: st
                           *, fallback: str) -> None:
     if callback is None:
         return
+    # The versioned HostOps receipt uses its existing Chrome custody reason.
+    if stage == "FIRST_HEALTH" and reason in {
+        "CHROME_CONFIG_ANCESTOR_OWNER_UNPROVEN", "CHROME_CONFIG_ANCESTOR_ACL_UNPROVEN",
+        "CHROME_CONFIG_ANCESTOR_MUTATION_ALLOWED", "CHROME_CONFIG_ANCESTOR_PIN_UNPROVEN",
+    }:
+        reason = "CHROME_OWNER_UNPROVEN"
     allowed = _STARTUP_STAGE_REASONS.get(stage, frozenset())
     safe_reason = reason if reason in allowed else fallback
     with suppress(Exception):
