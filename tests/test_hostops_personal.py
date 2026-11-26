@@ -62,6 +62,146 @@ def event(mode, operation, parameters, *, comment=None):
     return result
 
 
+class WakeHubEnrollmentTests(unittest.TestCase):
+    def test_selection_preparation_requires_owner_approval_and_has_no_input_fields(self):
+        operation = "prepare_wakehub_chat_enrollment"
+        payload = event("write", operation, {})
+        self.assertEqual(hostops.parse_event(payload, "write")["parameters"], {})
+        payload["comment"]["user"]["login"] = "someone-else"
+        with self.assertRaises(hostops.Denied):
+            hostops.parse_event(payload, "write")
+        with self.assertRaisesRegex(hostops.Denied, "^INVALID_PARAMETERS$"):
+            hostops.parse_event(event("write", operation, {"chat_url": "private"}), "write")
+
+    def test_enrollment_write_requires_exact_approval_and_opaque_selection(self):
+        operation = "enroll_wakehub_chat"
+        parameters = {"selection_id": "a" * 64}
+        request = hostops.parse_event(event("write", operation, parameters), "write")
+        self.assertEqual(request, {"issue_number": 17, "operation": operation, "parameters": parameters})
+        with self.assertRaisesRegex(hostops.Denied, "^PROTECTED_HOSTOPS_ONLY$"):
+            hostops.perform(request)
+        for mode, params, comment, code in (
+            ("read", parameters, None, "READ_OPERATION_DENIED"),
+            ("write", {}, None, "INVALID_PARAMETERS"),
+            ("write", {**parameters, "chat_url": "private"}, None, "INVALID_PARAMETERS"),
+            ("write", {"selection_id": "https://example.invalid"}, None, "INVALID_PARAMETERS"),
+            ("write", parameters, "APPROVE WRITE #18", "EXACT_WRITE_APPROVAL_REQUIRED"),
+        ):
+            with self.subTest(mode=mode, params=params, comment=comment):
+                with self.assertRaisesRegex(hostops.Denied, f"^{code}$"):
+                    hostops.parse_event(event(mode, operation, params, comment=comment), mode)
+
+    def test_enrollment_rejects_other_runner_and_unreviewed_workflow_before_native_reads(self):
+        from ai_commerce.wakehub_runtime import runner
+
+        payload = event("write", "enroll_wakehub_chat", {"selection_id": "a" * 64})
+        with patch.object(hostops, "_supervisor_source") as source, \
+             patch.object(runner, "_supervisor_owner_session") as owner:
+            with patch.dict(hostops.os.environ, {"RUNNER_NAME": "AI-COMMERCE-EF02-02"}):
+                receipt = hostops._enroll_protected_supervisor_chat(payload)
+                self.assertEqual(receipt["code"], "PROTECTED_HOSTOPS_ONLY")
+            with patch.object(hostops, "_require_protected_clean_runner"), \
+                 patch.object(hostops, "_protected_clean_workflow_sha", return_value="a" * 40), \
+                 patch.dict(hostops.os.environ, {"HOSTOPS_WAKEHUB_ENROLLMENT_DISPATCH": ""}):
+                receipt = hostops._enroll_protected_supervisor_chat(payload)
+                self.assertEqual(receipt["code"], "PROTECTED_HOSTOPS_ONLY")
+            source.assert_not_called()
+            owner.assert_not_called()
+        self.assertFalse(receipt["exact_chat_verified"])
+        self.assertFalse(receipt["wake_sent"])
+        self.assertEqual(receipt.keys(), hostops._WAKEHUB_ENROLLMENT_PUBLIC_FIELDS
+                         - {"source_sha", "approval_comment_id"})
+
+    def test_public_enrollment_contract_rejects_unbound_or_noncanonical_receipts(self):
+        from ai_commerce.wakehub_runtime import runner
+
+        sha = "b" * 40
+        common = {"issue_number": 17, "source_sha": sha, "approval_comment_id": 23,
+                  "approval_channel": "OWNER_GITHUB_COMMENT", "remote_shell_enabled": False,
+                  "arbitrary_shell_enabled": False, "wake_sent": False}
+        cases = (
+            (runner._ENROLLMENT_PREPARE_OPERATION, "OBSERVED", runner._ENROLLMENT_PREPARED,
+             False, {"selection_id": "a" * 64}),
+            (runner._ENROLLMENT_OPERATION, "OBSERVED", "LOCAL_CHAT_REGISTERED_UI_EVIDENCE", True, {}),
+            (runner._ENROLLMENT_OPERATION, "OBSERVED", "WAKEHUB_CHAT_ALREADY_ENROLLED", True, {}),
+            (runner._ENROLLMENT_PREPARE_OPERATION, "HOLD", "EXACT_CHAT_ABSENT", False, {}),
+            (runner._ENROLLMENT_OPERATION, "HOLD", runner._ENROLLMENT_UNKNOWN, False, {}),
+        )
+        for operation, status, code, verified, extra in cases:
+            pins = {"operation": operation, "number": 17, "sha": sha, "comment_id": 23, "runtime": runner}
+            valid = dict(common, operation=operation, status=status, code=code, exact_chat_verified=verified, **extra)
+            hostops._check_wakehub_enrollment_public_receipt(valid, **pins)
+            for key in valid:
+                with self.subTest(code=code, missing=key), self.assertRaisesRegex(hostops.Denied, "^PUBLIC_TRANSPORT_GAP$"):
+                    hostops._check_wakehub_enrollment_public_receipt({k: v for k, v in valid.items() if k != key}, **pins)
+            changes = {"code": ["UNREVIEWED", []], "status": ["BLOCKED"], "issue_number": [18, 17.0],
+                       "source_sha": ["c" * 40], "approval_comment_id": [24, 23.0],
+                       "approval_channel": ["CHATGPT_TO_AI_COMMERCE_ISSUE"],
+                       "remote_shell_enabled": [True], "arbitrary_shell_enabled": [0], "wake_sent": [True],
+                       "exact_chat_verified": [not verified], "chat_url": ["private"], "content_utf8": ["private"],
+                       "selection_id": ["https://example.invalid"] if extra else ["a" * 64],
+                       "operation": [next(op for op in hostops._SUPERVISOR_CHAT_WRITES if op != operation)]}
+            for key, values in changes.items():
+                for value in values:
+                    with self.subTest(code=code, invalid=key, value=value), self.assertRaisesRegex(
+                            hostops.Denied, "^PUBLIC_TRANSPORT_GAP$"):
+                        hostops._check_wakehub_enrollment_public_receipt(dict(valid, **{key: value}), **pins)
+
+    def test_prepare_and_enroll_project_only_correlated_native_receipt(self):
+        from ai_commerce.wakehub_runtime import runner
+
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        sha, source, desktop = "b" * 40, "c" * 64, "d" * 64
+        owner = Path("Local"), 7, "S-1-5-21-4-5-6-1001"
+        instance = "00000000-0000-0000-0000-000000000001"
+        run = {"source_sha": sha, "source_digest": source, "config_digest": "e" * 64, "desktop": desktop,
+               "session": owner[1], "sid": owner[2], "config": "private", "nonce": "f" * 32, "instance": instance}
+        health = {"pid": 100, "created": 200}
+        stored = {"Run": json.dumps(run)}
+
+        def publish(key, raw):
+            self.assertEqual(key, runner._ENROLLMENT_INTENT)
+            intent = runner._parse_enrollment_intent(raw, run)
+            self.assertEqual((intent["issue_number"], intent["comment_id"]), (17, 23))
+            self.assertEqual(intent["selection_id"], selection)
+            row = {"intent": runner.digest(intent), "pid": health["pid"], "code": code, **projection}
+            self.assertIsNone(runner._enrollment_receipt(json.dumps(dict(row, leak="private")), intent, health["pid"]))
+            self.assertIsNone(runner._enrollment_receipt(json.dumps(dict(row, pid=0)), intent, health["pid"]))
+            stored[runner._ENROLLMENT_RECEIPT] = json.dumps(row)
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(hostops.os.environ, {"HOSTOPS_WAKEHUB_ENROLLMENT_DISPATCH": runner._ENROLLMENT_SCHEMA,
+                                                                "GITHUB_RUN_ATTEMPT": "1"}))
+            for target, name, method in (
+                (hostops, "_require_protected_clean_runner", Mock()),
+                (hostops, "_protected_clean_workflow_sha", Mock(return_value=sha)),
+                (hostops, "_supervisor_source", Mock(return_value=source)),
+                (hostops, "_supervisor_expected_registration", Mock(return_value=(Path("python.exe"), "fixed-bs"))),
+                (hostops, "_read_supervisor_health", Mock(return_value=health)),
+                (runner, "_supervisor_owner_session", Mock(return_value=(owner, desktop))),
+                (runner, "_supervisor_slot", lambda name: nullcontext()),
+                (runner, "_supervisor_deployment_value", stored.get),
+                (runner, "_store_supervisor_deployment_value", publish),
+            ):
+                stack.enter_context(patch.object(target, name, method))
+            task = stack.enter_context(patch.object(hostops, "_supervisor_task", return_value=instance))
+            for operation, selection, code, projection in (
+                (runner._ENROLLMENT_PREPARE_OPERATION, None, runner._ENROLLMENT_PREPARED, {"selection_id": "a" * 64}),
+                (runner._ENROLLMENT_OPERATION, "a" * 64, "LOCAL_CHAT_REGISTERED_UI_EVIDENCE", {}),
+            ):
+                payload = event("write", operation, {"selection_id": selection} if selection else {})
+                payload["comment"].update(id=23, created_at=now, updated_at=now)
+                receipt = hostops._enroll_protected_supervisor_chat(payload)
+                self.assertEqual(receipt, {"operation": operation, "status": "OBSERVED", "code": code,
+                                          "exact_chat_verified": selection is not None,
+                                          "issue_number": 17, "approval_comment_id": 23,
+                                          "approval_channel": "OWNER_GITHUB_COMMENT",
+                                          "remote_shell_enabled": False, "arbitrary_shell_enabled": False,
+                                          "wake_sent": False, "source_sha": sha, **projection})
+        self.assertEqual(len(task.call_args_list), 4)
+        self.assertTrue(all(not attempt.kwargs for attempt in task.call_args_list))
+
+
 class A10HostReadinessTests(unittest.TestCase):
     OP = "a10_codex_native_readiness"
     SCHEMA = "A10CodexHostReadiness.v1"

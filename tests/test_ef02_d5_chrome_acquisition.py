@@ -15,6 +15,111 @@ import pytest
 from ai_commerce.remote import chrome_acquisition as ca
 
 
+@pytest.mark.parametrize("fault", [None, "absent", "foreign", "reparse", "readback"])
+def test_wakehub_acl_preparation_touches_only_pinned_enrollment_state(monkeypatch, tmp_path, fault):
+    local = tmp_path / "Local"
+    custody = object.__new__(ca._WakeHubEnrollmentACL)
+    custody.local = local
+    checked, repaired, created = [], [], []
+
+    def parent(path, **kwargs):
+        assert path == local / "AI-Commerce" and not kwargs
+        return "AI-Commerce"
+
+    def relative(parent_handle, name, *, directory, repair_acl=False, optional=False):
+        assert optional
+        if name == "WakeHub":
+            assert (parent_handle, directory, repair_acl) == ("AI-Commerce", True, False)
+        else:
+            assert repair_acl
+            assert (parent_handle, directory) == (("WakeHub", True) if name == "Enrollment" else ("Enrollment", False))
+        if fault == "reparse" and name == "runtime-config.json":
+            custody._blocked()
+        return name if fault != "absent" and name in {
+            "WakeHub", "Enrollment", "runtime-config.json", "enrollment.sqlite3",
+        } else None
+
+    def create(parent_handle, name, *, directory):
+        assert fault == "absent" and directory
+        created.append((parent_handle, name))
+        return name
+
+    def owner(handle):
+        checked.append(handle)
+        if fault == "foreign" and handle == "enrollment.sqlite3":
+            raise ca._EnrollmentHold("WAKEHUB_ENROLLMENT_FOREIGN_OWNER")
+
+    def repair(handle, *, directory):
+        expected = ["Enrollment"] if fault == "absent" else ["Enrollment", "runtime-config.json", "enrollment.sqlite3"]
+        assert checked == expected
+        assert directory == (handle == "Enrollment")
+        repaired.append(handle)
+        if fault == "readback" and handle == "runtime-config.json":
+            custody._blocked()
+
+    monkeypatch.setattr(custody, "_pin_path", parent)
+    monkeypatch.setattr(custody, "_relative", relative)
+    monkeypatch.setattr(custody, "_create", create)
+    monkeypatch.setattr(custody, "_owner", owner)
+    monkeypatch.setattr(custody, "_repair", repair)
+    if fault in (None, "absent"):
+        custody.prepare()
+        assert repaired == checked
+        assert created == ([("AI-Commerce", "WakeHub"), ("WakeHub", "Enrollment")] if fault else [])
+    else:
+        with pytest.raises(ca._EnrollmentHold):
+            custody.prepare()
+        assert repaired == (["Enrollment", "runtime-config.json"] if fault == "readback" else [])
+
+
+def test_wakehub_acl_preserves_valid_object_without_rewriting_its_dacl():
+    custody = object.__new__(ca._WakeHubEnrollmentACL)
+    custody._acl = Mock()
+    custody._owner = Mock(side_effect=AssertionError("valid ACL needs no repair"))
+    custody._repair(123, directory=True)
+    custody._acl.assert_called_once_with(123, exact=True, inherit=True)
+
+
+@pytest.mark.parametrize("readback_proven", [False, True])
+def test_wakehub_acl_repairs_dacl_and_requires_exact_readback(readback_proven):
+    import ctypes
+    from ctypes import wintypes
+
+    custody = object.__new__(ca._WakeHubEnrollmentACL)
+    custody.c, custody.w, custody.sid = ctypes, wintypes, "S-1-5-21-4-5-6-1001"
+    blocked = ca._EnrollmentHold("ENROLLMENT_NATIVE_CUSTODY_UNPROVEN")
+    custody._acl = Mock(side_effect=[blocked, None if readback_proven else blocked])
+    custody._owner = Mock()
+
+    def descriptor(sddl, revision, output, unused):
+        assert sddl == f"D:P(A;OICI;FA;;;{custody.sid})" and revision == 1 and unused is None
+        output._obj.value = 100
+        return True
+
+    def get_dacl(sd, present, output, defaulted):
+        assert sd.value == 100
+        present._obj.value = 1
+        output._obj.value = 200
+        return True
+
+    def set_dacl(handle, kind, info, owner, group, dacl, sacl):
+        assert (handle, kind, info, dacl.value) == (123, 1, 0x80000004, 200)
+        assert owner is group is sacl is None
+        custody._owner.assert_called_once_with(handle)
+        return 0
+
+    custody.a = SimpleNamespace(ConvertStringSecurityDescriptorToSecurityDescriptorW=descriptor,
+                                GetSecurityDescriptorDacl=get_dacl, SetSecurityInfo=set_dacl)
+    custody.k = SimpleNamespace(LocalFree=Mock())
+    if readback_proven:
+        custody._repair(123, directory=True)
+    else:
+        with pytest.raises(ca._EnrollmentHold, match="ENROLLMENT_NATIVE_CUSTODY_UNPROVEN"):
+            custody._repair(123, directory=True)
+    custody._acl.assert_called_with(123, exact=True, inherit=True)
+    assert custody.k.LocalFree.call_args.args[0].value == 100
+
+
 @pytest.mark.parametrize("elevated", [False, True])
 def test_protocol_session_uses_token_and_session_without_opening_lock_desktop(monkeypatch, elevated):
     import ctypes
@@ -5007,6 +5112,48 @@ def test_owned_9444_rejects_contradictory_profile_helper(monkeypatch, tmp_path, 
     inventory["processes"].append(helper)
     with pytest.raises(ca.AcquisitionBlocked, match="^BROWSER_OWNERSHIP_UNPROVEN$"):
         ca._observe_9444_inventory(env, inventory, session=1, sid=_OPERATOR_SID)
+
+
+@pytest.mark.parametrize("fault", [None, "missing_parent", "cycle", "reused_parent", "foreign_parent",
+                                  "foreign_child", "other_root", "wrong_profile", "wrong_port", "listener"])
+def test_9444_inherited_profile_and_port_require_exact_listener_ancestry(monkeypatch, tmp_path, fault):
+    env, _, _, inventory, _ = logon_fixture(monkeypatch, tmp_path, running=True)
+    root, = inventory["processes"]
+    pid = root["ProcessId"]
+    parent = dict(root, ProcessId=pid + 1, ParentProcessId=pid, CreationDate="2026-11-14T01:00:01Z",
+                  CommandLine=json.dumps([str(env.executable), "--type=future-helper"]))
+    args = env.command() + ["--type=future-child"]
+    child = dict(root, ProcessId=pid + 2, ParentProcessId=pid + 1, CreationDate="2026-11-14T01:00:02Z")
+    if fault == "missing_parent":
+        del child["ParentProcessId"]
+    elif fault == "cycle":
+        parent["ParentProcessId"] = pid + 2
+    elif fault == "reused_parent":
+        parent["CreationDate"] = "2026-11-14T01:00:03Z"
+    elif fault == "foreign_parent":
+        parent["OwnerSid"] = "S-1-5-18"
+    elif fault == "foreign_child":
+        child["SessionId"] = 2
+    elif fault == "other_root":
+        parent["CommandLine"] = json.dumps([str(env.executable)])
+    elif fault == "wrong_profile":
+        args[2] = "--profile-directory=Other"
+    elif fault == "wrong_port":
+        args[4] = "--remote-debugging-port=9443"
+    elif fault == "listener":
+        inventory["listeners"].append(dict(inventory["listeners"][0], OwningProcess=pid + 2))
+    child["CommandLine"] = json.dumps(args)
+    inventory["processes"] += [child, parent]  # Neither traversal nor proof depends on CIM row order.
+    for observe in (ca._legacy_health_inventory, ca._observe_9444_inventory):
+        if fault:
+            with pytest.raises(ca.AcquisitionBlocked, match="^BROWSER_OWNERSHIP_UNPROVEN$"):
+                observe(env, inventory, session=1, sid=_OPERATOR_SID)
+        else:
+            state, identity = observe(env, inventory, session=1, sid=_OPERATOR_SID)
+            assert state == "OWNED" and tuple(row[0] for row in identity[1]) == (pid,)
+    inventory["listeners"] = []
+    with pytest.raises(ca.AcquisitionBlocked, match="^PROFILE_ALREADY_ACTIVE_NO_CDP$"):
+        ca._legacy_health_inventory(env, inventory, session=1, sid=_OPERATOR_SID)
 
 
 def test_source_counterexamples_legacy_health_vs_lifecycle_and_powershell(monkeypatch, tmp_path):
