@@ -1170,7 +1170,7 @@ class _NativeEnrollment:
         finally:
             self.k.LocalFree(c.cast(text, c.c_void_p))
 
-    def _acl(self, handle, *, exact=False):
+    def _acl(self, handle, *, exact=False, inherit=False):
         from .local_completion_handoff import HandoffBlocked, _check_windows_acl
         c, w = self.c, self.w
         owner, dacl, sd = c.c_void_p(), c.c_void_p(), c.c_void_p()
@@ -1195,7 +1195,8 @@ class _NativeEnrollment:
                         or self.a.GetLengthSid(sid) > size - 8):
                     self._blocked()
                 aces.append(("allow" if header[0] == 0 else "deny", self._sid_text(sid)))
-                if exact and (header[0:2] != b"\x00\x00" or int.from_bytes(header[4:8], "little") != 0x1F01FF):
+                if exact and (header[0:2] != bytes((0, 3 if inherit else 0))
+                              or int.from_bytes(header[4:8], "little") != 0x1F01FF):
                     self._blocked()
             try:
                 _check_windows_acl(self._sid_text(owner), aces, self.sid)
@@ -1214,7 +1215,8 @@ class _NativeEnrollment:
             self._blocked()
         return (info.Volume, info.IndexHigh, info.IndexLow, info.SizeHigh, info.SizeLow)
 
-    def _relative(self, parent, name, *, directory, create=False, write=False, optional=False, readback=False):
+    def _relative(self, parent, name, *, directory, create=False, write=False, optional=False,
+                  readback=False, repair_acl=False):
         c, w = self.c, self.w
         if not name or name in {".", ".."} or any(ch in name for ch in "\\/:\x00"):
             self._blocked()
@@ -1227,12 +1229,17 @@ class _NativeEnrollment:
                                 0x40 | 0x1000, self.descriptor if create else None, None)
         io, handle = self.IoStatus(), w.HANDLE()
         access = 0x120089 | (0x116 if write else 0)  # read/control/synchronize; optional write
+        options = 0x20 | 0x200000 | (1 if directory else 0x40)
+        if repair_acl:
+            # SetSecurityInfo does not propagate ACEs from MAXIMUM_ALLOWED handles.
+            access = 0x02000000
+            options &= ~0x20
         previous = self.effect_possible
         if create:
             self.effect_possible = True  # Set BEFORE crossing the mutation boundary.
         status = self.n.NtCreateFile(c.byref(handle), access, c.byref(attrs), c.byref(io), None,
             0x80, 3 if readback else 1, 2 if create else 1,
-            0x20 | 0x200000 | (1 if directory else 0x40), None, 0)
+            options, None, 0)
         unsigned = status & 0xFFFFFFFF
         if unsigned in {0xC0000034, 0xC000003A} and optional and not create:
             return None
@@ -1448,6 +1455,78 @@ class _NativeEnrollment:
             self.descriptor = None
         if failed:
             self._blocked()
+
+
+class _WakeHubEnrollmentACL(_NativeEnrollment):
+    """Handle-relative DACL preparation limited to the fixed WakeHub draft."""
+
+    def __enter__(self):
+        return self
+
+    def _owner(self, handle):
+        c = self.c
+        owner, sd = c.c_void_p(), c.c_void_p()
+        if self.a.GetSecurityInfo(handle, 1, 1, c.byref(owner), None, None, None, c.byref(sd)):
+            self._blocked()
+        try:
+            if self._sid_text(owner) != self.sid:
+                raise _EnrollmentHold("WAKEHUB_ENROLLMENT_FOREIGN_OWNER")
+        finally:
+            self.k.LocalFree(sd)
+
+    def _repair(self, handle, *, directory):
+        try:
+            self._acl(handle)
+            return
+        except _EnrollmentHold:
+            self._owner(handle)
+        c, w = self.c, self.w
+        ptr = c.c_void_p
+        sd, dacl, present, defaulted = ptr(), ptr(), w.BOOL(), w.BOOL()
+        get_dacl = self.a.GetSecurityDescriptorDacl
+        get_dacl.argtypes = [ptr, c.POINTER(w.BOOL), c.POINTER(ptr), c.POINTER(w.BOOL)]
+        get_dacl.restype = w.BOOL
+        set_security = self.a.SetSecurityInfo
+        set_security.argtypes = [w.HANDLE, w.DWORD, w.DWORD, ptr, ptr, ptr, ptr]
+        set_security.restype = w.DWORD
+        inheritance = "OICI" if directory else ""
+        if not self.a.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            f"D:P(A;{inheritance};FA;;;{self.sid})", 1, c.byref(sd), None,
+        ):
+            self._blocked()
+        try:
+            if (not get_dacl(sd, c.byref(present), c.byref(dacl), c.byref(defaulted))
+                    or not present or not dacl
+                    or set_security(handle, 1, 0x80000004, None, None, dacl, None)):
+                self._blocked()
+            self._acl(handle, exact=True, inherit=directory)
+        finally:
+            self.k.LocalFree(sd)
+
+    def prepare(self):
+        self.pinned = []
+        parent = self._pin_path(self.local / "AI-Commerce" / "WakeHub")
+        directory = self._relative(parent, "Enrollment", directory=True, repair_acl=True)
+        files = [self._relative(directory, name, directory=False, repair_acl=True, optional=optional)
+                 for name, optional in (("runtime-config.json", False), ("enrollment.sqlite3", True),
+                                        ("enrollment.sqlite3.lock", True), ("enrollment.sqlite3-journal", True))]
+        handles = [(directory, True), *((handle, False) for handle in files if handle is not None)]
+        for handle, _ in handles:
+            self._owner(handle)
+        for handle, is_directory in handles:
+            self._repair(handle, directory=is_directory)
+
+
+def _prepare_wakehub_enrollment_acl(owner: tuple[Path, int, str]) -> None:
+    """Prepare existing owner-owned enrollment state before any private reads."""
+    local, session, sid = owner
+    try:
+        with _WakeHubEnrollmentACL(None, local, session, sid, None) as custody:
+            custody.prepare()
+    except (OSError, ValueError) as exc:
+        if str(exc) == "WAKEHUB_ENROLLMENT_FOREIGN_OWNER":
+            raise
+        raise _EnrollmentHold("WAKEHUB_ENROLLMENT_ACL_UNPROVEN") from None
 
 
 def assess_existing_9444(checkout: Path) -> dict:

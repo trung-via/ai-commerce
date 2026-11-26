@@ -15,6 +15,97 @@ import pytest
 from ai_commerce.remote import chrome_acquisition as ca
 
 
+@pytest.mark.parametrize("fault", [None, "foreign", "reparse", "readback"])
+def test_wakehub_acl_preparation_touches_only_pinned_enrollment_state(monkeypatch, tmp_path, fault):
+    local = tmp_path / "Local"
+    custody = object.__new__(ca._WakeHubEnrollmentACL)
+    custody.local = local
+    checked, repaired = [], []
+
+    def parent(path, **kwargs):
+        assert path == local / "AI-Commerce" / "WakeHub" and not kwargs
+        return "WakeHub"
+
+    def relative(parent_handle, name, *, directory, repair_acl, optional=False):
+        assert repair_acl
+        assert (parent_handle, directory) == (("WakeHub", True) if name == "Enrollment" else ("Enrollment", False))
+        if fault == "reparse" and name == "runtime-config.json":
+            custody._blocked()
+        return None if optional and name != "enrollment.sqlite3" else name
+
+    def owner(handle):
+        checked.append(handle)
+        if fault == "foreign" and handle == "enrollment.sqlite3":
+            raise ca._EnrollmentHold("WAKEHUB_ENROLLMENT_FOREIGN_OWNER")
+
+    def repair(handle, *, directory):
+        assert checked == ["Enrollment", "runtime-config.json", "enrollment.sqlite3"]
+        assert directory == (handle == "Enrollment")
+        repaired.append(handle)
+        if fault == "readback" and handle == "runtime-config.json":
+            custody._blocked()
+
+    monkeypatch.setattr(custody, "_pin_path", parent)
+    monkeypatch.setattr(custody, "_relative", relative)
+    monkeypatch.setattr(custody, "_owner", owner)
+    monkeypatch.setattr(custody, "_repair", repair)
+    if fault is None:
+        custody.prepare()
+        assert repaired == checked
+    else:
+        with pytest.raises(ca._EnrollmentHold):
+            custody.prepare()
+        assert repaired == (["Enrollment", "runtime-config.json"] if fault == "readback" else [])
+
+
+def test_wakehub_acl_preserves_valid_object_without_rewriting_its_dacl():
+    custody = object.__new__(ca._WakeHubEnrollmentACL)
+    custody._acl = Mock()
+    custody._owner = Mock(side_effect=AssertionError("valid ACL needs no repair"))
+    custody._repair(123, directory=True)
+    custody._acl.assert_called_once_with(123)
+
+
+@pytest.mark.parametrize("readback_proven", [False, True])
+def test_wakehub_acl_repairs_dacl_and_requires_exact_readback(readback_proven):
+    import ctypes
+    from ctypes import wintypes
+
+    custody = object.__new__(ca._WakeHubEnrollmentACL)
+    custody.c, custody.w, custody.sid = ctypes, wintypes, "S-1-5-21-4-5-6-1001"
+    blocked = ca._EnrollmentHold("ENROLLMENT_NATIVE_CUSTODY_UNPROVEN")
+    custody._acl = Mock(side_effect=[blocked, None if readback_proven else blocked])
+    custody._owner = Mock()
+
+    def descriptor(sddl, revision, output, unused):
+        assert sddl == f"D:P(A;OICI;FA;;;{custody.sid})" and revision == 1 and unused is None
+        output._obj.value = 100
+        return True
+
+    def get_dacl(sd, present, output, defaulted):
+        assert sd.value == 100
+        present._obj.value = 1
+        output._obj.value = 200
+        return True
+
+    def set_dacl(handle, kind, info, owner, group, dacl, sacl):
+        assert (handle, kind, info, dacl.value) == (123, 1, 0x80000004, 200)
+        assert owner is group is sacl is None
+        custody._owner.assert_called_once_with(handle)
+        return 0
+
+    custody.a = SimpleNamespace(ConvertStringSecurityDescriptorToSecurityDescriptorW=descriptor,
+                                GetSecurityDescriptorDacl=get_dacl, SetSecurityInfo=set_dacl)
+    custody.k = SimpleNamespace(LocalFree=Mock())
+    if readback_proven:
+        custody._repair(123, directory=True)
+    else:
+        with pytest.raises(ca._EnrollmentHold, match="ENROLLMENT_NATIVE_CUSTODY_UNPROVEN"):
+            custody._repair(123, directory=True)
+    custody._acl.assert_called_with(123, exact=True, inherit=True)
+    assert custody.k.LocalFree.call_args.args[0].value == 100
+
+
 @pytest.mark.parametrize("elevated", [False, True])
 def test_protocol_session_uses_token_and_session_without_opening_lock_desktop(monkeypatch, elevated):
     import ctypes

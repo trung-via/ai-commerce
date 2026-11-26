@@ -62,6 +62,92 @@ def event(mode, operation, parameters, *, comment=None):
     return result
 
 
+class WakeHubEnrollmentTests(unittest.TestCase):
+    def test_enrollment_write_requires_exact_approval_and_opaque_selection(self):
+        operation = "enroll_wakehub_chat"
+        parameters = {"selection_id": "a" * 64}
+        request = hostops.parse_event(event("write", operation, parameters), "write")
+        self.assertEqual(request, {"issue_number": 17, "operation": operation, "parameters": parameters})
+        with self.assertRaisesRegex(hostops.Denied, "^PROTECTED_HOSTOPS_ONLY$"):
+            hostops.perform(request)
+        for mode, params, comment, code in (
+            ("read", parameters, None, "READ_OPERATION_DENIED"),
+            ("write", {}, None, "INVALID_PARAMETERS"),
+            ("write", {**parameters, "chat_url": "private"}, None, "INVALID_PARAMETERS"),
+            ("write", {"selection_id": "https://example.invalid"}, None, "INVALID_PARAMETERS"),
+            ("write", parameters, "APPROVE WRITE #18", "EXACT_WRITE_APPROVAL_REQUIRED"),
+        ):
+            with self.subTest(mode=mode, params=params, comment=comment):
+                with self.assertRaisesRegex(hostops.Denied, f"^{code}$"):
+                    hostops.parse_event(event(mode, operation, params, comment=comment), mode)
+
+    def test_enrollment_rejects_other_runner_and_unreviewed_workflow_before_native_reads(self):
+        from ai_commerce.wakehub_runtime import runner
+
+        payload = event("write", "enroll_wakehub_chat", {"selection_id": "a" * 64})
+        with patch.object(hostops, "_supervisor_source") as source, \
+             patch.object(runner, "_supervisor_owner_session") as owner:
+            with patch.dict(hostops.os.environ, {"RUNNER_NAME": "AI-COMMERCE-EF02-02"}):
+                receipt = hostops._enroll_protected_supervisor_chat(payload)
+                self.assertEqual(receipt["code"], "PROTECTED_HOSTOPS_ONLY")
+            with patch.object(hostops, "_require_protected_clean_runner"), \
+                 patch.object(hostops, "_protected_clean_workflow_sha", return_value="a" * 40), \
+                 patch.dict(hostops.os.environ, {"HOSTOPS_WAKEHUB_ENROLLMENT_DISPATCH": ""}):
+                receipt = hostops._enroll_protected_supervisor_chat(payload)
+                self.assertEqual(receipt["code"], "PROTECTED_HOSTOPS_ONLY")
+            source.assert_not_called()
+            owner.assert_not_called()
+        self.assertFalse(receipt["exact_chat_verified"])
+        self.assertFalse(receipt["wake_sent"])
+        self.assertLessEqual(receipt.keys(), hostops.PERSONAL_PUBLIC_FIELDS)
+
+    def test_enrollment_uses_existing_task_and_projects_only_correlated_native_receipt(self):
+        from ai_commerce.wakehub_runtime import runner
+
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        payload = event("write", "enroll_wakehub_chat", {"selection_id": "a" * 64})
+        payload["comment"].update(id=23, created_at=now, updated_at=now)
+        sha, source, desktop = "b" * 40, "c" * 64, "d" * 64
+        owner = Path("Local"), 7, "S-1-5-21-4-5-6-1001"
+        instance = "00000000-0000-0000-0000-000000000001"
+        run = {"source_sha": sha, "source_digest": source, "config_digest": "e" * 64, "desktop": desktop,
+               "session": owner[1], "sid": owner[2], "config": "private", "nonce": "f" * 32, "instance": instance}
+        health = {"pid": 100, "created": 200}
+        stored = {"Run": json.dumps(run)}
+
+        def publish(key, raw):
+            self.assertEqual(key, runner._ENROLLMENT_INTENT)
+            intent = runner._parse_enrollment_intent(raw, run)
+            self.assertEqual((intent["issue_number"], intent["comment_id"], intent["selection_id"]), (17, 23, "a" * 64))
+            stored[runner._ENROLLMENT_RECEIPT] = json.dumps({"intent": runner.digest(intent), "pid": health["pid"],
+                                                            "code": "LOCAL_CHAT_REGISTERED_UI_EVIDENCE"})
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(hostops.os.environ, {"HOSTOPS_WAKEHUB_ENROLLMENT_DISPATCH": runner._ENROLLMENT_SCHEMA,
+                                                                "GITHUB_RUN_ATTEMPT": "1"}))
+            for target, name, method in (
+                (hostops, "_require_protected_clean_runner", Mock()),
+                (hostops, "_protected_clean_workflow_sha", Mock(return_value=sha)),
+                (hostops, "_supervisor_source", Mock(return_value=source)),
+                (hostops, "_supervisor_expected_registration", Mock(return_value=(Path("python.exe"), "fixed-bs"))),
+                (hostops, "_read_supervisor_health", Mock(return_value=health)),
+                (runner, "_supervisor_owner_session", Mock(return_value=(owner, desktop))),
+                (runner, "_supervisor_slot", lambda name: nullcontext()),
+                (runner, "_supervisor_deployment_value", stored.get),
+                (runner, "_store_supervisor_deployment_value", publish),
+            ):
+                stack.enter_context(patch.object(target, name, method))
+            task = stack.enter_context(patch.object(hostops, "_supervisor_task", return_value=instance))
+            receipt = hostops._enroll_protected_supervisor_chat(payload)
+        self.assertEqual(receipt, {"operation": "enroll_wakehub_chat", "status": "OBSERVED",
+                                  "code": "LOCAL_CHAT_REGISTERED_UI_EVIDENCE", "exact_chat_verified": True,
+                                  "issue_number": 17, "approval_channel": "OWNER_GITHUB_COMMENT",
+                                  "remote_shell_enabled": False, "arbitrary_shell_enabled": False,
+                                  "wake_sent": False, "source_sha": sha})
+        self.assertEqual(len(task.call_args_list), 2)
+        self.assertTrue(all(not attempt.kwargs for attempt in task.call_args_list))
+
+
 class A10HostReadinessTests(unittest.TestCase):
     OP = "a10_codex_native_readiness"
     SCHEMA = "A10CodexHostReadiness.v1"

@@ -72,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     registration = sub.add_parser(
         "register", help="Enroll the owner's exact chat from a local Windows owner terminal.",
         description="For an initial Chrome-health-only install, prepare a private WakeHubRuntimeR1.v1 draft "
-                    "and pass it explicitly with --config. Use the existing Chrome config, the owner-selected "
+                    "and pass it explicitly with --config for manual enrollment. Use the existing Chrome config, the owner-selected "
                     "exact route and its private journal. Set chat_preload explicitly. A registration-only "
                     "config can omit event targets. Open the configured chat "
                     "in the dedicated Chrome profile, prepare a private marker, manually post it as a USER "
@@ -80,7 +80,13 @@ def main(argv: list[str] | None = None) -> int:
                     "Reuse an existing enrolled journal for that exact route if present. After enrolling "
                     "and configuring standing consent for the verified account, atomically install the completed draft "
                     "at the canonical WakeHub/runtime-config.json. The health-only instance exits on pin change. "
-                    "Once it exits, approve a fresh deploy_wakehub_supervisor to use the same task.")
+                    "Once it exits, approve a fresh deploy_wakehub_supervisor to use the same task.",
+        epilog="Protected HostOps enrollment uses the owner draft at LOCALAPPDATA/AI-Commerce/WakeHub/Enrollment/"
+               "runtime-config.json and enrollment.sqlite3 in the same directory. Its enrollment_approval object "
+               "holds the private account_id and a 32-character lowercase hex nonce. The Issue carries only "
+               "selection_id, the canonical digest of [WakeHubChatEnrollment.v1, nonce, registration marker, "
+               "account_id]. Select that exact chat in dedicated Chrome 9444 before approving the Issue. "
+               "Enrollment leaves the draft and journal available for a separate delivery authorization.")
     actions = registration.add_subparsers(dest="action", required=True)
     prepare = actions.add_parser("prepare", help="Print a fresh private marker for manual presentation.")
     observe = actions.add_parser("observe", help="Verify and consume that marker in the exact Chat A.")

@@ -56,6 +56,7 @@ _CLEAN_TASK_RESET = "reset_clean_9444_tasks"
 _CLEAN_TASK_WRITES = (_CLEAN_AUTOSTART, _CLEAN_DEMAND_MIGRATION, _CLEAN_TASK_RESET)
 _SUPERVISOR_DEPLOY = "deploy_wakehub_supervisor"
 _SUPERVISOR_RECOVER_HEALTH_ONLY = "recover_wakehub_supervisor_health_only"
+_SUPERVISOR_ENROLL_CHAT = "enroll_wakehub_chat"
 _SUPERVISOR_CONFIG_PROBE = "wakehub_supervisor_config_probe"
 _SUPERVISOR_TASK_PROBE = "wakehub_supervisor_task_probe"
 _CLEAN_RUNTIME_PROBE = "clean_9444_runtime_probe"
@@ -232,7 +233,13 @@ def parse_event(event, mode):
         else:
             deny("READ_OPERATION_DENIED")
     else:
-        if operation in (*_CLEAN_TASK_WRITES, _SUPERVISOR_DEPLOY, _SUPERVISOR_RECOVER_HEALTH_ONLY):
+        if operation == _SUPERVISOR_ENROLL_CHAT:
+            if (params.keys() != {"selection_id"} or type(params["selection_id"]) is not str
+                    or re.fullmatch(r"[a-f0-9]{64}", params["selection_id"]) is None):
+                deny("INVALID_PARAMETERS")
+            if number > 2**53 - 1:
+                deny("ISSUE_OWNER_OR_STATE_DENIED")
+        elif operation in (*_CLEAN_TASK_WRITES, _SUPERVISOR_DEPLOY, _SUPERVISOR_RECOVER_HEALTH_ONLY):
             if params:
                 deny("INVALID_PARAMETERS")
             if operation in (_SUPERVISOR_DEPLOY, _SUPERVISOR_RECOVER_HEALTH_ONLY) and number > 2**53 - 1:
@@ -2649,6 +2656,97 @@ def _deploy_protected_supervisor(event):
         # Exception text can include private config, paths and native diagnostics.
         pass
     return _supervisor_receipt(failure, issue_number, sha)
+
+
+def _enroll_protected_supervisor_chat(event):
+    request = parse_event(event, "write")
+    if request["operation"] != _SUPERVISOR_ENROLL_CHAT:
+        deny("WRITE_SCOPE_DENIED")
+    number = request["issue_number"]
+    result = {"status": "HOLD", "code": "PROTECTED_HOSTOPS_ONLY", "operation": _SUPERVISOR_ENROLL_CHAT,
+              "issue_number": number, "approval_channel": "OWNER_GITHUB_COMMENT", "remote_shell_enabled": False,
+              "arbitrary_shell_enabled": False, "exact_chat_verified": False, "wake_sent": False}
+    if not (result.keys() | {"source_sha"}) <= PERSONAL_PUBLIC_FIELDS:
+        deny("PUBLIC_TRANSPORT_GAP")
+    failure = "PROTECTED_HOSTOPS_ONLY"
+    try:
+        _require_protected_clean_runner("issue_comment", reconcile=True)
+        sha = _protected_clean_workflow_sha()
+        # The workflow must opt this exact WRITE into its bound receipt sanitizer.
+        if os.environ.get("HOSTOPS_WAKEHUB_ENROLLMENT_DISPATCH") != "WakeHubChatEnrollment.v1":
+            deny(failure)
+        result["source_sha"] = sha
+        from ai_commerce.remote import chrome_acquisition as acquisition
+        from ai_commerce.wakehub_runtime import runner as runtime
+
+        failure = "WAKEHUB_ENROLLMENT_APPROVAL_UNVERIFIED"
+        comment = event["comment"]
+        comment_id = comment.get("id")
+        if not runtime._github_id(comment_id) or comment.get("created_at") != comment.get("updated_at"):
+            deny(failure)
+        issued = int(runtime._timestamp(comment.get("created_at"))) * 1000
+        approval = {"schema": runtime._ENROLLMENT_SCHEMA, "issue_number": number, "comment_id": comment_id,
+                    "selection_id": request["parameters"]["selection_id"], "issued_ms": issued,
+                    "expires_ms": issued + runtime._ENROLLMENT_LEASE_MS}
+        if not runtime._enrollment_intent_fresh(approval):
+            failure = "WAKEHUB_ENROLLMENT_APPROVAL_EXPIRED"
+            deny(failure)
+        failure = "SOURCE_CUSTODY_UNVERIFIED"
+        source = _supervisor_source(runtime, acquisition, sha)
+        root = ROOTS["workspace"]
+        failure = "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
+        owner, desktop = runtime._supervisor_owner_session()
+        failure = "SUPERVISOR_ACTIVE_UNVERIFIED"
+        executable, arguments = _supervisor_expected_registration(acquisition, root)
+
+        def current_instance():
+            return _supervisor_task(acquisition, executable, arguments, root, owner)
+
+        with runtime._supervisor_slot(runtime._SUPERVISOR_DEPLOY_MUTEX):
+            run = _parse_supervisor_intent(runtime._supervisor_deployment_value("Run"), require_instance=True)
+            if (run is None or runtime._supervisor_deployment_value("StartPending") is not None
+                    or (run["source_sha"], run["source_digest"], run["desktop"], run["session"], run["sid"])
+                    != (sha, source, desktop, owner[1], owner[2]) or current_instance() != run["instance"]):
+                deny(failure)
+            pins = {key: run[key] for key in (*runtime._ENROLLMENT_PINS, "config_digest")}
+            health = _read_supervisor_health(runtime, pins, executable, owner)
+            if health is None or runtime._supervisor_owner_session() != (owner, desktop):
+                deny(failure)
+            intent = {**approval, **{key: run[key] for key in runtime._ENROLLMENT_PINS}}
+            current = runtime._parse_enrollment_intent(runtime._supervisor_deployment_value(runtime._ENROLLMENT_INTENT), run)
+            previous = runtime._enrollment_receipt(runtime._supervisor_deployment_value(runtime._ENROLLMENT_RECEIPT),
+                                                   current, health["pid"]) if current is not None else None
+            if current != intent:
+                if (current is not None and runtime._enrollment_intent_fresh(current)
+                        and previous in (None, runtime._ENROLLMENT_UNKNOWN)):
+                    failure = "WAKEHUB_ENROLLMENT_BUSY"
+                    deny(failure)
+                if os.environ["GITHUB_RUN_ATTEMPT"] != "1":
+                    failure = "PROTECTED_HOSTOPS_ONLY"
+                    deny(failure)
+                failure = runtime._ENROLLMENT_UNKNOWN
+                runtime._store_supervisor_deployment_value(runtime._ENROLLMENT_INTENT, json.dumps(intent))
+        failure = runtime._ENROLLMENT_UNKNOWN
+        deadline = time.monotonic() + 75
+        while True:
+            code = runtime._enrollment_receipt(runtime._supervisor_deployment_value(runtime._ENROLLMENT_RECEIPT),
+                                              intent, health["pid"])
+            if code is not None and code != runtime._ENROLLMENT_UNKNOWN:
+                current_health = _read_supervisor_health(runtime, pins, executable, owner)
+                if (current_health is None or current_health["pid"] != health["pid"]
+                        or current_health["created"] != health["created"] or current_instance() != run["instance"]
+                        or runtime._supervisor_owner_session() != (owner, desktop)):
+                    deny(failure)
+                observed = code in runtime._ENROLLMENT_VERIFIED
+                return dict(result, status="OBSERVED" if observed else "HOLD", code=code,
+                            exact_chat_verified=observed)
+            if time.monotonic() >= deadline or not runtime._enrollment_intent_fresh(intent):
+                break
+            time.sleep(0.25)
+    except Exception:
+        # All public reasons come from fixed stages or the closed native receipt.
+        pass
+    return dict(result, code=failure)
 
 
 def _recover_protected_supervisor_health_only(event):
@@ -7301,6 +7399,8 @@ def perform(request):
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
         return _clean_autostart_receipt("PROTECTED_HOSTOPS_ONLY", operation=op)
+    if op == _SUPERVISOR_ENROLL_CHAT:
+        deny("PROTECTED_HOSTOPS_ONLY")
     if op in (_SUPERVISOR_DEPLOY, _SUPERVISOR_RECOVER_HEALTH_ONLY, _SUPERVISOR_CONFIG_PROBE, _SUPERVISOR_TASK_PROBE):
         if type(params) is not dict or params:
             deny("INVALID_PARAMETERS")
@@ -7447,6 +7547,8 @@ def main():
             result = _deploy_protected_supervisor(event)
         elif request["operation"] == _SUPERVISOR_RECOVER_HEALTH_ONLY:
             result = _recover_protected_supervisor_health_only(event)
+        elif request["operation"] == _SUPERVISOR_ENROLL_CHAT:
+            result = _enroll_protected_supervisor_chat(event)
         elif request["operation"] == _SUPERVISOR_CONFIG_PROBE:
             result = _probe_protected_supervisor_config(event)
         elif request["operation"] == _SUPERVISOR_TASK_PROBE:
