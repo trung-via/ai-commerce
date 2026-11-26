@@ -1925,13 +1925,54 @@ class _Lifecycle9444Assessment:
     native_adapter: Literal["BLOCKED_NOT_DEPLOYED"] = "BLOCKED_NOT_DEPLOYED"
 
 
-def _legacy_health_inventory(env: ChromeEnvironment, inventory: dict, *,
-                             session: int, sid: str) -> tuple[str, tuple]:
-    """Read-only 9444 observation for protected legacy health-only monitoring.
+_ADOPTABLE_CHROME_FLAGS = frozenset({
+    "--no-first-run", "--no-default-browser-check",
+    "--disable-background-mode", "--start-maximized",
+})
+_CDP_IDENTITY_SWITCHES = frozenset({
+    "--user-data-dir", "--profile-directory", "--remote-debugging-address", "--remote-debugging-port",
+})
 
-    Reuses evaluate() so unrelated ordinary Chrome processes without
-    --user-data-dir do not fail clean absence, while never treating failed,
-    ambiguous, or contradictory inventory as ABSENT or OWNED.
+
+def _observed_chrome_switch(argv: list[str], name: str) -> str | None:
+    aliases = (name, name[1:], "/" + name[2:])
+    matches = [arg for arg in argv[1:] if arg.partition("=")[0].lower() in aliases]
+    if not matches:
+        return None
+    prefix = name + "="
+    if len(matches) != 1 or not matches[0].startswith(prefix) or matches[0] == prefix:
+        raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
+    return matches[0][len(prefix):]
+
+
+def _adoptable_chrome_args(argv: list[str]) -> bool:
+    # Allow only configured identity switches and specific startup/window flags.
+    # Unknown flags can change profile, network, extension, or CDP behavior.
+    names = [arg.partition("=")[0] for arg in argv[1:]]
+    return (len(set(names)) == len(names)
+            and all(name in _CDP_IDENTITY_SWITCHES or arg in _ADOPTABLE_CHROME_FLAGS
+                    for name, arg in zip(names, argv[1:])))
+
+
+def _validate_observed_chrome(env: ChromeEnvironment, proc: dict, *, session: int, sid: str) -> None:
+    exe, created = proc.get("ExecutablePath"), proc.get("CreationDate")
+    try:
+        if (proc.get("OwnerSid") == sid and type(proc.get("SessionId")) is int
+                and proc["SessionId"] == session and isinstance(exe, str)
+                and Path(exe).is_absolute() and Path(exe).resolve(strict=True) == env.executable
+                and isinstance(created, str) and _creation_ticks(created) > 0):
+            return
+    except (OSError, ValueError, RuntimeError):
+        pass
+    raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
+
+
+def _observe_9444_inventory(env: ChromeEnvironment, inventory: dict, *,
+                            session: int, sid: str) -> tuple[str, tuple]:
+    """Observe the configured 9444 browser and competing claims in one inventory.
+
+    Only the target contributes to the owned identity. ABSENT here is a health
+    observation and callers still need the strict lifecycle proof for a start.
     """
     if (type(inventory) is not dict or set(inventory) != {"listeners", "processes"}
             or any(type(inventory[k]) not in (list, dict) for k in inventory)):
@@ -1943,67 +1984,78 @@ def _legacy_health_inventory(env: ChromeEnvironment, inventory: dict, *,
             or any(type(pid) is not int or pid <= 0 for pid in pids)
             or len(set(pids)) != len(pids)):
         raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
-    for row in listeners:
+    listener_pid = None
+    if listeners:
+        row = listeners[0]
         if type(row.get("LocalPort")) is not int or row["LocalPort"] != env.port:
             raise AcquisitionBlocked("WINDOWS_PROBE_INVALID")
-    state, pid = evaluate(
-        env, inventory, session_id=session, expected_sid=sid, parse=_commandline_argv,
-    )
-    port_claimants: list[int] = []
-    profile_helpers = False
+        listener_pid = row.get("OwningProcess")
+        if row.get("LocalAddress") != "127.0.0.1" or type(listener_pid) is not int:
+            raise AcquisitionBlocked("CDP_NOT_LOOPBACK_OWNED")
+        if listener_pid not in pids:
+            raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
+    owned = None
+    profile_active = port_claimed = False
     for proc in processes:
-        argv = _commandline_argv(proc["CommandLine"])
-        if (not isinstance(argv, list) or not 1 <= len(argv) <= 256
+        command = proc.get("CommandLine")
+        if not isinstance(command, str) or not 1 <= len(command) <= 32768:
+            raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
+        try:
+            argv = _commandline_argv(command)
+        except (ValueError, OSError):
+            raise AcquisitionBlocked("PROCESS_IDENTITY_UNKNOWN") from None
+        if (type(argv) is not list or not 1 <= len(argv) <= 256
                 or any(not isinstance(a, str) or not a for a in argv)):
             raise AcquisitionBlocked("PROCESS_IDENTITY_UNKNOWN")
-        type_switches = [a for a in argv if a.lower() == "--type" or a.lower().startswith("--type=")]
-        if type_switches and (len(type_switches) != 1 or not type_switches[0].startswith("--type=")
-                              or not type_switches[0][len("--type="):]):
+        child = _observed_chrome_switch(argv, "--type")
+        directory = _observed_chrome_switch(argv, "--user-data-dir")
+        port = _observed_chrome_switch(argv, "--remote-debugging-port")
+        if port is not None and (re.fullmatch(r"[0-9]{1,5}", port) is None
+                                 or not 1 <= int(port) <= 65535):
             raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
-        child = bool(type_switches)
-        if child:
-            profile_args = [a for a in argv if a.lower() == "--user-data-dir"
-                            or a.lower().startswith("--user-data-dir=")]
-            if profile_args:
-                if len(profile_args) != 1 or not profile_args[0].startswith("--user-data-dir="):
-                    raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
-                path_arg = _switch(argv, "--user-data-dir")
-                if not path_arg:
-                    raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
-                try:
-                    if Path(path_arg).resolve(strict=True) == env.user_data_dir:
-                        profile_helpers = True
-                except OSError:
-                    raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN") from None
-            continue
-        port_switches = [a for a in argv if a.lower() == "--remote-debugging-port"
-                         or a.lower().startswith("--remote-debugging-port=")]
-        if port_switches:
-            port = _switch(argv, "--remote-debugging-port")
-            if (len(port_switches) != 1 or not port_switches[0].startswith("--remote-debugging-port=")
-                    or port is None or re.fullmatch(r"[0-9]{1,5}", port) is None
-                    or not 1 <= int(port) <= 65535):
+        claims_port = port is not None and int(port) == env.port
+        claims_profile = False
+        if directory is not None:
+            path = Path(directory)
+            if not path.is_absolute() or path.anchor.startswith("\\\\"):
                 raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
-            if int(port) == env.port:
-                port_claimants.append(proc["ProcessId"])
-    if state == "ABSENT":
-        if profile_helpers:
+            try:
+                claims_profile = path.resolve(strict=True) == env.user_data_dir
+            except (OSError, ValueError, RuntimeError):
+                raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN") from None
+        if listener_pid is None:
+            profile_active |= claims_profile
+            port_claimed |= claims_port
+            continue
+        if proc["ProcessId"] == listener_pid:
+            if (child is not None or not claims_profile or not claims_port
+                    or not _adoptable_chrome_args(argv) or not Path(argv[0]).is_absolute()):
+                raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
+            _validate_observed_chrome(env, proc, session=session, sid=sid)
+            if not _identity_matches(env, proc["ExecutablePath"], argv):
+                raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
+            owned = proc
+        elif claims_port or (claims_profile and child not in ("renderer", "gpu-process", "utility")):
+            raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
+        elif claims_profile:
+            _validate_observed_chrome(env, proc, session=session, sid=sid)
+    if listener_pid is None:
+        if profile_active:
             raise AcquisitionBlocked("PROFILE_ALREADY_ACTIVE_NO_CDP")
-        if port_claimants:
+        if port_claimed:
             raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
         return "ABSENT", ((), ())
-    if state != "OWNED" or pid is None or port_claimants != [pid]:
+    if owned is None:
         raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
-    owned = next(p for p in processes if p["ProcessId"] == pid)
-    try:
-        if _creation_ticks(owned["CreationDate"]) <= 0:
-            raise ValueError
-    except Exception:
-        raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN") from None
-    listener_tuple = ((listeners[0]["LocalAddress"], listeners[0]["LocalPort"], listeners[0]["OwningProcess"]),)
+    listener_tuple = (("127.0.0.1", env.port, listener_pid),)
     proc_tuple = (tuple(owned.get(k) for k in (
         "ProcessId", "ExecutablePath", "CommandLine", "SessionId", "OwnerSid", "CreationDate")),)
     return "OWNED", (listener_tuple, proc_tuple)
+
+
+def _legacy_health_inventory(env: ChromeEnvironment, inventory: dict, *,
+                             session: int, sid: str) -> tuple[str, tuple]:
+    return _observe_9444_inventory(env, inventory, session=session, sid=sid)
 
 
 def _lifecycle_inventory(env: ChromeEnvironment, inventory: dict, *,
