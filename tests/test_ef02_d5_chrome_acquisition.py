@@ -2005,15 +2005,18 @@ def test_l1a_registry_is_finite_and_legacy_duplicates_hold(monkeypatch, tmp_path
     ("invalid", "CONFIG_INVALID", "CONFIG_SCHEMA"),
     ("invalid_path", "CHROME_PATH_INVALID", "CONFIG_PATH"),
     ("malformed_json", "CONFIG_INVALID", "CONFIG_JSON"),
+    ("duplicate_json_key", "CONFIG_DUPLICATE_KEY", "CONFIG_JSON"),
+    ("oversize", "CONFIG_INVALID", "CONFIG_FILE_READ"),
     ("file_read", "CONFIG_INVALID", "CONFIG_FILE_READ"),
-    ("foreign_owner", "CONFIG_UNTRUSTED", "CONFIG_ROOT_CUSTODY"),
-    ("root_acl", "HANDOFF_PERMISSIONS_INVALID", "CONFIG_ROOT_CUSTODY"),
-    ("parent_acl", "HANDOFF_PERMISSIONS_INVALID", "CONFIG_PARENT_CUSTODY"),
+    ("foreign_owner", "CONFIG_UNTRUSTED", "CONFIG_FILE_CUSTODY"),
+    ("foreign_profile_owner", "OPERATOR_OWNERSHIP_UNPROVEN", "PROFILE_CUSTODY"),
+    ("root_acl", None, None),
+    ("parent_acl", None, None),
     ("file_acl", "HANDOFF_PERMISSIONS_INVALID", "CONFIG_FILE_CUSTODY"),
     ("profile_acl", "OPERATOR_OWNERSHIP_UNPROVEN", "PROFILE_CUSTODY"),
 ])
 def test_supervisor_adopts_only_a_valid_sole_d5_config(monkeypatch, tmp_path, fault, code, check):
-    from ai_commerce.remote import local_completion_handoff as handoff
+    from ai_commerce.remote import _private_state, local_completion_handoff as handoff
 
     env, repo, home, _, events = logon_fixture(monkeypatch, tmp_path, allow_launch=True)
     d5 = home / "AI-Commerce" / "D5-Isolated-9444-Trial" / "config.json"
@@ -2034,15 +2037,19 @@ def test_supervisor_adopts_only_a_valid_sole_d5_config(monkeypatch, tmp_path, fa
         d5.write_text(json.dumps(value), encoding="utf-8")
     elif fault == "malformed_json":
         d5.write_text('{"private":', encoding="utf-8")
+    elif fault == "duplicate_json_key":
+        d5.write_text('{"version":1,"version":1}', encoding="utf-8")
+    elif fault == "oversize":
+        d5.write_bytes(b" " * 8193)
     elif fault == "file_read":
-        read_text = Path.read_text
+        real_open = _private_state._Transaction.open
 
-        def unreadable(path, *args, **kwargs):
-            if path == d5:
+        def unreadable(transaction, name, flags):
+            if transaction.state.path == d5:
                 raise OSError("private read error")
-            return read_text(path, *args, **kwargs)
+            return real_open(transaction, name, flags)
 
-        monkeypatch.setattr(Path, "read_text", unreadable)
+        monkeypatch.setattr(_private_state._Transaction, "open", unreadable)
     elif fault == "registry_path":
         no_links = ca._no_links
         monkeypatch.setattr(ca, "_no_links", lambda path: path != env.config_path and no_links(path))
@@ -2053,6 +2060,8 @@ def test_supervisor_adopts_only_a_valid_sole_d5_config(monkeypatch, tmp_path, fa
     def identity(path):
         if path == failed_custody.get(fault):
             raise handoff.HandoffBlocked("HANDOFF_PERMISSIONS_INVALID")
+        if fault == "foreign_profile_owner" and path == env.user_data_dir:
+            return "S-1-5-21-11-22-33-1002"
         return _OPERATOR_SID
 
     monkeypatch.setattr(handoff, "_private_identity", identity)
@@ -2060,26 +2069,55 @@ def test_supervisor_adopts_only_a_valid_sole_d5_config(monkeypatch, tmp_path, fa
     before = d5.read_bytes()
     checks = []
     observer = ca._supervisor_config_failure
+    adopted = None
     token = observer.set(checks.append)
     try:
         if code is None:
-            assert ca._supervisor_9444_environment(home, repo, sid) == ca.replace(env, config_path=d5)
+            adopted = ca._supervisor_9444_environment(home, repo, sid)
+            assert adopted == ca.replace(env, config_path=d5)
         else:
             with pytest.raises((ca._EnrollmentHold, ca.AcquisitionBlocked, handoff.HandoffBlocked), match=f"^{code}$"):
                 ca._supervisor_9444_environment(home, repo, sid)
     finally:
         observer.reset(token)
     assert [item.name for item in checks] == ([] if check is None else [check])
+
+    # Scope strict negative assertions separately so their observer checks stay
+    # isolated from the health-only adoption assertion above.
+    if fault in ("root_acl", "parent_acl"):
+        strict_read_checks = []
+        strict_token = observer.set(strict_read_checks.append)
+        try:
+            with pytest.raises(handoff.HandoffBlocked, match="^HANDOFF_PERMISSIONS_INVALID$"):
+                ca._read_9444_config(d5, home, repo, sid)
+        finally:
+            observer.reset(strict_token)
+        expected_read_check = "CONFIG_ROOT_CUSTODY" if fault == "root_acl" else "CONFIG_PARENT_CUSTODY"
+        assert [item.name for item in strict_read_checks] == [expected_read_check]
+
+        strict_custody_checks = []
+        custody_token = observer.set(strict_custody_checks.append)
+        try:
+            with pytest.raises((ca._EnrollmentHold, ca.AcquisitionBlocked), match="^OPERATOR_OWNERSHIP_UNPROVEN$"):
+                ca._check_enrollment_custody(adopted, home, sid)
+        finally:
+            observer.reset(custody_token)
+        assert [item.name for item in strict_custody_checks] == (
+            ["CONFIG_FILE_CUSTODY"] if fault == "root_acl" else []
+        )
     assert d5.read_bytes() == before and events == []
 
 
 @pytest.mark.parametrize(("fault", "code"), [
     (None, None),
+    ("chrome_parent_acl", None),
+    ("chrome_root_and_parent_acl", None),
     ("missing", "LOCAL_CONFIG_REQUIRED"),
     ("duplicate", "LOCAL_CONFIG_AMBIGUOUS"),
     ("invalid", "LOCAL_CONFIG_INVALID"),
     ("invalid_runtime", "LOCAL_CONFIG_INVALID"),
-    ("chrome_parent_acl", "LOCAL_CONFIG_INVALID"),
+    ("chrome_file_acl", "LOCAL_CONFIG_INVALID"),
+    ("profile_acl", "LOCAL_CONFIG_INVALID"),
     ("unsigned", "LOCAL_CONFIG_INVALID"),
     ("stale_user_config", "LOCAL_CONFIG_STALE"),
 ])
@@ -2103,7 +2141,11 @@ def test_protected_supervisor_resolves_sole_d5_without_wakehub_acl_or_writes(mon
 
     def identity(path):
         aces = (("allow", _OPERATOR_SID), ("allow", "S-1-5-18"))
-        if path == wakehub or (path == d5.parent and fault == "chrome_parent_acl"):
+        if (path == wakehub
+                or (path == d5.parent and fault in ("chrome_parent_acl", "chrome_root_and_parent_acl"))
+                or (path == private and fault == "chrome_root_and_parent_acl")
+                or (path == d5 and fault == "chrome_file_acl")
+                or (path == env.user_data_dir and fault == "profile_acl")):
             aces += (("allow", "S-1-5-32-545"),)  # BUILTIN\Users
         handoff._check_windows_acl(_OPERATOR_SID, aces, _OPERATOR_SID)
         return _OPERATOR_SID
@@ -2132,6 +2174,7 @@ def test_protected_supervisor_resolves_sole_d5_without_wakehub_acl_or_writes(mon
         assert path == d5 and resolve() == (path, pin)
         chrome, child_pin = runner._observe_only_config(d5, repo, owner, lambda: False, protected=True)
         assert isinstance(chrome, runner.NativeChrome9444)
+        assert chrome.legacy_health_only is True and chrome.adapter is None
         assert chrome.environment == legacy and child_pin == pin
         assert events == ["signature", "inventory", "signature", "signature"]
     else:
@@ -2139,6 +2182,117 @@ def test_protected_supervisor_resolves_sole_d5_without_wakehub_acl_or_writes(mon
             resolve()
         assert events == []
     assert {path: path.read_bytes() if path.is_file() else None for path in private.rglob("*")} == before
+
+
+@pytest.mark.parametrize("running", [False, True])
+def test_protected_legacy_health_tick_allows_root_and_parent_acl_only_for_health_only(
+        monkeypatch, tmp_path, running):
+    from contextlib import nullcontext
+    from ai_commerce.remote import local_completion_handoff as handoff
+    from ai_commerce.remote.conversation_binding import ResolvedBinding
+    from ai_commerce.wakehub_runtime import runner
+
+    env, repo, home, snapshot, events = logon_fixture(monkeypatch, tmp_path, allow_launch=True, running=running)
+    private = home / "AI-Commerce"
+    d5 = private / "D5-Isolated-9444-Trial" / "config.json"
+    d5.parent.mkdir()
+    nested_parent = private / "D5-Profile-Parent"
+    nested_profile = nested_parent / "UserData"
+    (nested_profile / env.profile_directory).mkdir(parents=True)
+    raw_value = json.loads(env.config_path.read_bytes())
+    raw_value["user_data_dir"] = str(nested_profile)
+    d5.write_text(json.dumps(raw_value), encoding="utf-8")
+    env.config_path.unlink()
+    d5_env = ca.load_environment(d5, repo, local_app_data=home)
+    if running:
+        snapshot["processes"][0]["CommandLine"] = json.dumps(d5_env.command())
+
+    broad_dirs = {private, d5.parent, nested_parent}
+
+    def identity(path):
+        aces = (("allow", _OPERATOR_SID), ("allow", "S-1-5-18"))
+        if path in broad_dirs:
+            aces += (("allow", "S-1-5-32-545"),)  # BUILTIN\Users on root/parent only
+        handoff._check_windows_acl(_OPERATOR_SID, aces, _OPERATOR_SID)
+        return _OPERATOR_SID
+
+    cdp_probes = []
+    monkeypatch.setattr(handoff, "_private_identity", identity)
+    monkeypatch.setattr(runner, "_private_identity", identity)
+    monkeypatch.setattr(ca, "_probe_cdp", lambda current: cdp_probes.append(current))
+    monkeypatch.setattr(ca, "_clean_launch_pending", lambda: False)
+    monkeypatch.setattr(ca, "_enrollment_operator", lambda *, attended=True, protocol_only=False: (home, 1, _OPERATOR_SID))
+    monkeypatch.setattr(runner, "_supervised_desktop", lambda session, sid: f"desktop:{session}:{sid}")
+    monkeypatch.setattr(runner, "_supervisor_slot", lambda *a, **k: nullcontext())
+    monkeypatch.setattr(runner, "_user_runtime_config", lambda _: None)
+    monkeypatch.delenv(runner._RUNTIME_CONFIG_ENV, raising=False)
+    owner = home, 1, _OPERATOR_SID
+
+    # Probe and resolver both succeed for protected legacy health-only.
+    probed, probe_code = runner._probe_supervisor_config(repo, owner)
+    assert probe_code == "LEGACY_9444_VERIFIED"
+    path, pin = runner._resolve_runtime_config(repo, owner=owner, observe_only=True, protected=True)
+    assert (path, pin) == probed and path == d5
+
+    published = []
+    monkeypatch.setattr(runner, "_deployment_health", lambda _, *, health_only: (published.append, lambda: None))
+    deployment = {"config_digest": pin, "session": 1, "sid": _OPERATOR_SID,
+                  "desktop": f"desktop:1:{_OPERATOR_SID}"}
+    before = {item: item.read_bytes() if item.is_file() else None for item in private.rglob("*")}
+    result = runner.run_supervisor(path, repo, max_ticks=1, observe_only=True, _deployment=deployment)
+    expected_health = "CHROME_OWNED" if running else "CHROME_ABSENT"
+    assert result.code == expected_health and result.chrome_health == expected_health
+    assert published == [expected_health]
+    assert len(cdp_probes) == (2 if running else 0)
+    assert {item: item.read_bytes() if item.is_file() else None for item in private.rglob("*")} == before
+
+    # Legacy health-only NativeChrome9444 refuses attach, chat, preflight and send.
+    chrome, _ = runner._observe_only_config(d5, repo, owner, lambda: False, protected=True)
+    assert isinstance(chrome, runner.NativeChrome9444) and chrome.legacy_health_only is True
+    binding = ResolvedBinding("chat-a", 1, "https://chatgpt.com/c/00000000-0000-0000-0000-000000000001",
+                              "http://127.0.0.1:9444")
+    reg = runner.Registration(binding, "a" * 40, "GITHUB_AUTHENTICATED")
+    evt = runner.Event("ef02-completion-v1:" + "b" * 64, "a" * 40, 1, "c" * 64, "GITHUB_AUTHENTICATED")
+    assert chrome.preflight(reg) == "UNSUPPORTED_NATIVE_OWNER"
+    with pytest.raises(runner.RuntimeHold, match="^UNSUPPORTED_NATIVE_OWNER$"):
+        chrome.local_chat(binding)
+    with pytest.raises(runner.RuntimeHold, match="^UNSUPPORTED_NATIVE_OWNER$"):
+        chrome.send(evt, reg)
+
+    # Strict operational and enrollment paths still reject broad root/parent ACLs.
+    with pytest.raises(handoff.HandoffBlocked, match="^HANDOFF_PERMISSIONS_INVALID$"):
+        ca._read_9444_config(d5, home, repo, _OPERATOR_SID)
+    with pytest.raises((ca._EnrollmentHold, ca.AcquisitionBlocked), match="^OPERATOR_OWNERSHIP_UNPROVEN$"):
+        ca._check_enrollment_custody(d5_env, home, _OPERATOR_SID)
+    strict_owner = runner.NativeChrome9444(repo, d5_env, supervised=True)
+    with pytest.raises(handoff.HandoffBlocked, match="^HANDOFF_PERMISSIONS_INVALID$"):
+        strict_owner.lifecycle_snapshot()
+    assert ca._assess_lifecycle_9444(repo).code == "CONFIG_UNTRUSTED"
+    assert ca.assess_logon_9444(repo)["code"] == "CONFIG_UNTRUSTED"
+
+    # Negative guards on health tick: root lock marker, profile lock marker, session drift, pin change.
+    marker = nested_profile / ca._MARKERS[0]
+    marker.touch()
+    try:
+        published.clear()
+        assert runner.run_supervisor(path, repo, max_ticks=1, observe_only=True, _deployment=deployment).code == "ENROLLMENT_PROFILE_LOCK_UNPROVEN"
+        assert published == ["ENROLLMENT_PROFILE_LOCK_UNPROVEN"]
+    finally:
+        marker.unlink()
+
+    profile_marker = nested_profile / d5_env.profile_directory / ca._MARKERS[0]
+    profile_marker.touch()
+    try:
+        published.clear()
+        assert runner.run_supervisor(path, repo, max_ticks=1, observe_only=True, _deployment=deployment).code == "PROFILE_LOCK_HOLD"
+        assert published == ["PROFILE_LOCK_HOLD"]
+    finally:
+        profile_marker.unlink()
+
+    bad_session = {**deployment, "session": 2}
+    assert runner.run_supervisor(path, repo, max_ticks=1, observe_only=True, _deployment=bad_session).code == "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
+    bad_pin = {**deployment, "config_digest": "f" * 64}
+    assert runner.run_supervisor(path, repo, max_ticks=1, observe_only=True, _deployment=bad_pin).code == "LOCAL_CONFIG_CHANGED"
 
 
 @pytest.mark.parametrize("running,listener,cdp_ok,state,code", [

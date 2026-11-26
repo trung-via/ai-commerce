@@ -2858,8 +2858,11 @@ def chrome_record(supervisor):
 
 @pytest.fixture
 def observe_only(supervisor, monkeypatch):
+    from ai_commerce.remote import local_completion_handoff as handoff
+
     s = supervisor
     monkeypatch.setattr(r, "_private_identity", lambda path: s.owner()[2])
+    monkeypatch.setattr(handoff, "_private_identity", lambda path: s.owner()[2])
 
     def forbidden(*args, **kwargs):
         pytest.fail("observe-only reached a journal, source or browser effect")
@@ -2991,11 +2994,14 @@ def supervisor_config_probe(observe_only, monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("config probe attempted a task, registry effect, Chrome access or enrollment")
 
+    from ai_commerce.remote import _private_state
+
     monkeypatch.delenv(r._RUNTIME_CONFIG_ENV, raising=False)
     monkeypatch.setitem(sys.modules, "winreg", SimpleNamespace(
         OpenKey=open_key, QueryValueEx=query, HKEY_CURRENT_USER=1, KEY_QUERY_VALUE=2, REG_SZ=4, REG_EXPAND_SZ=5))
     monkeypatch.setattr(r, "os", SimpleNamespace(name="nt", environ=os.environ, O_RDONLY=os.O_RDONLY, fdopen=os.fdopen))
     monkeypatch.setattr(r, "_windows_handle", open_ancestor)
+    monkeypatch.setattr(_private_state, "_windows_handle", open_ancestor)
     monkeypatch.setattr(r._Transaction, "open", open_file)
     monkeypatch.setattr(r, "_store_supervisor_deployment_value", forbidden)
     monkeypatch.setattr(r, "_supervisor_slot", forbidden)
@@ -3122,13 +3128,46 @@ def test_supervisor_config_probe_reports_legacy_resolution_failures(supervisor_c
     elif fault == "json":
         f.chrome.write_bytes(b'{"private":')
     elif fault == "pin":
-        f.s.i["save"](f.chrome, {**f.s.i["chrome"], "allow_launch": True})
+        monkeypatch.setattr(
+            acq, "_supervisor_9444_config",
+            lambda *a: (f.s.i["environment"], {**f.s.i["chrome"], "allow_launch": True}),
+        )
     elif fault == "signature":
         def unsigned(_):
             raise acq.AcquisitionBlocked("private signature detail")
 
         monkeypatch.setattr(acq, "_verify_google_chrome", unsigned)
     assert f.probe() == (None, f"LEGACY_9444_{expected}")
+
+
+def test_supervisor_config_probe_allows_broad_root_and_parent_acl_only_for_legacy_health(
+        supervisor_config_probe, monkeypatch):
+    from ai_commerce.remote import local_completion_handoff as handoff
+
+    f = supervisor_config_probe
+    s = f.s
+    sid = s.owner()[2]
+    wakehub_dir = f.owned / "WakeHub"
+    wakehub_dir.mkdir()
+    wakehub_chrome = wakehub_dir / "config.json"
+    f.chrome.rename(wakehub_chrome)
+    broad = {f.owned, wakehub_dir}
+
+    def identity(path):
+        if path in broad:
+            raise handoff.HandoffBlocked("HANDOFF_PERMISSIONS_INVALID")
+        return sid
+
+    monkeypatch.setattr(handoff, "_private_identity", identity)
+    monkeypatch.setattr(r, "_private_identity", identity)
+    resolved, code = f.probe()
+    assert code == "LEGACY_9444_VERIFIED" and resolved[0] == wakehub_chrome
+
+    # A runtime config or health wrapper in the same directory still requires strict parent custody.
+    s.i["save"](f.canonical, s.i["config"])
+    assert f.probe() == (None, "FIXED_RUNTIME_CONFIG_PARENT_CUSTODY")
+    s.i["save"](f.canonical, {"schema": r._CHROME_HEALTH_SCHEMA, "chrome_config": str(wakehub_chrome)})
+    assert f.probe() == (None, "FIXED_RUNTIME_CONFIG_PARENT_CUSTODY")
 
 
 @pytest.mark.parametrize(("fault", "expected"), [
@@ -4568,10 +4607,13 @@ def flat04(supervisor, monkeypatch):
 
 
 def test_legacy_health_transition_requires_exact_enrollment_and_preserves_existing_journal(flat04, monkeypatch):
+    from ai_commerce.remote import local_completion_handoff as handoff
+
     f = flat04
     i, s = f.i, f.s
     local = s.owner()[0]
     monkeypatch.setattr(r, "_private_identity", lambda _: s.owner()[2])
+    monkeypatch.setattr(handoff, "_private_identity", lambda _: s.owner()[2])
     monkeypatch.delenv("AI_COMMERCE_WAKEHUB_CONFIG", raising=False)
     monkeypatch.setattr(r, "_user_runtime_config", lambda _: None)
     canonical = local / "AI-Commerce" / "WakeHub" / "runtime-config.json"

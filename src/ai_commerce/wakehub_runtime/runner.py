@@ -877,11 +877,13 @@ class NativeChrome9444:
 
     def __init__(self, repository_root: Path,
                  environment: chrome_acquisition.ChromeEnvironment | None = None,
-                 *, supervised: bool = False):
+                 *, supervised: bool = False, legacy_health_only: bool = False):
+        _require(not legacy_health_only or supervised, "CHROME_OWNER_UNPROVEN")
         self.repository_root = repository_root
         self.environment = environment
         self.supervised = supervised
-        self.adapter = LocalChromeDoorbellAdapter(allow_submit=False)
+        self.legacy_health_only = legacy_health_only
+        self.adapter = None if legacy_health_only else LocalChromeDoorbellAdapter(allow_submit=False)
 
     def _owner_snapshot(self) -> tuple:
         env = self.environment
@@ -891,9 +893,13 @@ class NativeChrome9444:
         operator = chrome_acquisition._enrollment_operator
         local, session, sid = operator(attended=False, protocol_only=True) if self.supervised else operator()
         desktop = _supervised_desktop(session, sid) if self.supervised else None
-        current = chrome_acquisition._read_9444_config(
-            env.config_path, local, self.repository_root, sid)
-        _require(current == env, "CHROME_ENROLLMENT_DRIFT")
+        if self.legacy_health_only:
+            selected = chrome_acquisition._supervisor_9444_config(local, self.repository_root, sid)
+            _require(selected is not None and selected[0] == env, "CHROME_ENROLLMENT_DRIFT")
+        else:
+            current = chrome_acquisition._read_9444_config(
+                env.config_path, local, self.repository_root, sid)
+            _require(current == env, "CHROME_ENROLLMENT_DRIFT")
         inventory = chrome_acquisition._query_windows(9444)
         # Evaluate first so a live profile without CDP remains a distinct HOLD,
         # rather than treating a missing listener or HTTP failure as clean OFF.
@@ -904,7 +910,19 @@ class NativeChrome9444:
             env, inventory, session=session, sid=sid)
         _require(lifecycle_state == state, "CHROME_OWNER_UNPROVEN")
         chrome_acquisition._require_operator_control(env)
-        chrome_acquisition._check_enrollment_custody(env, local, sid)
+        if self.legacy_health_only:
+            # Protected legacy health skips broad root and intermediate parent
+            # ACLs while keeping strict file/profile custody, lock markers and
+            # executable signature verification on each observation.
+            for name in chrome_acquisition._MARKERS:
+                try:
+                    (env.user_data_dir / name).lstat()
+                except FileNotFoundError:
+                    continue
+                raise chrome_acquisition._EnrollmentHold("ENROLLMENT_PROFILE_LOCK_UNPROVEN")
+            chrome_acquisition._verify_google_chrome(env)
+        else:
+            chrome_acquisition._check_enrollment_custody(env, local, sid)
         # The enrollment helper checks root markers; a selected-profile marker
         # also needs an independently proven holder, which R2 cannot supply.
         for name in chrome_acquisition._MARKERS:
@@ -933,6 +951,7 @@ class NativeChrome9444:
         return (*observed, pending)
 
     def _exact_chat_candidate(self, registration: Registration, *, exclusive: bool = False) -> str:
+        _require(not self.legacy_health_only, "UNSUPPORTED_NATIVE_OWNER")
         inventory = self.adapter.inventory
         if not callable(getattr(inventory, "contexts", None)):
             return "EXACT_CHAT_CONTEXT_UNPROVEN"
@@ -971,6 +990,7 @@ class NativeChrome9444:
 
     def local_chat(self, binding: ResolvedBinding, *, marker_digest: str | None = None) -> str:
         """Read one exact tab and optionally its committed USER-turn marker."""
+        _require(not self.legacy_health_only, "UNSUPPORTED_NATIVE_OWNER")
         try:
             with self.adapter.inventory._browser(binding.cdp_endpoint) as browser:
                 contexts = list(browser.contexts)
@@ -1014,7 +1034,7 @@ class NativeChrome9444:
 
     def preflight(self, registration: Registration, *, exclusive: bool = False,
                   owner_scope: str | None = None) -> str:
-        if self.environment is None:
+        if self.environment is None or self.legacy_health_only:
             return "UNSUPPORTED_NATIVE_OWNER"
         observed = False
         try:
@@ -4119,8 +4139,14 @@ def _resolve_runtime_config(repository_root: Path, *, owner: tuple[Path, int, st
                 path = local / "AI-Commerce" / relative
                 _require(chrome_acquisition._no_links(path), "LOCAL_CONFIG_INVALID")
                 try:
-                    path.lstat()
+                    info = path.lstat()
                 except FileNotFoundError:
+                    continue
+            if (observe_only and protected
+                    and relative in chrome_acquisition._CONFIG_9444_RELATIVE_PATHS
+                    and info.st_size <= 8192):
+                candidate = chrome_acquisition._read_pinned_legacy_json(path, local, repository_root, owner[2])
+                if isinstance(candidate, dict) and candidate.keys() == chrome_acquisition._CHROME_CONFIG_FIELDS:
                     continue
             raw = _read_owned_json(path, repository_root)
             if raw.keys() == chrome_acquisition._CHROME_CONFIG_FIELDS:
@@ -4174,20 +4200,35 @@ def _validate_config_references(runtime: _RuntimeConfig, owner: str) -> list[dic
     return registrations
 
 
+def _is_legacy_9444_path(path: Path, local: Path) -> bool:
+    if not (path.is_absolute() and local.is_absolute()
+            and chrome_acquisition._no_links(path) and chrome_acquisition._no_links(local)):
+        return False
+    try:
+        resolved = path.resolve(strict=True)
+        root = (local / "AI-Commerce").resolve(strict=True)
+    except OSError:
+        return False
+    return any((root / relative).resolve() == resolved
+               for relative in chrome_acquisition._CONFIG_9444_RELATIVE_PATHS)
+
+
 def _legacy_health_config(repository_root: Path, owner: tuple[Path, int, str], *,
                           path: Path | None = None, raw: dict | None = None,
                           ) -> tuple[chrome_acquisition.ChromeEnvironment, str]:
     """Pin the sole existing 9444 enrollment for health-only use."""
     local, _, sid = owner
-    env = chrome_acquisition._supervisor_9444_environment(local, repository_root, sid)
+    selected = chrome_acquisition._supervisor_9444_config(local, repository_root, sid)
     with _config_check(_ConfigCheck.LEGACY_REGISTRY_EMPTY):
-        _require(env is not None, "LOCAL_CONFIG_REQUIRED")
+        _require(selected is not None, "LOCAL_CONFIG_REQUIRED")
+    env, config = selected
     with _config_check(_ConfigCheck.CONFIG_PATH):
         _require(path is None or env.config_path == path, "LOCAL_CONFIG_INVALID")
-    config = _read_owned_json(env.config_path, repository_root, limit=8192) if raw is None else raw
     with _config_check(_ConfigCheck.CONFIG_PIN_CHANGED):
-        _require(chrome_acquisition._environment_from_value(
-            config, env.config_path, repository_root, local_app_data=local) == env, "LOCAL_CONFIG_CHANGED")
+        _require((raw is None or config == raw)
+                 and chrome_acquisition._environment_from_value(
+                     config, env.config_path, repository_root, local_app_data=local) == env,
+                 "LOCAL_CONFIG_CHANGED")
     # Installing the canonical runtime config invalidates a running health-only pin.
     canonical = local / "AI-Commerce" / _RUNTIME_CONFIG_LOCATIONS[0]
     with _config_check(_ConfigCheck.DISCOVERY_PATH):
@@ -4198,21 +4239,34 @@ def _legacy_health_config(repository_root: Path, owner: tuple[Path, int, str], *
 def _observe_only_config(config_path: Path, repository_root: Path, owner: tuple[Path, int, str],
                          stop: Callable[[], bool], *,
                          protected: bool = False) -> tuple[_SupervisorChrome | NativeChrome9444, str]:
+    if protected and _is_legacy_9444_path(config_path, owner[0]):
+        shared_runtime = any(
+            (owner[0] / "AI-Commerce" / relative).resolve() == config_path.resolve(strict=True)
+            for relative in _RUNTIME_CONFIG_LOCATIONS
+        )
+        if not shared_runtime or config_path.lstat().st_size <= 8192:
+            raw = chrome_acquisition._read_pinned_legacy_json(config_path, owner[0], repository_root, owner[2])
+            if isinstance(raw, dict) and raw.keys() == chrome_acquisition._CHROME_CONFIG_FIELDS:
+                env, pin = _legacy_health_config(repository_root, owner, path=config_path, raw=raw)
+                return NativeChrome9444(repository_root, env, supervised=True, legacy_health_only=True), pin
     raw = _read_owned_json(config_path, repository_root)
     if protected and raw.keys() == chrome_acquisition._CHROME_CONFIG_FIELDS:
         env, pin = _legacy_health_config(repository_root, owner, path=config_path, raw=raw)
-        return NativeChrome9444(repository_root, env, supervised=True), pin
+        return NativeChrome9444(repository_root, env, supervised=True, legacy_health_only=True), pin
     if raw.get("schema") == _CHROME_HEALTH_SCHEMA:
         with _config_check(_ConfigCheck.WRAPPER_SCHEMA):
             _require(raw.keys() == {"schema", "chrome_config"}, "LOCAL_CONFIG_INVALID")
         with _config_check(_ConfigCheck.CONFIG_FILE_CUSTODY):
             _require(_private_identity(config_path) == owner[2], "LOCAL_CONFIG_INVALID")
-        env = chrome_acquisition._supervisor_9444_environment(owner[0], repository_root, owner[2])
+        selected = chrome_acquisition._supervisor_9444_config(owner[0], repository_root, owner[2])
         with _config_check(_ConfigCheck.WRAPPER_REFERENCE):
-            _require(env is not None and env.config_path == _config_path(raw["chrome_config"], repository_root),
+            _require(selected is not None and selected[0].config_path == _config_path(raw["chrome_config"], repository_root),
                      "LOCAL_CONFIG_INVALID")
-        config = _read_owned_json(env.config_path, repository_root, limit=8192)
-        return NativeChrome9444(repository_root, env, supervised=True), digest([str(config_path), raw, config])
+        env, config = selected
+        if not protected:
+            config = _read_owned_json(env.config_path, repository_root, limit=8192)
+        return (NativeChrome9444(repository_root, env, supervised=True, legacy_health_only=protected),
+                digest([str(config_path), raw, config]))
 
     with _config_check(_ConfigCheck.RUNTIME_SCHEMA_OR_PATH):
         runtime = _read_runtime_config(config_path, repository_root, registration_only=protected)
