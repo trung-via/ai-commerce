@@ -72,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     registration = sub.add_parser(
         "register", help="Enroll the owner's exact chat from a local Windows owner terminal.",
         description="For an initial Chrome-health-only install, prepare a private WakeHubRuntimeR1.v1 draft "
-                    "and pass it explicitly with --config. Use the existing Chrome config, the owner-selected "
+                    "and pass it explicitly with --config for manual enrollment. Use the existing Chrome config, the owner-selected "
                     "exact route and its private journal. Set chat_preload explicitly. A registration-only "
                     "config can omit event targets. Open the configured chat "
                     "in the dedicated Chrome profile, prepare a private marker, manually post it as a USER "
@@ -80,7 +80,11 @@ def main(argv: list[str] | None = None) -> int:
                     "Reuse an existing enrolled journal for that exact route if present. After enrolling "
                     "and configuring standing consent for the verified account, atomically install the completed draft "
                     "at the canonical WakeHub/runtime-config.json. The health-only instance exits on pin change. "
-                    "Once it exits, approve a fresh deploy_wakehub_supervisor to use the same task.")
+                    "Once it exits, approve a fresh deploy_wakehub_supervisor to use the same task.",
+        epilog="For protected HostOps enrollment, select Chat A in dedicated Chrome 9444 and approve "
+               "prepare_wakehub_chat_enrollment. The Supervisor creates the private config and journal. "
+               "Approve enroll_wakehub_chat with the opaque selection_id from the preparation receipt. "
+               "Standing delivery requires separate consent for the enrolled account and journal.")
     actions = registration.add_subparsers(dest="action", required=True)
     prepare = actions.add_parser("prepare", help="Print a fresh private marker for manual presentation.")
     observe = actions.add_parser("observe", help="Verify and consume that marker in the exact Chat A.")

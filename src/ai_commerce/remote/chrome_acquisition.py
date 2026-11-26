@@ -17,6 +17,7 @@ import os
 from os.path import normpath
 from pathlib import Path
 import re
+from secrets import token_hex
 import stat
 import subprocess
 import sys
@@ -38,7 +39,7 @@ $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop |
 $processes = @(Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction Stop |
     ForEach-Object {
         $owner = Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction Stop
-        [pscustomobject]@{ ProcessId=$_.ProcessId; ExecutablePath=$_.ExecutablePath;
+        [pscustomobject]@{ ProcessId=$_.ProcessId; ParentProcessId=$_.ParentProcessId; ExecutablePath=$_.ExecutablePath;
             CommandLine=$_.CommandLine; SessionId=$_.SessionId; OwnerSid=$owner.Sid;
             CreationDate=$_.CreationDate.ToUniversalTime().ToString('o') }
     })
@@ -1170,7 +1171,7 @@ class _NativeEnrollment:
         finally:
             self.k.LocalFree(c.cast(text, c.c_void_p))
 
-    def _acl(self, handle, *, exact=False):
+    def _acl(self, handle, *, exact=False, inherit=False):
         from .local_completion_handoff import HandoffBlocked, _check_windows_acl
         c, w = self.c, self.w
         owner, dacl, sd = c.c_void_p(), c.c_void_p(), c.c_void_p()
@@ -1195,7 +1196,8 @@ class _NativeEnrollment:
                         or self.a.GetLengthSid(sid) > size - 8):
                     self._blocked()
                 aces.append(("allow" if header[0] == 0 else "deny", self._sid_text(sid)))
-                if exact and (header[0:2] != b"\x00\x00" or int.from_bytes(header[4:8], "little") != 0x1F01FF):
+                if exact and (header[0:2] != bytes((0, 3 if inherit else 0))
+                              or int.from_bytes(header[4:8], "little") != 0x1F01FF):
                     self._blocked()
             try:
                 _check_windows_acl(self._sid_text(owner), aces, self.sid)
@@ -1214,7 +1216,8 @@ class _NativeEnrollment:
             self._blocked()
         return (info.Volume, info.IndexHigh, info.IndexLow, info.SizeHigh, info.SizeLow)
 
-    def _relative(self, parent, name, *, directory, create=False, write=False, optional=False, readback=False):
+    def _relative(self, parent, name, *, directory, create=False, write=False, optional=False,
+                  readback=False, repair_acl=False):
         c, w = self.c, self.w
         if not name or name in {".", ".."} or any(ch in name for ch in "\\/:\x00"):
             self._blocked()
@@ -1227,12 +1230,17 @@ class _NativeEnrollment:
                                 0x40 | 0x1000, self.descriptor if create else None, None)
         io, handle = self.IoStatus(), w.HANDLE()
         access = 0x120089 | (0x116 if write else 0)  # read/control/synchronize; optional write
+        options = 0x20 | 0x200000 | (1 if directory else 0x40)
+        if repair_acl:
+            # SetSecurityInfo does not propagate ACEs from MAXIMUM_ALLOWED handles.
+            access = 0x02000000
+            options &= ~0x20
         previous = self.effect_possible
         if create:
             self.effect_possible = True  # Set BEFORE crossing the mutation boundary.
         status = self.n.NtCreateFile(c.byref(handle), access, c.byref(attrs), c.byref(io), None,
             0x80, 3 if readback else 1, 2 if create else 1,
-            0x20 | 0x200000 | (1 if directory else 0x40), None, 0)
+            options, None, 0)
         unsigned = status & 0xFFFFFFFF
         if unsigned in {0xC0000034, 0xC000003A} and optional and not create:
             return None
@@ -1448,6 +1456,134 @@ class _NativeEnrollment:
             self.descriptor = None
         if failed:
             self._blocked()
+
+
+class _WakeHubEnrollmentACL(_NativeEnrollment):
+    """Handle-relative custody for the fixed WakeHub enrollment state."""
+
+    def __enter__(self):
+        return self
+
+    def _owner(self, handle):
+        c = self.c
+        owner, sd = c.c_void_p(), c.c_void_p()
+        if self.a.GetSecurityInfo(handle, 1, 1, c.byref(owner), None, None, None, c.byref(sd)):
+            self._blocked()
+        try:
+            if self._sid_text(owner) != self.sid:
+                raise _EnrollmentHold("WAKEHUB_ENROLLMENT_FOREIGN_OWNER")
+        finally:
+            self.k.LocalFree(sd)
+
+    def _repair(self, handle, *, directory):
+        try:
+            self._acl(handle, exact=True, inherit=directory)
+            return
+        except _EnrollmentHold:
+            self._owner(handle)
+        c, w = self.c, self.w
+        ptr = c.c_void_p
+        sd, dacl, present, defaulted = ptr(), ptr(), w.BOOL(), w.BOOL()
+        get_dacl = self.a.GetSecurityDescriptorDacl
+        get_dacl.argtypes = [ptr, c.POINTER(w.BOOL), c.POINTER(ptr), c.POINTER(w.BOOL)]
+        get_dacl.restype = w.BOOL
+        set_security = self.a.SetSecurityInfo
+        set_security.argtypes = [w.HANDLE, w.DWORD, w.DWORD, ptr, ptr, ptr, ptr]
+        set_security.restype = w.DWORD
+        inheritance = "OICI" if directory else ""
+        if not self.a.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            f"D:P(A;{inheritance};FA;;;{self.sid})", 1, c.byref(sd), None,
+        ):
+            self._blocked()
+        try:
+            if (not get_dacl(sd, c.byref(present), c.byref(dacl), c.byref(defaulted))
+                    or not present or not dacl
+                    or set_security(handle, 1, 0x80000004, None, None, dacl, None)):
+                self._blocked()
+            self._acl(handle, exact=True, inherit=directory)
+        finally:
+            self.k.LocalFree(sd)
+
+    def _create(self, parent, name, *, directory):
+        c = self.c
+        inheritance = "OICI" if directory else ""
+        descriptor = c.c_void_p()
+        if not self.a.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                f"O:{self.sid}D:P(A;{inheritance};FA;;;{self.sid})", 1, c.byref(descriptor), None):
+            self._blocked()
+        self.descriptor = descriptor
+        try:
+            handle = self._relative(parent, name, directory=directory, create=True, write=not directory)
+            self._acl(handle, exact=True, inherit=directory)
+            return handle
+        finally:
+            self.k.LocalFree(descriptor)
+            self.descriptor = None
+
+    def prepare(self, payload=None):
+        self.pinned = []
+        root = self._pin_path(self.local / "AI-Commerce")
+        parent = self._relative(root, "WakeHub", directory=True, optional=True)
+        if parent is None:
+            parent = self._create(root, "WakeHub", directory=True)
+        directory = self._relative(parent, "Enrollment", directory=True, repair_acl=True, optional=True)
+        if directory is None:
+            directory = self._create(parent, "Enrollment", directory=True)
+        files = [self._relative(directory, name, directory=False, repair_acl=True, optional=True)
+                 for name in ("runtime-config.json", "enrollment.sqlite3",
+                              "enrollment.sqlite3.lock", "enrollment.sqlite3-journal")]
+        handles = [(directory, True), *((handle, False) for handle in files if handle is not None)]
+        for handle, _ in handles:
+            self._owner(handle)
+        for handle, is_directory in handles:
+            self._repair(handle, directory=is_directory)
+        if payload is None:
+            return
+        if any(handle is not None for handle in files) or not 1 <= len(payload) <= 8192:
+            self._blocked()
+        temp_name = f"runtime-config.{token_hex(16)}.part"
+        writer = self._create(directory, temp_name, directory=False)
+        path = self.local / "AI-Commerce" / "WakeHub" / "Enrollment"
+        c, w = self.c, self.w
+        written = w.DWORD()
+        try:
+            try:
+                if (not self.k.WriteFile(writer, payload, len(payload), c.byref(written), None)
+                        or written.value != len(payload) or not self.k.FlushFileBuffers(writer)):
+                    self._blocked()
+                writer_id = self._info(writer, False)[:3]
+            finally:
+                if not self.k.CloseHandle(writer):
+                    self._blocked()
+                self.handles.pop()
+            # The native handles pin the directory and ancestors. On Windows
+            # rename fails if the fixed name already exists.
+            os.rename(path / temp_name, path / "runtime-config.json")
+        finally:
+            try:
+                (path / temp_name).unlink()
+            except FileNotFoundError:
+                pass
+        reader = self._relative(directory, "runtime-config.json", directory=False)
+        self._acl(reader, exact=True)
+        info = self._info(reader, False)
+        buffer, count = c.create_string_buffer(8193), w.DWORD()
+        if (info[:3] != writer_id or info[3:] != (0, len(payload))
+                or not self.k.ReadFile(reader, buffer, len(buffer), c.byref(count), None)
+                or count.value != len(payload) or buffer.raw[:count.value] != payload):
+            self._blocked()
+
+
+def _prepare_wakehub_enrollment_acl(owner: tuple[Path, int, str], *, payload: bytes | None = None) -> None:
+    """Prepare owner-owned enrollment state and optionally create the first config."""
+    local, session, sid = owner
+    try:
+        with _WakeHubEnrollmentACL(None, local, session, sid, None) as custody:
+            custody.prepare(payload)
+    except (OSError, ValueError) as exc:
+        if str(exc) == "WAKEHUB_ENROLLMENT_FOREIGN_OWNER":
+            raise
+        raise _EnrollmentHold("WAKEHUB_ENROLLMENT_ACL_UNPROVEN") from None
 
 
 def assess_existing_9444(checkout: Path) -> dict:
@@ -1999,6 +2135,8 @@ def _observe_9444_inventory(env: ChromeEnvironment, inventory: dict, *,
         if listener_pid not in pids:
             raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
     owned = None
+    children = {}
+    inherited = []
     profile_active = port_claimed = False
     for proc in processes:
         command = proc.get("CommandLine")
@@ -2039,6 +2177,8 @@ def _observe_9444_inventory(env: ChromeEnvironment, inventory: dict, *,
             profile_active |= claims_profile
             port_claimed |= claims_port
             continue
+        if child:
+            children[proc["ProcessId"]] = (proc, argv[0], args, directory, claims_profile, port, claims_port)
         if proc["ProcessId"] == listener_pid:
             _observed_chrome_switch(args, "--profile-directory")
             _observed_chrome_switch(args, "--remote-debugging-address")
@@ -2050,14 +2190,18 @@ def _observe_9444_inventory(env: ChromeEnvironment, inventory: dict, *,
             if not _identity_matches(env, proc["ExecutablePath"], [argv[0], *args]):
                 raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
             owned = proc
-        elif claims_port or (claims_profile and not child):
+        elif (claims_port and not (child and claims_profile)) or (claims_profile and not child):
             raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
         elif claims_profile:
             profile = _observed_chrome_switch(args, "--profile-directory")
             address = _observed_chrome_switch(args, "--remote-debugging-address")
-            if profile not in (None, env.profile_directory) or address not in (None, "127.0.0.1"):
+            if (profile not in (None, env.profile_directory) or address not in (None, "127.0.0.1")
+                    or (port is not None and not claims_port)):
                 raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
-            _validate_observed_chrome(env, proc, argv[0], session=session, sid=sid)
+            if claims_port:
+                inherited.append(proc["ProcessId"])
+            else:
+                _validate_observed_chrome(env, proc, argv[0], session=session, sid=sid)
     if listener_pid is None:
         if profile_active:
             raise AcquisitionBlocked("PROFILE_ALREADY_ACTIVE_NO_CDP")
@@ -2066,6 +2210,29 @@ def _observe_9444_inventory(env: ChromeEnvironment, inventory: dict, *,
         return "ABSENT", ((), ())
     if owned is None:
         raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
+    # CIM parent IDs can outlive a process. Require a same-owner Chrome chain
+    # with strictly increasing creation times, ending at this listener.
+    linked = {listener_pid: _creation_ticks(owned["CreationDate"])}
+    for pid in inherited:
+        chain = {}
+        while pid not in linked:
+            if pid in chain or pid not in children:
+                raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
+            proc, image, args, directory, same_profile, port, same_port = children[pid]
+            _validate_observed_chrome(env, proc, image, session=session, sid=sid)
+            if ((directory is not None and not same_profile) or (port is not None and not same_port)
+                    or _observed_chrome_switch(args, "--profile-directory") not in (None, env.profile_directory)
+                    or _observed_chrome_switch(args, "--remote-debugging-address") not in (None, "127.0.0.1")):
+                raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
+            chain[pid] = _creation_ticks(proc["CreationDate"])
+            pid = proc.get("ParentProcessId")
+            if type(pid) is not int or pid <= 0:
+                raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
+        parent_created = linked[pid]
+        for child_pid, child_created in reversed(chain.items()):
+            if child_created <= parent_created:
+                raise AcquisitionBlocked("BROWSER_OWNERSHIP_UNPROVEN")
+            linked[child_pid] = parent_created = child_created
     listener_tuple = (("127.0.0.1", env.port, listener_pid),)
     proc_tuple = (tuple(owned.get(k) for k in (
         "ProcessId", "ExecutablePath", "CommandLine", "SessionId", "OwnerSid", "CreationDate")),)

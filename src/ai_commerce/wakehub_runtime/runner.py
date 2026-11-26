@@ -394,11 +394,12 @@ class GitHubIssueCreatedSource:
         self.verified_event: SourceEvent | None = None
 
     @staticmethod
-    def _read_json(url: str, token: str, *, timeout: float) -> dict | list:
+    def _read_json(url: str, token: str | None, *, timeout: float) -> dict | list:
         # Use the existing GitHub REST headers, limits and JSON decoder. Unlike
         # archive GETs, these requests have no legitimate signed CDN redirect.
         opener = build_opener(ProxyHandler({}), _ExactAPIRedirect())
-        request = Request(url, headers={**_HEADERS, "Authorization": "Bearer " + token}, method="GET")
+        headers = {**_HEADERS, "Authorization": "Bearer " + token} if token is not None else _HEADERS
+        request = Request(url, headers=headers, method="GET")
         with opener.open(request, timeout=timeout) as response:
             raw = response.read(_MAX_JSON + 1)
         _require(len(raw) <= _MAX_JSON, "GITHUB_RESPONSE_TOO_LARGE")
@@ -1030,7 +1031,8 @@ class NativeChrome9444:
         except Exception:
             return "CDP_READ_UNAVAILABLE"
 
-    def local_chat(self, binding: ResolvedBinding, *, marker_digest: str | None = None) -> str:
+    def local_chat(self, binding: ResolvedBinding, *, marker_digest: str | None = None,
+                   enrollment_account: str | None = None) -> str:
         """Read one exact tab and optionally its committed USER-turn marker."""
         _require(not self.legacy_health_only, "UNSUPPORTED_NATIVE_OWNER")
         try:
@@ -1053,6 +1055,8 @@ class NativeChrome9444:
                 page = matches[0]
                 if page.url != binding.chat_url:
                     return "EXACT_CHAT_URL_DRIFT"
+                if enrollment_account is not None:
+                    _check_enrollment_page(page, enrollment_account)
                 code = cdp_doorbell._preload_surface_code(page)
                 if code == "CANDIDATE_READY" and marker_digest is not None:
                     marker = page.evaluate(cdp_doorbell._WH03_COMMITTED_SIGNAL_DOM,
@@ -1068,6 +1072,8 @@ class NativeChrome9444:
                         or len(current_tabs) != 1 or current_tabs[0] is not page
                         or page.url != binding.chat_url):
                     return "EXACT_CHAT_OBSERVATION_CHANGED"
+                if enrollment_account is not None:
+                    _check_enrollment_page(page, enrollment_account)
                 return code
         except RuntimeHold as exc:
             return str(exc)
@@ -1422,10 +1428,12 @@ def _origin_commitment(origin: dict, binding: ResolvedBinding) -> cdp_doorbell.W
 
 
 def _validate_local_origin(origin: dict, registration: Registration) -> None:
-    _require(type(origin) is dict and origin.keys() == {
+    fields = {
         "registration_id", "marker_digest", "issued_ms", "expires_ms",
         "owner_scope", "chrome_config", "phase", "navigation",
-    } and registration.evidence_type == "GITHUB_AUTHENTICATED"
+    }
+    _require(type(origin) is dict and fields <= origin.keys() <= fields | {"submission", "enrollment_selection"}
+        and registration.evidence_type == "GITHUB_AUTHENTICATED"
         and origin["phase"] in ("PREPARED", "ENROLLED")
         and _chrome_digest(origin["owner_scope"]) and _chrome_digest(origin["chrome_config"])
         and type(origin["registration_id"]) is str
@@ -1434,6 +1442,24 @@ def _validate_local_origin(origin: dict, registration: Registration) -> None:
             _origin_commitment(origin, registration.binding),
             max_lease_ms=None) == "READY",
         "LOCAL_ORIGIN_JOURNAL_INVALID")
+    if "enrollment_selection" in origin:
+        _require(origin["phase"] == "ENROLLED" and _chrome_digest(origin["enrollment_selection"]),
+                 "LOCAL_ORIGIN_JOURNAL_INVALID")
+    if "submission" in origin:
+        submission = origin["submission"]
+        _require(origin["phase"] == "PREPARED" and type(submission) is dict
+                 and submission.keys() == {"selection", "desktop", "marker", "document", "prior_refs"}
+                 and _chrome_digest(submission["selection"]) and _chrome_digest(submission["desktop"])
+                 and type(submission["marker"]) is str
+                 and re.fullmatch(r"WAKEHUB_TEST_REGISTER_V1:[a-f0-9]{64}", submission["marker"])
+                 and bytes_digest(submission["marker"].encode("ascii")) == origin["marker_digest"]
+                 and type(submission["prior_refs"]) is list and len(submission["prior_refs"]) <= 8192
+                 and all(type(ref) is str and cdp_doorbell._UI_TURN_REF.fullmatch(ref)
+                         for ref in submission["prior_refs"])
+                 and submission["prior_refs"] == sorted(set(submission["prior_refs"]))
+                 and (_chrome_digest(submission["document"]) or
+                      (submission["document"] is None and not submission["prior_refs"])),
+                 "LOCAL_ORIGIN_JOURNAL_INVALID")
     navigation = origin["navigation"]
     _require(navigation is None or (
         origin["phase"] == "ENROLLED" and type(navigation) is dict
@@ -3605,6 +3631,229 @@ def _compose_supervisor_chrome(runtime: _RuntimeConfig, stop: Callable[[], bool]
     return _SupervisorChrome(runtime, sender, config, stop)
 
 
+def _prepare_local_origin(runtime, chrome, txn, before, *, selection=None):
+    local, _, sid, env, _, desktop = before
+    marker = "WAKEHUB_TEST_REGISTER_V1:" + token_hex(32)
+    issued = time.time_ns() // 1_000_000
+    lease = runtime.raw.get("registration_lease_seconds", 86400)
+    if selection is not None:
+        lease = min(lease, 300)
+    origin = {
+        "registration_id": token_hex(16), "marker_digest": bytes_digest(marker.encode("ascii")),
+        "issued_ms": issued, "expires_ms": issued + lease * 1000, "phase": "PREPARED",
+        "owner_scope": _chrome_scope(local, sid, env), "chrome_config": digest(chrome.config),
+        "navigation": None,
+    }
+    if selection is not None:
+        origin["submission"] = {"selection": selection, "desktop": desktop, "marker": marker,
+                                "document": None, "prior_refs": []}
+    return origin, cdp_doorbell.WH03PreparedRegistration(origin["registration_id"], marker, origin["expires_ms"])
+
+
+def _check_enrollment_page(page, account_id: str, *, visible: bool = True) -> None:
+    code = page.evaluate("""account => {
+        const accounts = document.querySelectorAll('[data-account-id]');
+        if (accounts.length !== 1 || accounts[0].getAttribute('data-account-id') !== account)
+            return 'WAKEHUB_ENROLLMENT_ACCOUNT_UNPROVEN';
+        return document.visibilityState === 'visible' ? 'READY' : 'WAKEHUB_ENROLLMENT_SELECTION_UNPROVEN';
+    }""", account_id)
+    _require(code == "READY" or (not visible and code == "WAKEHUB_ENROLLMENT_SELECTION_UNPROVEN"),
+             code if code in ("WAKEHUB_ENROLLMENT_ACCOUNT_UNPROVEN",
+                                                "WAKEHUB_ENROLLMENT_SELECTION_UNPROVEN")
+             else "WAKEHUB_ENROLLMENT_SELECTION_UNPROVEN")
+
+
+def _selected_enrollment_chat(sender: NativeChrome9444) -> tuple[str, str]:
+    """Read the owner-selected exact chat and account from the existing Chrome context."""
+    try:
+        with sender.adapter.inventory._browser(sender.environment.endpoint) as browser:
+            contexts = list(browser.contexts)
+            _require(len(contexts) == 1, "EXACT_CHAT_CONTEXT_AMBIGUOUS")
+            context = contexts[0]
+            pages = list(context.pages)
+            _require(len(pages) <= 32, "WAKEHUB_ENROLLMENT_SELECTION_UNPROVEN")
+            selected = []
+            for page in pages:
+                url = page.url
+                if type(url) is not str or not _CHAT.fullmatch(url):
+                    continue
+                row = page.evaluate("""() => {
+                    if (document.visibilityState !== 'visible' || !document.hasFocus()) return null;
+                    const accounts = document.querySelectorAll('[data-account-id]');
+                    return {url: location.href, account: accounts.length === 1 ?
+                        accounts[0].getAttribute('data-account-id') : null};
+                }""")
+                if row is not None:
+                    _require(type(row) is dict and row.get("url") == url and page.url == url, "EXACT_CHAT_URL_DRIFT")
+                    selected.append((url, row.get("account")))
+            _require(len(selected) == 1, "WAKEHUB_ENROLLMENT_SELECTION_UNPROVEN")
+            url, account = selected[0]
+            _require(_reference(account), "WAKEHUB_ENROLLMENT_ACCOUNT_UNPROVEN")
+            _require(list(browser.contexts) == contexts and list(context.pages) == pages
+                     and sum(type(page.url) is str and page.url.rstrip("/") == url for page in pages) == 1,
+                     "EXACT_CHAT_OBSERVATION_CHANGED")
+            return url, account
+    except RuntimeHold:
+        raise
+    except Exception:
+        raise RuntimeHold("WAKEHUB_ENROLLMENT_SELECTION_UNPROVEN") from None
+
+
+def _enrollment_runtime(root: Path, owner: tuple[Path, int, str], stop: Callable[[], bool]):
+    config = owner[0] / "AI-Commerce" / _ENROLLMENT_CONFIG_LOCATION
+    runtime = _read_runtime_config(config, root, registration_only=True)
+    _require(runtime.journal.path == config.with_name("enrollment.sqlite3") and runtime.principal == owner[2]
+             and "chat_preload" in runtime.raw and runtime.chrome_lifecycle != "paused",
+             "WAKEHUB_ENROLLMENT_CONFIG_INVALID")
+    approval = runtime.raw.get("enrollment_approval")
+    _require(type(approval) is dict and approval.keys() == {"nonce", "account_id"}
+             and type(approval["nonce"]) is str and re.fullmatch(r"[a-f0-9]{32}", approval["nonce"])
+             and _reference(approval["account_id"]), "WAKEHUB_ENROLLMENT_APPROVAL_REQUIRED")
+    account = approval["account_id"]
+    selection = digest([_ENROLLMENT_SCHEMA, approval["nonce"], runtime.registration.marker, account])
+    return runtime, _compose_supervisor_chrome(runtime, stop), account, selection
+
+
+def _enroll_supervisor_chat(root: Path, owner: tuple[Path, int, str], desktop: str,
+                            intent: dict, stop: Callable[[], bool], *,
+                            prepared: Callable[[str], None] | None = None) -> str:
+    """Consume only a protected Supervisor enrollment intent in its real owner desktop."""
+    local, session, sid = owner
+
+    def authorize(*, fresh=True):
+        _require(not stop() and _supervised_desktop(session, sid) == desktop
+                 and _desktop_logon(session, sid) == desktop
+                 and chrome_acquisition._enrollment_operator(attended=False, protocol_only=True) == owner,
+                 "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+        if fresh:
+            _require(_enrollment_intent_fresh(intent), "WAKEHUB_ENROLLMENT_APPROVAL_EXPIRED")
+
+    preparing = intent["selection_id"] is None
+    authorize(fresh=preparing)
+    _verify_enrollment_issue(intent)
+    authorize(fresh=preparing)
+    config = local / "AI-Commerce" / _ENROLLMENT_CONFIG_LOCATION
+    _require(chrome_acquisition._no_links(config), "WAKEHUB_ENROLLMENT_ACL_UNPROVEN")
+    if not preparing and not _enrollment_intent_fresh(intent):
+        _require(config.with_name("enrollment.sqlite3").is_file(), "WAKEHUB_ENROLLMENT_APPROVAL_EXPIRED")
+    if not config.exists():
+        _require(preparing, "WAKEHUB_ENROLLMENT_SELECTION_UNPROVEN")
+        selected = chrome_acquisition._supervisor_9444_config(local, root, sid)
+        _require(selected is not None, "WAKEHUB_ENROLLMENT_CONFIG_INVALID")
+        env, chrome_config = selected
+        sender = NativeChrome9444(root, env, supervised=True, adopted_config=chrome_config)
+        before = sender._owner_snapshot()
+        _require(before[0] == "OWNED" and before[1][:3] == owner and before[1][5] == desktop,
+                 "CHROME_OBSERVATION_CHANGED")
+        url, account = _selected_enrollment_chat(sender)
+        authorize()
+        _require(sender._owner_snapshot() == before, "CHROME_OBSERVATION_CHANGED")
+        registration = Registration(ResolvedBinding("chat-a", 1, url, env.endpoint),
+                                    intent["source_sha"], "GITHUB_AUTHENTICATED")
+        raw = {
+            "schema": "WakeHubRuntimeR1.v1", "registration": asdict(registration), "marker": registration.marker,
+            "journal": str(config.with_name("enrollment.sqlite3")), "chrome_config": str(env.config_path),
+            "chat_preload": False, "enrollment_approval": {"nonce": token_hex(16), "account_id": account},
+        }
+        authorize()
+        chrome_acquisition._prepare_wakehub_enrollment_acl(owner, payload=json.dumps(raw).encode("ascii"))
+    elif _enrollment_intent_fresh(intent):
+        chrome_acquisition._prepare_wakehub_enrollment_acl(owner)
+    _private_path(config, root)
+    runtime, chrome, account, selection = _enrollment_runtime(root, owner, stop)
+    _require(preparing or selection == intent["selection_id"], "WAKEHUB_ENROLLMENT_APPROVAL_REQUIRED")
+    binding = runtime.registration.binding
+    uncertain = False
+    try:
+        with runtime.journal.locked(runtime.registration) as (txn, data):
+            origin = data.get("local_origin")
+            uncertain = origin is not None and origin.get("submission", {}).get("document") is not None
+            before = chrome._route_snapshot(txn, origin)
+            _require(before[:3] == owner and before[5] == desktop, "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+
+            def revalidate(*, fresh=True):
+                authorize(fresh=fresh)
+                _require(chrome._route_snapshot(txn, origin) == before, "CHROME_OBSERVATION_CHANGED")
+
+            if preparing:
+                _require(_selected_enrollment_chat(chrome.sender) == (binding.chat_url, account),
+                         "WAKEHUB_ENROLLMENT_SELECTION_UNPROVEN")
+                revalidate()
+                _require(prepared is not None, "WAKEHUB_ENROLLMENT_UNVERIFIED")
+                prepared(selection)
+                return _ENROLLMENT_PREPARED
+
+            if origin is not None and origin["phase"] == "ENROLLED":
+                _require(origin.get("enrollment_selection", selection) == selection,
+                         "WAKEHUB_ENROLLMENT_PENDING_OTHER_SELECTION")
+                code = chrome.sender.local_chat(binding, marker_digest=origin["marker_digest"],
+                                                enrollment_account=account)
+                revalidate(fresh=False)
+                _require(code == "LOCAL_USER_MARKER_OBSERVED", code)
+                return "WAKEHUB_CHAT_ALREADY_ENROLLED"
+
+            if origin is not None:
+                submission = origin.get("submission")
+                _require(submission is not None and submission["selection"] == selection,
+                         "WAKEHUB_ENROLLMENT_PENDING_OTHER_SELECTION")
+                _require(submission["desktop"] == desktop, "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+            if not uncertain:
+                revalidate()
+            if origin is None or (submission["document"] is None
+                                  and origin["expires_ms"] <= time.time_ns() // 1_000_000):
+                code = chrome.sender.local_chat(binding, enrollment_account=account)
+                revalidate()
+                _require(code == "CANDIDATE_READY", code)
+                origin, _ = _prepare_local_origin(runtime, chrome, txn, before, selection=selection)
+                txn.write_local_origin(origin)
+            submission = origin["submission"]
+
+            def before_stage(document, refs):
+                nonlocal uncertain
+                revalidate()
+                _require(not uncertain, "WAKEHUB_ENROLLMENT_UNKNOWN_EFFECT")
+                submission.update(document=document, prior_refs=refs)
+                txn.write_local_origin(origin)
+                uncertain = True
+
+            def marker_fresh():
+                gate = cdp_doorbell._wh03_commitment_gate(_origin_commitment(origin, binding), max_lease_ms=None)
+                _require(gate == "READY", "WAKEHUB_ENROLLMENT_MARKER_EXPIRED")
+
+            def effect_guard():
+                revalidate()
+                marker_fresh()
+
+            def reconcile_guard():
+                revalidate(fresh=False)
+
+            adapter = chrome.sender.adapter
+            # Use the same exact-chat compositor and new USER-turn checks as
+            # event delivery. Its event wrapper requires an already-enrolled marker.
+            if not uncertain:
+                effect_guard()
+                outcome = adapter._send_ui(binding, submission["marker"],
+                                           check_page=lambda page: _check_enrollment_page(page, account),
+                                           revalidate=effect_guard, before_stage=before_stage, account_id=account)
+                _require(uncertain, outcome.code)
+            proof = adapter._send_ui(binding, submission["marker"],
+                                     check_page=lambda page: _check_enrollment_page(page, account, visible=False),
+                                     revalidate=reconcile_guard, excluded_refs=submission["prior_refs"],
+                                     document=submission["document"], account_id=account)
+            reconcile_guard()
+            _require(proof.code == cdp_doorbell.LOCAL_UI_EXISTING_TURN_RECONCILED
+                     and type(proof.turn_ref) is str and cdp_doorbell._UI_TURN_REF.fullmatch(proof.turn_ref)
+                     and proof.turn_ref not in submission["prior_refs"], "WAKEHUB_ENROLLMENT_UNKNOWN_EFFECT")
+            enrolled = dict(origin, phase="ENROLLED", enrollment_selection=selection)
+            del enrolled["submission"]
+            txn.write_local_origin(enrolled)
+            return "LOCAL_CHAT_REGISTERED_UI_EVIDENCE"
+    except Exception:
+        if uncertain:
+            return _ENROLLMENT_UNKNOWN
+        raise
+
+
 def register_local_chat(config_path: Path | None, repository_root: Path, *,
                         registration_id: str | None = None) -> Result | cdp_doorbell.WH03PreparedRegistration:
     """Prepare or consume a short-lived, manually presented local marker."""
@@ -3627,6 +3876,7 @@ def register_local_chat(config_path: Path | None, repository_root: Path, *,
         with runtime.journal.locked(runtime.registration) as (txn, data):
             origin = data.get("local_origin")
             _require(origin is None or origin["phase"] != "ENROLLED", "LOCAL_CHAT_ALREADY_REGISTERED")
+            _require(origin is None or "submission" not in origin, "WAKEHUB_ENROLLMENT_PENDING_OTHER_SELECTION")
             before = chrome._route_snapshot(txn, origin)
             _require(before[:3] == operator, "CHROME_OBSERVATION_CHANGED")
             commitment = None
@@ -3646,22 +3896,11 @@ def register_local_chat(config_path: Path | None, repository_root: Path, *,
                 return Result("HOLD", "LOCAL_CHAT_REGISTERED_UI_EVIDENCE", "SOURCE_ONLY")
 
             _require(code == "CANDIDATE_READY", code)
-            local, _, owner, env, _, _ = before
-            marker = "WAKEHUB_TEST_REGISTER_V1:" + token_hex(32)
-            marker_digest = bytes_digest(marker.encode("ascii"))
-            attempt_id = token_hex(16)
-            _require(origin is None or (origin["registration_id"] != attempt_id
-                                        and origin["marker_digest"] != marker_digest),
+            fresh, prepared = _prepare_local_origin(runtime, chrome, txn, before)
+            _require(origin is None or (origin["registration_id"] != fresh["registration_id"]
+                                        and origin["marker_digest"] != fresh["marker_digest"]),
                      "LOCAL_CHAT_REGISTRATION_REPLAY")
-            issued_ms = time.time_ns() // 1_000_000
-            expires_ms = issued_ms + runtime.raw.get("registration_lease_seconds", 86400) * 1000
-            txn.write_local_origin({
-                "registration_id": attempt_id, "marker_digest": marker_digest,
-                "issued_ms": issued_ms, "expires_ms": expires_ms, "phase": "PREPARED",
-                "owner_scope": _chrome_scope(local, owner, env), "chrome_config": digest(chrome.config),
-                "navigation": None,
-            })
-            prepared = cdp_doorbell.WH03PreparedRegistration(attempt_id, marker, expires_ms)
+            txn.write_local_origin(fresh)
             return Result("HOLD", "LOCAL_CHAT_MARKER_PREPARED", "SOURCE_ONLY")
 
     result = _registered_result(register)
@@ -3844,6 +4083,30 @@ _SUPERVISOR_MUTEX = r"Global\AI-Commerce-WakeHub-9444-Receiver-v1"
 _SUPERVISOR_DEPLOY_MUTEX = r"Global\AI-Commerce-WakeHub-Supervisor-Deploy-v1"
 _SUPERVISOR_DEPLOYMENT_KEY = r"Software\AI-Commerce\WakeHubSupervisor"
 _SUPERVISOR_HEALTH_MAX_AGE_NS = 60_000_000_000
+_ENROLLMENT_SCHEMA = "WakeHubChatEnrollment.v1"
+_ENROLLMENT_OPERATION = "enroll_wakehub_chat"
+_ENROLLMENT_PREPARE_OPERATION = "prepare_wakehub_chat_enrollment"
+_ENROLLMENT_CONFIG_LOCATION = "WakeHub/Enrollment/runtime-config.json"
+_ENROLLMENT_PREPARED = "WAKEHUB_ENROLLMENT_SELECTION_PREPARED"
+_ENROLLMENT_PINS = ("source_sha", "source_digest", "desktop", "session", "nonce")
+_ENROLLMENT_LEASE_MS = 300_000
+_ENROLLMENT_INTENT = "ChatEnrollmentIntent"
+_ENROLLMENT_RECEIPT = "ChatEnrollmentReceipt"
+_ENROLLMENT_VERIFIED = frozenset({"LOCAL_CHAT_REGISTERED_UI_EVIDENCE", "WAKEHUB_CHAT_ALREADY_ENROLLED"})
+_ENROLLMENT_UNKNOWN = "WAKEHUB_ENROLLMENT_UNKNOWN_EFFECT"
+_ENROLLMENT_OUTCOMES = _ENROLLMENT_VERIFIED | frozenset({
+    _ENROLLMENT_PREPARED,
+    _ENROLLMENT_UNKNOWN, "WAKEHUB_ENROLLMENT_UNVERIFIED", "WAKEHUB_ENROLLMENT_APPROVAL_UNVERIFIED",
+    "WAKEHUB_ENROLLMENT_APPROVAL_REQUIRED", "WAKEHUB_ENROLLMENT_APPROVAL_EXPIRED",
+    "WAKEHUB_ENROLLMENT_CONFIG_INVALID", "WAKEHUB_ENROLLMENT_FOREIGN_OWNER", "WAKEHUB_ENROLLMENT_ACL_UNPROVEN",
+    "WAKEHUB_ENROLLMENT_ACCOUNT_UNPROVEN", "WAKEHUB_ENROLLMENT_SELECTION_UNPROVEN",
+    "WAKEHUB_ENROLLMENT_PENDING_OTHER_SELECTION", "WAKEHUB_ENROLLMENT_MARKER_EXPIRED",
+    "WINDOWS_OWNER_CONTEXT_UNVERIFIED", "WINDOWS_INTERACTIVE_REQUIRED", "JOURNAL_LOCATION_INVALID",
+    "EXACT_CHAT_ABSENT", "EXACT_CHAT_TAB_AMBIGUOUS", "EXACT_CHAT_CONTEXT_AMBIGUOUS",
+    "EXACT_CHAT_URL_DRIFT", "EXACT_CHAT_OBSERVATION_CHANGED", "CHROME_OBSERVATION_CHANGED",
+    "DRAFT_PRESENT", "GENERATION_ACTIVE", "PRELOAD_DRAFT_PRESENT", "PRELOAD_SURFACE_UNPROVEN",
+    "LOCAL_USER_MARKER_MISSING", "LOCAL_USER_MARKER_AMBIGUOUS", "JOURNAL_BUSY",
+})
 _OBSERVED_CHROME_HEALTH = frozenset({"CHROME_OWNED", "CHROME_ABSENT"})
 _SUPERVISOR_DESKTOP_HOLDS = frozenset({
     "WINDOWS_INTERACTIVE_REQUIRED", "CHROME_INTERACTIVE_SESSION_CONFLICT",
@@ -4001,8 +4264,117 @@ def _store_supervisor_deployment_value(name: str, value: str | None) -> None:
                     raise
         else:
             winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
-        if name in {"StartPending", "Run", "StartupReceipt"} or name.startswith("RetiredPending_"):
+        if name in {"StartPending", "Run", "StartupReceipt", _ENROLLMENT_INTENT, _ENROLLMENT_RECEIPT
+                    } or name.startswith("RetiredPending_"):
             winreg.FlushKey(key)
+
+
+def _enrollment_intent_fresh(intent: dict) -> bool:
+    now = time.time_ns() // 1_000_000
+    return intent["issued_ms"] <= now < intent["expires_ms"]
+
+
+def _parse_enrollment_intent(raw: str | None, deployment: dict) -> dict | None:
+    if raw is None:
+        return None
+    row = _decode_unique(raw)
+    fields = {"schema", "issue_number", "comment_id", "selection_id", "issued_ms", "expires_ms", *_ENROLLMENT_PINS}
+    _require(type(row) is dict and row.keys() == fields and row["schema"] == _ENROLLMENT_SCHEMA
+             and _github_id(row["issue_number"]) and _github_id(row["comment_id"])
+             and (row["selection_id"] is None or _chrome_digest(row["selection_id"]))
+             and type(row["issued_ms"]) is int and type(row["expires_ms"]) is int
+             and row["expires_ms"] - row["issued_ms"] == _ENROLLMENT_LEASE_MS,
+             "WAKEHUB_ENROLLMENT_APPROVAL_UNVERIFIED")
+    return row if all(row[key] == deployment[key] for key in _ENROLLMENT_PINS) else None
+
+
+def _enrollment_receipt(raw: str | None, intent: dict, pid: int) -> dict | None:
+    if raw is None:
+        return None
+    row = _decode_unique(raw)
+    if (type(row) is not dict or not {"intent", "pid", "code"} <= row.keys()
+            or row["intent"] != digest(intent) or type(row["pid"]) is not int or row["pid"] != pid
+            or type(row["code"]) is not str or row["code"] not in _ENROLLMENT_OUTCOMES):
+        return None
+    if row["code"] == _ENROLLMENT_PREPARED:
+        return row if (intent["selection_id"] is None and row.keys() == {"intent", "pid", "code", "selection_id"}
+                       and _chrome_digest(row["selection_id"])) else None
+    if row.keys() == {"intent", "pid", "code"} and (
+            row["code"] not in _ENROLLMENT_VERIFIED or intent["selection_id"] is not None):
+        return row
+    return None
+
+
+def _verify_enrollment_issue(intent: dict) -> None:
+    """Independently verify the exact public Issue and approval in the owner process."""
+    root = f"{_API}/repos/{REPOSITORY}"
+    number, comment_id = intent["issue_number"], intent["comment_id"]
+    issue_url = f"{root}/issues/{number}"
+    comment_url = f"{root}/issues/comments/{comment_id}"
+    try:
+        issue = GitHubIssueCreatedSource._read_json(issue_url, None, timeout=4)
+        comment = GitHubIssueCreatedSource._read_json(comment_url, None, timeout=4)
+        selection = intent["selection_id"]
+        expected = {"schema": "ai-commerce.personal-hostops.v1",
+                    "operation": _ENROLLMENT_PREPARE_OPERATION if selection is None else _ENROLLMENT_OPERATION,
+                    "parameters": {} if selection is None else {"selection_id": selection}}
+        title = issue.get("title")
+        _require(issue.get("url") == issue_url and issue.get("repository_url") == root
+                 and issue.get("number") == number and issue.get("state") == "open"
+                 and "pull_request" not in issue and issue["user"]["login"] == "trung-via"
+                 and issue["user"]["type"] == "User" and type(title) is str and title.startswith("[HOSTOPS WRITE] ")
+                 and _decode_unique(issue["body"]) == expected
+                 and comment.get("url") == comment_url and comment.get("issue_url") == issue_url
+                 and comment.get("id") == comment_id and comment["user"]["login"] == "trung-via"
+                 and comment["user"]["type"] == "User" and comment.get("body") == f"APPROVE WRITE #{number}"
+                 and comment["created_at"] == comment["updated_at"]
+                 and _timestamp(comment["created_at"]) * 1000 == intent["issued_ms"],
+                 "WAKEHUB_ENROLLMENT_APPROVAL_UNVERIFIED")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
+        raise RuntimeHold("WAKEHUB_ENROLLMENT_APPROVAL_UNVERIFIED") from None
+
+
+def _receive_enrollment(root: Path, deployment: dict, stop: SupervisorStop) -> None:
+    """Consume one explicitly approved mailbox under the existing receiver and deploy slots."""
+    try:
+        if not set(_ENROLLMENT_PINS) <= deployment.keys() or _supervisor_deployment_value(_ENROLLMENT_INTENT) is None:
+            return
+        with _supervisor_slot(_SUPERVISOR_DEPLOY_MUTEX):
+            intent = _parse_enrollment_intent(_supervisor_deployment_value(_ENROLLMENT_INTENT), deployment)
+            if intent is None or stop.is_set():
+                return
+            pid = os.getpid()
+            previous = _enrollment_receipt(_supervisor_deployment_value(_ENROLLMENT_RECEIPT), intent, pid)
+            fresh = _enrollment_intent_fresh(intent)
+            if ((previous is not None and (previous["code"] != _ENROLLMENT_UNKNOWN or not fresh))
+                    or (intent["selection_id"] is None and not fresh)):
+                return
+            selected = {}
+
+            def enroll():
+                owner = chrome_acquisition._enrollment_operator(attended=False, protocol_only=True)
+                _require(owner[1:] == (deployment["session"], deployment["sid"]),
+                         "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+                if intent["selection_id"] is None:
+                    code = _enroll_supervisor_chat(root, owner, deployment["desktop"], intent, stop.is_set,
+                                                   prepared=lambda value: selected.update(selection_id=value))
+                else:
+                    code = _enroll_supervisor_chat(root, owner, deployment["desktop"], intent, stop.is_set)
+                return Result("HOLD", code, "SOURCE_ONLY")
+
+            outcome = _registered_result(enroll).code
+            if previous is not None and outcome not in _ENROLLMENT_VERIFIED:
+                return
+            code = outcome if outcome in _ENROLLMENT_OUTCOMES else "WAKEHUB_ENROLLMENT_UNVERIFIED"
+            if code == _ENROLLMENT_PREPARED and not _chrome_digest(selected.get("selection_id")):
+                code = "WAKEHUB_ENROLLMENT_UNVERIFIED"
+            _store_supervisor_deployment_value(_ENROLLMENT_RECEIPT, json.dumps({
+                "intent": digest(intent), "pid": pid, "code": code,
+                **(selected if code == _ENROLLMENT_PREPARED else {}),
+            }, separators=(",", ":")))
+    except (OSError, ValueError, TypeError, KeyError, RecursionError):
+        # Mailbox failures are isolated from the health and event loops.
+        return
 
 
 @contextmanager
@@ -4267,6 +4639,12 @@ def _resolve_runtime_config(repository_root: Path, *, owner: tuple[Path, int, st
                         else _ConfigSelection.FIXED_RUNTIME)
             select(selected)
             found.append((path, validate(path)))
+        if protected and observe_only and (
+                not found or (len(found) == 1 and selected == _ConfigSelection.FIXED_HEALTH_WRAPPER)):
+            enrolled = _operational_enrollment_config(repository_root, owner)
+            if enrolled is not None:
+                select(_ConfigSelection.FIXED_RUNTIME)
+                return enrolled
         if not found and observe_only and protected:
             select(_ConfigSelection.LEGACY_9444)
             env, pin = _legacy_health_config(repository_root, owner)
@@ -4407,10 +4785,32 @@ def _observe_only_config(config_path: Path, repository_root: Path, owner: tuple[
             "registration_id": consent["registration_id"], "marker_digest": consent["marker_digest"],
             "owner_scope": _chrome_scope(owner[0], owner[2], env), "chrome_config": digest(chrome.config),
         }.items())
+        if enrolled and config_path == owner[0] / "AI-Commerce" / _ENROLLMENT_CONFIG_LOCATION:
+            approval = raw.get("enrollment_approval")
+            enrolled = (type(approval) is dict and _reference(approval.get("account_id"))
+                        and all(consent[kind]["account_id"] == approval["account_id"]
+                                for kind in _STANDING_SOURCES if kind in consent))
         pins.append(enrolled)
         if enrolled:
             return chrome, digest(pins)
     return (chrome.sender if protected else chrome), digest(pins)
+
+
+def _operational_enrollment_config(root: Path, owner: tuple[Path, int, str]) -> tuple[Path, str] | None:
+    """Discover the same journal after a separate standing authorization is present."""
+    config = owner[0] / "AI-Commerce" / _ENROLLMENT_CONFIG_LOCATION
+    _require(chrome_acquisition._no_links(config), "LOCAL_CONFIG_INVALID")
+    if not config.exists():
+        return None
+    raw = _read_owned_json(config, root)
+    consent = raw.get("ui_delivery")
+    if type(consent) is not dict or not any(kind in consent for kind in _STANDING_SOURCES):
+        return None
+    chrome, pin = _observe_only_config(config, root, owner, lambda: False, protected=True)
+    if isinstance(chrome, _SupervisorChrome):
+        _require(chrome.runtime.journal.path == config.with_name("enrollment.sqlite3"), "LOCAL_CONFIG_INVALID")
+        return config, pin
+    return None
 
 
 def _deployment_health(deployment: dict, *, health_only: bool = False):
@@ -4500,6 +4900,9 @@ def _observe_only_supervisor(config_path: Path | None, repository_root: Path, *,
         sender = chrome.sender if isinstance(chrome, _SupervisorChrome) else chrome
         is_legacy_health = protected and isinstance(sender, NativeChrome9444) and sender.legacy_health_only
         legacy_browser_phase = is_legacy_health
+        if is_legacy_health and (owner[0] / "AI-Commerce" / _ENROLLMENT_CONFIG_LOCATION).exists():
+            selected, _ = _resolve_runtime_config(repository_root, owner=owner, observe_only=True, protected=True)
+            _require(selected == config_path, "LOCAL_CONFIG_CHANGED")
         state, provenance, pending = sender.lifecycle_snapshot()
         legacy_browser_phase = False
         if not is_legacy_health:
@@ -4524,6 +4927,8 @@ def _observe_only_supervisor(config_path: Path | None, repository_root: Path, *,
 
     def tick() -> Result:
         nonlocal first_health_reported
+        if deployment is not None:
+            _receive_enrollment(repository_root, deployment, stop)
         result = _registered_result(observe)
         if publish_fn is not None:
             if result.code in _SUPERVISOR_DESKTOP_HOLDS | _SUPERVISOR_CHROME_HOLDS:
@@ -4643,6 +5048,7 @@ def run_supervisor(config_path: Path | None, repository_root: Path, *, dry_run: 
         if _deployment is None:
             runtime = _read_runtime_config(config_path, repository_root)
         else:
+            _receive_enrollment(repository_root, _deployment, stop)
             owner = chrome_acquisition._enrollment_operator(attended=False, protocol_only=True)
             _require((owner[1], owner[2]) == (_deployment["session"], _deployment["sid"])
                      and _supervised_desktop(owner[1], owner[2]) == _deployment["desktop"],

@@ -8,6 +8,7 @@ receipt validation execute normally. No Git, browser, login or external writes.
 """
 from contextlib import contextmanager
 from dataclasses import FrozenInstanceError, asdict, replace
+from datetime import datetime, timezone
 import faulthandler
 import hashlib
 import hmac
@@ -4625,6 +4626,300 @@ def flat04(supervisor, monkeypatch):
 
 
 @pytest.fixture
+def autonomous_enrollment(flat04, monkeypatch):
+    f = flat04
+    owner = f.s.owner()
+    local, session, sid = owner
+    desktop = r._supervised_desktop(session, sid)
+    directory = local / "AI-Commerce" / "WakeHub" / "Enrollment"
+    directory.mkdir(parents=True, mode=0o700)
+    path = directory / "runtime-config.json"
+    journal = directory / "enrollment.sqlite3"
+    private_identity = r._private_identity
+    if os.name != "nt":
+        def simulate_sid(item):
+            assert private_identity(item).startswith("uid:")
+            return sid
+
+        monkeypatch.setattr(r, "_private_identity", simulate_sid)
+    approval = {"nonce": "a" * 32, "account_id": "selected-account"}
+    config = dict(f.i["config"], journal=str(journal), enrollment_approval=approval)
+    save = lambda: f.i["save"](path, config)
+    save()
+    now = r.time.time_ns() // 1_000_000_000 * 1000
+    intent = {"source_sha": f.i["registration"].source_sha,
+              "selection_id": digest([r._ENROLLMENT_SCHEMA, approval["nonce"],
+                                      f.i["registration"].marker, approval["account_id"]]),
+              "schema": r._ENROLLMENT_SCHEMA, "issue_number": 123, "comment_id": 17,
+              "issued_ms": now, "expires_ms": now + 300_000}
+    ui = SimpleNamespace(clicks=0, reads=0, inserts=0, draft=None, crash=False, readback=True,
+                         account=approval["account_id"], visible=True, prepared=[])
+    custody = []
+    root_url = f"{r._API}/repos/{r.REPOSITORY}"
+    issue_url, comment_url = f"{root_url}/issues/123", f"{root_url}/issues/comments/17"
+    author = {"type": "User", "login": "trung-via"}
+    comment_time = datetime.fromtimestamp(now // 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    issue = {"url": issue_url, "repository_url": root_url, "number": 123, "state": "open",
+             "user": author, "title": "[HOSTOPS WRITE] Exact enrollment",
+             "body": json.dumps({"schema": "ai-commerce.personal-hostops.v1", "operation": r._ENROLLMENT_OPERATION,
+                                 "parameters": {"selection_id": intent["selection_id"]}})}
+    comment = {"url": comment_url, "issue_url": issue_url, "id": 17, "user": author,
+               "body": "APPROVE WRITE #123", "created_at": comment_time, "updated_at": comment_time}
+
+    def read_json(url, token, *, timeout):
+        assert token is None and timeout == 4
+        return {issue_url: issue, comment_url: comment}[url]
+
+    def acl(current, *, payload=None):
+        assert current == owner
+        custody.append(current)
+        if payload is not None:
+            directory.mkdir(parents=True, mode=0o700)
+            assert not path.exists() and not journal.exists()
+            f.i["save"](path, json.loads(payload))
+
+    def operator(*, attended, protocol_only):
+        assert not attended and protocol_only
+        return f.s.owner()
+
+    def origin():
+        with sqlite3.connect(journal) as db:
+            return json.loads(db.execute("SELECT record FROM local_origin").fetchone()[0])
+
+    monkeypatch.setattr(r.chrome_acquisition, "_prepare_wakehub_enrollment_acl", acl)
+    monkeypatch.setattr(r.GitHubIssueCreatedSource, "_read_json", staticmethod(read_json))
+    monkeypatch.setattr(r.chrome_acquisition, "_enrollment_operator", operator)
+    monkeypatch.setattr(r, "_desktop_logon", r._supervised_desktop)
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    adapter = r.cdp_doorbell
+    f.context.new_cdp_session = lambda page: SimpleNamespace(
+        send=lambda method: {"targetInfo": {"type": "page", "targetId": "f" * 32, "browserContextId": "e" * 32}},
+        detach=lambda: None)
+    f.exact.set_default_timeout = lambda timeout: None
+
+    def evaluate(script, args=None):
+        if script == adapter._DOCUMENT_CLOCK:
+            return 123.0
+        if script in (adapter._CHAT_A_READ_ONLY_SURFACE, adapter._WH03_COMMITTED_SIGNAL_DOM):
+            return Flat04Page.evaluate(f.exact, script, args)
+        if "document.hasFocus" in script:
+            return {"url": f.exact.url, "account": ui.account} if ui.visible else None
+        if "document.visibilityState" in script:
+            if args != ui.account:
+                return "WAKEHUB_ENROLLMENT_ACCOUNT_UNPROVEN"
+            return "READY" if ui.visible else "WAKEHUB_ENROLLMENT_SELECTION_UNPROVEN"
+        assert args["url"] == f.exact.url and args["account_id"] == ui.account
+        marker = args["text"]
+        assert re.fullmatch(r"WAKEHUB_TEST_REGISTER_V1:[a-f0-9]{64}", marker)
+        state = origin()
+        assert marker == state["submission"]["marker"] and state["phase"] == "PREPARED"
+        if script == adapter._CHECK:
+            assert state["submission"]["document"] is None
+            ui.prepared.append(state["registration_id"])
+            if ui.crash:
+                raise SimulatedWakeHubCrash()
+            return "READY"
+        if script == adapter._PRE_STAGE_REFS:
+            return ["old-turn"]
+        assert state["submission"]["document"] and state["submission"]["prior_refs"] == ["old-turn"]
+        if script == adapter._INSERT:
+            ui.draft = marker
+            ui.inserts += 1
+            return True
+        if script == adapter._READY:
+            return ui.draft == marker
+        if script == adapter._CLICK:
+            assert ui.draft == marker
+            ui.clicks += 1
+            ui.draft = None
+            f.exact.turns.append((marker, "user"))
+            return ["old-turn"]
+        if script == adapter._PROVE:
+            return "new-turn"
+        assert script == adapter._EXISTING_USER_TURN
+        ui.reads += 1
+        return "new-turn" if ui.readback and f.exact.turns == [(marker, "user")] else False
+
+    def wait(script, *, arg, **_):
+        assert evaluate(script, arg)
+
+    f.exact.evaluate = evaluate
+    f.exact.wait_for_function = wait
+    f.unrelated.evaluate = lambda script: None
+
+    def enroll():
+        def run():
+            code = r._enroll_supervisor_chat(f.i["root"], owner, desktop, intent, lambda: False)
+            return r.Result("HOLD", code, "SOURCE_ONLY")
+
+        return r._registered_result(run).code
+
+    return SimpleNamespace(f=f, owner=owner, desktop=desktop, ui=ui, journal=journal, origin=origin,
+                           config=config, path=path, save=save, intent=intent, enroll=enroll,
+                           custody=custody, comment=comment, issue=issue)
+
+
+def test_protected_enrollment_from_absent_state_to_same_journal_runtime(autonomous_enrollment, monkeypatch):
+    e = autonomous_enrollment
+    root, owner = e.f.i["root"], e.owner
+    env = e.f.i["environment"]
+    e.path.unlink()
+    e.path.parent.rmdir()
+    e.path.parent.parent.rmdir()
+    monkeypatch.delenv(r._RUNTIME_CONFIG_ENV, raising=False)
+    monkeypatch.setattr(r, "_user_runtime_config", lambda _: None)
+    monkeypatch.setattr(r.chrome_acquisition, "_supervisor_9444_config",
+                        lambda *_: (env, e.f.i["chrome"]))
+    monkeypatch.setattr(r.chrome_acquisition, "_verify_google_chrome", lambda current: None)
+    request = {"schema": "ai-commerce.personal-hostops.v1", "operation": r._ENROLLMENT_PREPARE_OPERATION,
+               "parameters": {}}
+    e.issue["body"] = json.dumps(request)
+    prepared = []
+    intent = dict(e.intent, selection_id=None)
+    assert r._enroll_supervisor_chat(root, owner, e.desktop, intent, lambda: False,
+                                    prepared=prepared.append) == r._ENROLLMENT_PREPARED
+    original = e.path.read_bytes()
+    assert r._enroll_supervisor_chat(root, owner, e.desktop, intent, lambda: False,
+                                    prepared=prepared.append) == r._ENROLLMENT_PREPARED
+    assert len(prepared) == 2 and prepared[0] == prepared[1] and re.fullmatch("[a-f0-9]{64}", prepared[0])
+    assert e.path.read_bytes() == original and e.journal.is_file() and e.ui.inserts == e.ui.clicks == 0
+    request.update(operation=r._ENROLLMENT_OPERATION, parameters={"selection_id": "f" * 64})
+    e.intent["selection_id"] = "f" * 64
+    e.issue["body"] = json.dumps(request)
+    assert e.enroll() == "WAKEHUB_ENROLLMENT_APPROVAL_REQUIRED" and e.ui.clicks == 0
+    e.intent["selection_id"] = prepared[0]
+    request["parameters"]["selection_id"] = prepared[0]
+    e.issue["body"] = json.dumps(request)
+    assert e.enroll() == "LOCAL_CHAT_REGISTERED_UI_EVIDENCE"
+    assert e.enroll() == "WAKEHUB_CHAT_ALREADY_ENROLLED" and e.ui.clicks == 1
+    assert r._operational_enrollment_config(root, owner) is None
+    assert "ui_delivery" not in json.loads(original) and e.f.s.requests == []
+    origin = e.origin()
+    config = json.loads(original)
+    scope = {"repository_id": 3101, "creator_id": 711, "title_prefix": "[WAKEHUB PROJECT] ",
+             "not_before": "2026-11-15T00:00:00Z", "account_id": "different-account"}
+    config["ui_delivery"] = {"schema": r._UI_DELIVERY_SCHEMA, "transport": "playwright", "grants": [],
+                             "route_marker": config["marker"], "registration_id": origin["registration_id"],
+                             "marker_digest": origin["marker_digest"], "standing_issue": scope}
+    e.f.i["save"](e.path, config)
+    assert r._operational_enrollment_config(root, owner) is None
+    scope["account_id"] = e.ui.account
+    e.f.i["save"](e.path, config)
+    path, pin = r._resolve_runtime_config(root, owner=owner, observe_only=True, protected=True)
+    operational, observed = r._observe_only_config(path, root, owner, lambda: False, protected=True)
+    assert isinstance(operational, r._SupervisorChrome) and observed == pin
+    assert path == e.path and operational.runtime.journal.path == e.journal and e.origin() == origin
+
+
+def test_autonomous_enrollment_resumes_pre_effect_on_original_marker(autonomous_enrollment):
+    e = autonomous_enrollment
+    e.ui.crash = True
+    with pytest.raises(SimulatedWakeHubCrash):
+        e.enroll()
+    prepared = e.origin()
+    assert prepared["submission"]["document"] is None and e.ui.inserts == 0
+    e.ui.crash = False
+    assert e.enroll() == "LOCAL_CHAT_REGISTERED_UI_EVIDENCE"
+    assert e.ui.prepared == [prepared["registration_id"]] * 2
+    enrolled = e.origin()
+    assert enrolled["phase"] == "ENROLLED" and "submission" not in enrolled
+    assert enrolled["marker_digest"] == prepared["marker_digest"]
+    assert e.enroll() == "WAKEHUB_CHAT_ALREADY_ENROLLED" and e.origin() == enrolled
+    assert (e.ui.inserts, e.ui.clicks, e.ui.reads) == (1, 1, 1)
+    assert e.f.s.requests == e.f.s.ticks == []
+    with sqlite3.connect(e.journal) as db:
+        assert db.execute("SELECT count(*) FROM events").fetchone() == (0,)
+
+
+def test_autonomous_enrollment_unknown_effect_reconciles_without_another_send(autonomous_enrollment, monkeypatch):
+    e = autonomous_enrollment
+    e.ui.readback = False
+    assert e.enroll() == r._ENROLLMENT_UNKNOWN
+    reserved = e.origin()
+    assert reserved["submission"]["document"] and e.ui.clicks == 1
+    assert e.enroll() == r._ENROLLMENT_UNKNOWN and e.origin() == reserved
+    monkeypatch.setattr(r.time, "time_ns", lambda: (reserved["expires_ms"] + 1) * 1_000_000)
+    e.ui.visible = False
+    e.ui.readback = True
+    assert e.enroll() == "LOCAL_CHAT_REGISTERED_UI_EVIDENCE"
+    assert e.origin()["registration_id"] == reserved["registration_id"]
+    assert (e.ui.inserts, e.ui.clicks, e.ui.reads) == (1, 1, 3)
+
+
+def test_supervisor_enrollment_mailbox_is_explicit_and_bound_to_current_instance(autonomous_enrollment, monkeypatch):
+    e = autonomous_enrollment
+    deployment = {"source_sha": "a" * 40, "source_digest": "b" * 64, "desktop": e.desktop,
+                  "session": e.owner[1], "sid": e.owner[2], "nonce": "c" * 32}
+    rows = {}
+
+    @contextmanager
+    def slot(name):
+        assert name == r._SUPERVISOR_DEPLOY_MUTEX
+        yield
+
+    monkeypatch.setattr(r, "_supervisor_deployment_value", rows.get)
+    monkeypatch.setattr(r, "_store_supervisor_deployment_value", rows.__setitem__)
+    monkeypatch.setattr(r, "_supervisor_slot", slot)
+    stop = SimpleNamespace(is_set=lambda: False)
+    r._receive_enrollment(e.f.i["root"], deployment, stop)
+    assert not rows and not e.custody
+    pins = {key: deployment[key] for key in r._ENROLLMENT_PINS}
+    intent = {**e.intent, **pins}
+    rows[r._ENROLLMENT_INTENT] = json.dumps(dict(intent, nonce="d" * 32))
+    r._receive_enrollment(e.f.i["root"], deployment, stop)
+    assert r._ENROLLMENT_RECEIPT not in rows and not e.custody
+    rows[r._ENROLLMENT_INTENT] = json.dumps(intent)
+    e.ui.readback = False
+    r._receive_enrollment(e.f.i["root"], deployment, stop)
+    uncertain = json.loads(rows[r._ENROLLMENT_RECEIPT])
+    assert uncertain["code"] == r._ENROLLMENT_UNKNOWN
+    rows[r._ENROLLMENT_RECEIPT] = json.dumps(dict(uncertain, pid=os.getpid() + 1))
+    monkeypatch.setattr(r.time, "time_ns", lambda: (intent["expires_ms"] + 1) * 1_000_000)
+    e.ui.readback = True
+    r._receive_enrollment(e.f.i["root"], deployment, stop)
+    receipt = rows[r._ENROLLMENT_RECEIPT]
+    assert r._enrollment_receipt(receipt, intent, os.getpid())["code"] == "LOCAL_CHAT_REGISTERED_UI_EVIDENCE"
+    r._receive_enrollment(e.f.i["root"], deployment, stop)
+    assert rows[r._ENROLLMENT_RECEIPT] == receipt and e.ui.clicks == 1
+    assert e.f.s.requests == e.f.s.ticks == []
+
+
+@pytest.mark.parametrize("fault, code", [
+    ("approval", "WAKEHUB_ENROLLMENT_APPROVAL_REQUIRED"),
+    ("comment", "WAKEHUB_ENROLLMENT_APPROVAL_UNVERIFIED"),
+    ("expired", "WAKEHUB_ENROLLMENT_APPROVAL_EXPIRED"),
+    ("session", "WINDOWS_OWNER_CONTEXT_UNVERIFIED"),
+    ("account", "WAKEHUB_ENROLLMENT_ACCOUNT_UNPROVEN"),
+    ("selection", "WAKEHUB_ENROLLMENT_SELECTION_UNPROVEN"),
+    ("target", "EXACT_CHAT_ABSENT"),
+    ("duplicate", "EXACT_CHAT_TAB_AMBIGUOUS"),
+])
+def test_autonomous_enrollment_holds_before_staging(autonomous_enrollment, fault, code):
+    e = autonomous_enrollment
+    if fault == "approval":
+        del e.config["enrollment_approval"]
+        e.save()
+    elif fault == "comment":
+        e.comment["body"] = "APPROVE WRITE #124"
+    elif fault == "expired":
+        e.intent["expires_ms"] = e.intent["issued_ms"]
+    elif fault == "session":
+        e.f.s.new_logon(8)
+    elif fault == "account":
+        e.ui.account = "other-account"
+    elif fault == "selection":
+        e.ui.visible = False
+    elif fault == "target":
+        e.f.context.pages.remove(e.f.exact)
+    else:
+        e.f.context.pages.append(Flat04Page(e.f.exact.url))
+    assert e.enroll() == code
+    assert e.ui.inserts == e.ui.clicks == 0 and e.f.s.requests == []
+    if fault in ("session", "expired", "comment"):
+        assert not e.custody and not e.journal.exists()
+
+
+@pytest.fixture
 def shared_root_chat(flat04, monkeypatch):
     from ai_commerce.remote import local_completion_handoff as handoff
 
@@ -4699,10 +4994,14 @@ def test_existing_chat_adopts_owned_9444_across_ordinary_chrome_churn(shared_roo
     f.i["process"]["CommandLine"] = json.dumps(env.command() + ["--start-maximized", "--disable-background-mode"])
     ordinary = {"ProcessId": 401, "CommandLine": json.dumps([str(env.executable)])}
     helpers = [
-        dict(f.i["process"], ProcessId=pid, CommandLine=json.dumps([
+        dict(f.i["process"], ProcessId=pid, ParentProcessId=parent, CreationDate=created, CommandLine=json.dumps([
             str(env.executable), f"--user-data-dir={env.user_data_dir}", f"--type={kind}",
+            "--remote-debugging-port=9444",
         ]))
-        for pid, kind in ((501, "crashpad-handler"), (502, "future-helper"))
+        for pid, parent, created, kind in (
+            (501, f.i["process"]["ProcessId"], "2026-11-17T00:00:01Z", "future-helper"),
+            (502, 501, "2026-11-17T00:00:02Z", "future-child"),
+        )
     ]
     f.i["inventory"]["processes"].extend([ordinary, *helpers])
     query = acq._query_windows
@@ -4716,6 +5015,12 @@ def test_existing_chat_adopts_owned_9444_across_ordinary_chrome_churn(shared_roo
 
     monkeypatch.setattr(acq, "_query_windows", changing_inventory)
     monkeypatch.setattr(acq, "_lifecycle_inventory", strict_inventory)
+    inventory = f.i["inventory"]
+    owner = f.s.owner()
+    assert acq._legacy_health_inventory(env, inventory, session=owner[1], sid=owner[2])[0] == "OWNED"
+    helpers[-1]["ParentProcessId"] = ordinary["ProcessId"]
+    assert r.register_local_chat(f.i["config_path"], f.i["root"]).code == "BROWSER_OWNERSHIP_UNPROVEN"
+    helpers[-1]["ParentProcessId"] = 501
     prepared = f.prepare()
     f.exact.turns.append((prepared.marker, "user"))
     assert f.observe(prepared).code == "LOCAL_CHAT_REGISTERED_UI_EVIDENCE"
