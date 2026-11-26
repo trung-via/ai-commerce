@@ -992,6 +992,49 @@ _SUPERVISOR_TASK_PROBE_CODES = _SUPERVISOR_TASK_BASE_CODES | {
     *(f"PENDING_INTENT_PRESENT_{code}" for code in _SUPERVISOR_TASK_BASE_CODES),
     *(f"PENDING_INTENT_UNKNOWN_{code}" for code in _SUPERVISOR_TASK_BASE_CODES),
 }
+_SUPERVISOR_PENDING_VERDICTS = frozenset({
+    "ACTION_NOT_ATTEMPTED_EVIDENCE",
+    "ACTION_START_FAILED",
+    "TASK_EXITED_NO_HEALTH",
+    "RUNEX_RETURNED_EXITED_UNCORRELATED",
+    "STARTUP_HEALTH_MISSING",
+    "ACTIVE_HEALTH_UNRESOLVED",
+    "ACTIVE_UNRESOLVED",
+    "UNKNOWN_PENDING_MALFORMED",
+    "UNKNOWN_OWNER_DRIFT",
+    "UNKNOWN_TASK_DRIFT",
+    "UNKNOWN_NO_GUID_LOG_UNAVAILABLE",
+    "UNKNOWN_NO_GUID_UNCORRELATED",
+    "UNKNOWN_EVIDENCE_UNAVAILABLE",
+})
+_SUPERVISOR_PENDING_TASK_CODES = _SUPERVISOR_TASK_BASE_CODES | {
+    "TASK_INSTANCE_MATCH", "TASK_INSTANCE_OTHER",
+}
+_SUPERVISOR_PENDING_SHAPE_CODES = frozenset({
+    "PEND_WITH_GUID_SAME_SRC", "PEND_WITH_GUID_PRIOR_SRC", "PEND_WITH_GUID_SESSION_DRIFT",
+    "PEND_NO_GUID_SAME_SRC", "PEND_NO_GUID_PRIOR_SRC", "PEND_NO_GUID_SESSION_DRIFT",
+    "PEND_OWNER_DRIFT", "PEND_MALFORMED",
+})
+_SUPERVISOR_PENDING_MUTEX_CODES = frozenset({"MUTEX_ACTIVE", "MUTEX_INACTIVE", "MUTEX_UNKNOWN"})
+_SUPERVISOR_PENDING_HEALTH_CODES = frozenset({
+    "HEALTH_ABSENT", "HEALTH_MATCH_LIVE", "HEALTH_MATCH_STALE", "HEALTH_MATCH_DEAD",
+    "HEALTH_FOREIGN", "HEALTH_UNCORRELATED", "HEALTH_MALFORMED", "HEALTH_UNREADABLE",
+})
+_SUPERVISOR_PENDING_RUN_CODES = frozenset({
+    "RUN_ABSENT", "RUN_MATCH", "RUN_PRIOR", "RUN_UNCORRELATED", "RUN_MALFORMED", "RUN_UNREADABLE",
+})
+_SUPERVISOR_PENDING_HISTORY_CODES = frozenset({
+    "HIST_NA", "HIST_NEVER_RAN", "HIST_RUNNING", "HIST_QUEUED",
+    "HIST_EXIT_0", "HIST_EXIT_1", "HIST_EXIT_2", "HIST_EXIT_OTHER",
+    "HIST_TERMINATED", "HIST_ERR_FILE_NOT_FOUND", "HIST_ERR_ACCESS_DENIED",
+    "HIST_ERR_DIR_INVALID", "HIST_ERR_CANCELLED", "HIST_ERR_SYSTEM", "HIST_UNAVAILABLE",
+})
+_SUPERVISOR_PENDING_LOG_CODES = frozenset({
+    "LOG_NA", "LOG_EMPTY", "LOG_NO_MATCH", "LOG_UNCORRELATED_NO_GUID",
+    "LOG_DENIED", "LOG_DISABLED", "LOG_UNAVAILABLE",
+    "LOG_EXIT_0", "LOG_EXIT_1", "LOG_EXIT_2", "LOG_EXIT_OTHER", "LOG_ERR_SYSTEM",
+    "LOG_ACTION_START_FAILED", "LOG_TERMINATED", "LOG_COMPLETED", "LOG_STARTED_NO_EXIT",
+})
 
 # Pure comparator functions shared verbatim by protected task probe and deploy.
 _SUPERVISOR_TASK_COMPARATOR_FUNCTIONS = r"""
@@ -1222,27 +1265,241 @@ function Read-Registration {
 }
 """
 
-_SUPERVISOR_TASK_PROBE_SCRIPT = _SUPERVISOR_TASK_COMPARATOR_FUNCTIONS + _SUPERVISOR_TASK_SETUP_SCRIPT + r"""
-if ($env:AI_COMMERCE_SUPERVISOR_MODE -cne 'probe') { throw 'Read-only probe mode required' }
+_SUPERVISOR_PENDING_DIAGNOSTIC_FUNCTIONS = r"""
+function Get-SupervisorHistoryCode($lastRunTime, $lastTaskResult) {
+    if ($null -eq $lastTaskResult -or $lastTaskResult -is [bool] -or $lastTaskResult -is [string] -or
+        $lastTaskResult -is [float] -or $lastTaskResult -is [double] -or $lastTaskResult -is [decimal]) {
+        return 'HIST_UNAVAILABLE'
+    }
+    try {
+        $u = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$lastTaskResult), 0)
+    } catch {
+        return 'HIST_UNAVAILABLE'
+    }
+    if ($u -eq 0x00041303) { return 'HIST_NEVER_RAN' }
+    if ($null -eq $lastRunTime -or $lastRunTime -isnot [DateTime]) { return 'HIST_UNAVAILABLE' }
+    if ($lastRunTime.Year -lt 2000) {
+        if ($u -eq 0) { return 'HIST_NEVER_RAN' }
+        return 'HIST_UNAVAILABLE'
+    }
+    if ($u -eq 0x00000000) { return 'HIST_EXIT_0' }
+    if ($u -eq 0x00000001) { return 'HIST_EXIT_1' }
+    if ($u -eq 0x00000002) { return 'HIST_EXIT_2' }
+    if ($u -eq 0x00041301) { return 'HIST_RUNNING' }
+    if ($u -eq 0x00041306) { return 'HIST_TERMINATED' }
+    if ($u -eq 0x00041325) { return 'HIST_QUEUED' }
+    if ($u -eq 2147942402) { return 'HIST_ERR_FILE_NOT_FOUND' } # 0x80070002
+    if ($u -eq 2147942405) { return 'HIST_ERR_ACCESS_DENIED' } # 0x80070005
+    if ($u -eq 2147942667) { return 'HIST_ERR_DIR_INVALID' } # 0x8007010B
+    if ($u -eq 2147943623 -or $u -eq 3221225786) { return 'HIST_ERR_CANCELLED' } # 0x800704C7 / 0xC000013A
+    if ($u -ge 3 -and $u -le 0xFFFF) { return 'HIST_EXIT_OTHER' }
+    return 'HIST_ERR_SYSTEM'
+}
+
+function Convert-SupervisorEventResult($raw) {
+    if ($null -eq $raw) { return $null }
+    if ($raw -is [int] -or $raw -is [uint32] -or $raw -is [long]) {
+        try {
+            $signed = [int64]$raw
+            if ($signed -lt -2147483648 -or $signed -gt 4294967295) { return $null }
+            return [uint32]($signed -band 0xFFFFFFFF)
+        } catch {
+            return $null
+        }
+    }
+    if ($raw -is [string]) {
+        $text = $raw.Trim()
+        if ($text -cmatch '^0[xX][0-9a-fA-F]{1,8}$') {
+            try { return [Convert]::ToUInt32($text.Substring(2), 16) } catch { return $null }
+        }
+        if ($text -cmatch '^-?[0-9]{1,10}$') {
+            try {
+                $signed = [int64]$text
+                if ($signed -lt -2147483648 -or $signed -gt 4294967295) { return $null }
+                return [uint32]($signed -band 0xFFFFFFFF)
+            } catch {
+                return $null
+            }
+        }
+    }
+    return $null
+}
+
+function Get-SupervisorOperationalLogCode($events, $taskPath, $pendingGuid) {
+    $hasGuid = ($pendingGuid -is [string] -and $pendingGuid -cmatch '^[a-f0-9]{8}-([a-f0-9]{4}-){3}[a-f0-9]{12}$')
+    $targetGuid = if ($hasGuid) { [Guid]::Parse($pendingGuid) } else { $null }
+    $sawTaskEvent = $false
+    $actionCompleted = $null
+    $sawActionStartFailed = $false
+    $sawTerminated = $false
+    $sawCompleted = $false
+    $sawStarted = $false
+    foreach ($ev in @($events)) {
+        if ($null -eq $ev) { continue }
+        if ([string]$ev.TaskName -cne $taskPath) { continue }
+        $sawTaskEvent = $true
+        if (!$hasGuid) { continue }
+        $matched = $false
+        foreach ($candidate in @($ev.InstanceId, $ev.ActivityId)) {
+            if ($candidate -is [Guid]) {
+                if ($candidate -eq $targetGuid) { $matched = $true; break }
+            } elseif ($candidate -is [string] -and ![string]::IsNullOrWhiteSpace($candidate)) {
+                try {
+                    if ([Guid]::Parse($candidate) -eq $targetGuid) { $matched = $true; break }
+                } catch {}
+            }
+        }
+        if (!$matched) { continue }
+        $id = try { [int]$ev.Id } catch { -1 }
+        if ($id -eq 201) {
+            $code = Convert-SupervisorEventResult $ev.ResultCode
+            if ($null -ne $code -and $null -eq $actionCompleted) { $actionCompleted = $code }
+        } elseif ($id -in @(103, 202, 203)) {
+            $sawActionStartFailed = $true
+        } elseif ($id -eq 111) {
+            $sawTerminated = $true
+        } elseif ($id -eq 102) {
+            $sawCompleted = $true
+        } elseif ($id -in @(100, 110, 129, 200)) {
+            $sawStarted = $true
+        }
+    }
+    if (!$hasGuid) {
+        if ($sawTaskEvent) { return 'LOG_UNCORRELATED_NO_GUID' }
+        return 'LOG_EMPTY'
+    }
+    if ($null -ne $actionCompleted) {
+        if ($actionCompleted -eq 0) { return 'LOG_EXIT_0' }
+        if ($actionCompleted -eq 1) { return 'LOG_EXIT_1' }
+        if ($actionCompleted -eq 2) { return 'LOG_EXIT_2' }
+        if ($actionCompleted -ge 3 -and $actionCompleted -le 0xFFFF) { return 'LOG_EXIT_OTHER' }
+        return 'LOG_ERR_SYSTEM'
+    }
+    if ($sawActionStartFailed) { return 'LOG_ACTION_START_FAILED' }
+    if ($sawTerminated) { return 'LOG_TERMINATED' }
+    if ($sawCompleted) { return 'LOG_COMPLETED' }
+    if ($sawStarted) { return 'LOG_STARTED_NO_EXIT' }
+    if (!$sawTaskEvent) { return 'LOG_EMPTY' }
+    return 'LOG_NO_MATCH'
+}
+
+function Read-SupervisorOperationalLog($taskPath, $pendingGuid) {
+    $logName = 'Microsoft-Windows-TaskScheduler/Operational'
+    $cfgEnabled = $null
+    $cfg = $null
+    try {
+        $cfg = [System.Diagnostics.Eventing.Reader.EventLogConfiguration]::new($logName)
+        $cfgEnabled = [bool]$cfg.IsEnabled
+    } catch {
+        $cfgEnabled = $null
+    } finally {
+        if ($null -ne $cfg) { $cfg.Dispose() }
+    }
+    if ($cfgEnabled -eq $false) { return 'LOG_DISABLED' }
+    $xpath = "*[System[(EventID=100 or EventID=101 or EventID=102 or EventID=103 or EventID=110 or EventID=111 or EventID=129 or EventID=200 or EventID=201 or EventID=202 or EventID=203)] and EventData[Data[@Name='TaskName']='" + $taskPath + "']]"
+    $reader = $null
+    try {
+        $query = [System.Diagnostics.Eventing.Reader.EventLogQuery]::new(
+            $logName, [System.Diagnostics.Eventing.Reader.PathType]::LogName, $xpath
+        )
+        $query.ReverseDirection = $true
+        $reader = [System.Diagnostics.Eventing.Reader.EventLogReader]::new($query)
+    } catch [System.UnauthorizedAccessException] {
+        return 'LOG_DENIED'
+    } catch {
+        return 'LOG_UNAVAILABLE'
+    }
+    $rows = [System.Collections.Generic.List[object]]::new()
+    try {
+        while ($rows.Count -lt 50) {
+            $record = $reader.ReadEvent()
+            if ($null -eq $record) { break }
+            try {
+                $xml = [System.Xml.XmlDocument]::new()
+                $xml.XmlResolver = $null
+                $xml.LoadXml($record.ToXml())
+                $ns = [System.Xml.XmlNamespaceManager]::new($xml.NameTable)
+                $ns.AddNamespace('e', 'http://schemas.microsoft.com/win/2004/08/events/event')
+                $taskNode = $xml.SelectSingleNode('/e:Event/e:EventData/e:Data[@Name="TaskName"]', $ns)
+                $instNode = $xml.SelectSingleNode('/e:Event/e:EventData/e:Data[@Name="InstanceId"]', $ns)
+                $resNode = $xml.SelectSingleNode('/e:Event/e:EventData/e:Data[@Name="ResultCode"]', $ns)
+                $rows.Add([pscustomobject]@{
+                    Id = $record.Id
+                    ActivityId = $record.ActivityId
+                    TaskName = if ($null -ne $taskNode) { $taskNode.InnerText } else { '' }
+                    InstanceId = if ($null -ne $instNode) { $instNode.InnerText } else { '' }
+                    ResultCode = if ($null -ne $resNode) { $resNode.InnerText } else { $null }
+                })
+            } finally {
+                $record.Dispose()
+            }
+        }
+    } catch [System.UnauthorizedAccessException] {
+        return 'LOG_DENIED'
+    } catch {
+        return 'LOG_UNAVAILABLE'
+    } finally {
+        if ($null -ne $reader) { $reader.Dispose() }
+    }
+    if ($rows.Count -eq 0 -and $cfgEnabled -ne $true) { return 'LOG_UNAVAILABLE' }
+    return (Get-SupervisorOperationalLogCode $rows $taskPath $pendingGuid)
+}
+"""
+
+_SUPERVISOR_TASK_PROBE_SCRIPT = (
+    _SUPERVISOR_TASK_COMPARATOR_FUNCTIONS
+    + _SUPERVISOR_TASK_SETUP_SCRIPT
+    + _SUPERVISOR_PENDING_DIAGNOSTIC_FUNCTIONS
+    + r"""
+$mode = $env:AI_COMMERCE_SUPERVISOR_MODE
+if ($mode -cne 'probe' -and $mode -cne 'probe_pending') { throw 'Read-only probe mode required' }
 $task = Read-Registration
-if (!$task) { 'TASK_MISSING'; exit }
+if (!$task) {
+    if ($mode -ceq 'probe_pending') { 'TASK_MISSING+HIST_NA+LOG_NA' } else { 'TASK_MISSING' }
+    exit
+}
 $status = Get-SupervisorRegistrationStatus $task $expected $action $name $sid
-if ($status -cne 'OK') { $status; exit }
+if ($status -cne 'OK') {
+    if ($mode -ceq 'probe_pending') { $status + '+HIST_NA+LOG_NA' } else { $status }
+    exit
+}
 $instances = $task.GetInstances(0)
 if ($null -eq $instances) { throw 'Instances unavailable' }
+$pendingGuid = if ($mode -ceq 'probe_pending') { [string]$env:AI_COMMERCE_SUPERVISOR_PENDING_GUID } else { '' }
+$hasPendingGuid = ($pendingGuid -cmatch '^[a-f0-9]{8}-([a-f0-9]{4}-){3}[a-f0-9]{12}$')
 if ($task.State -eq 3 -and $instances.Count -eq 0) {
-    'TASK_READY'; exit
+    $taskCode = 'TASK_READY'
 } elseif ($instances.Count -eq 1 -and $instances.Item(1).State -eq 4) {
     $instance = $instances.Item(1)
     if (!$instance -or $instance.Path -cne ('\' + $name) -or !$instance.InstanceGuid) {
         throw 'Instance unavailable'
     }
-    $null = [Guid]::Parse($instance.InstanceGuid)
-    'TASK_INSTANCE_PRESENT'; exit
+    $parsedInstance = [Guid]::Parse($instance.InstanceGuid)
+    if ($mode -ceq 'probe_pending' -and $hasPendingGuid) {
+        $taskCode = if ($parsedInstance -eq [Guid]::Parse($pendingGuid)) {
+            'TASK_INSTANCE_MATCH'
+        } else {
+            'TASK_INSTANCE_OTHER'
+        }
+    } else {
+        $taskCode = 'TASK_INSTANCE_PRESENT'
+    }
 } else {
-    'TASK_BUSY'; exit
+    $taskCode = 'TASK_BUSY'
 }
+if ($mode -ceq 'probe') {
+    $taskCode; exit
+}
+$histCode = 'HIST_UNAVAILABLE'
+try {
+    $histCode = Get-SupervisorHistoryCode $task.LastRunTime $task.LastTaskResult
+} catch {
+    $histCode = 'HIST_UNAVAILABLE'
+}
+$logCode = Read-SupervisorOperationalLog ('\' + $name) $pendingGuid
+($taskCode + '+' + $histCode + '+' + $logCode)
 """
+)
 
 _SUPERVISOR_TASK_SCRIPT = _SUPERVISOR_TASK_COMPARATOR_FUNCTIONS + _SUPERVISOR_TASK_SETUP_SCRIPT + r"""
 $task = Read-Registration
@@ -1320,7 +1577,9 @@ runpy.run_module('ai_commerce.wakehub_runtime', run_name='__main__', alter_sys=T
 _SUPERVISOR_INSTANCE = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
 
 
-def _run_supervisor_task_script(acquisition, script, executable, arguments, root, owner, *, mode="inspect", nonce=""):
+def _run_supervisor_task_script(
+    acquisition, script, executable, arguments, root, owner, *, mode="inspect", nonce="", pending_guid="",
+):
     # Select a verified native PowerShell without consulting a Chrome task.
     shell = acquisition._powershell(owner_action=lambda bootstrap: bootstrap)
     env = acquisition._child_environment()
@@ -1330,6 +1589,8 @@ def _run_supervisor_task_script(acquisition, script, executable, arguments, root
         AI_COMMERCE_SUPERVISOR_ROOT=str(root), AI_COMMERCE_SUPERVISOR_MODE=mode,
         AI_COMMERCE_SUPERVISOR_NONCE=nonce,
     )
+    if mode == "probe_pending":
+        env["AI_COMMERCE_SUPERVISOR_PENDING_GUID"] = pending_guid
     result = subprocess.run(
         [str(shell), "-NoProfile", "-NonInteractive", "-Command",
          acquisition._POWERSHELL_TASK_READ_PREAMBLE + script],
@@ -1356,6 +1617,225 @@ def _supervisor_task_probe(acquisition, executable, arguments, root, owner):
     if code not in _SUPERVISOR_TASK_BASE_CODES:
         deny("SUPERVISOR_RUNTIME_UNAVAILABLE")
     return code
+
+
+def _supervisor_task_probe_pending(acquisition, executable, arguments, root, owner, *, pending_guid=""):
+    if pending_guid and not _SUPERVISOR_INSTANCE.fullmatch(pending_guid):
+        deny("SUPERVISOR_RUNTIME_UNAVAILABLE")
+    raw = _run_supervisor_task_script(
+        acquisition, _SUPERVISOR_TASK_PROBE_SCRIPT, executable, arguments, root, owner,
+        mode="probe_pending", nonce="", pending_guid=pending_guid,
+    )
+    parts = raw.split("+")
+    if (len(parts) != 3 or parts[0] not in _SUPERVISOR_PENDING_TASK_CODES
+            or parts[1] not in _SUPERVISOR_PENDING_HISTORY_CODES
+            or parts[2] not in _SUPERVISOR_PENDING_LOG_CODES):
+        deny("SUPERVISOR_RUNTIME_UNAVAILABLE")
+    return parts[0], parts[1], parts[2]
+
+
+def _parse_supervisor_intent(raw, *, require_instance=False):
+    if type(raw) is not str or not 0 < len(raw) <= 2048:
+        return None
+    try:
+        value = json.loads(raw, object_pairs_hook=_object_unique)
+    except (Denied, ValueError, TypeError, RecursionError):
+        return None
+    base = {"source_sha", "source_digest", "config_digest", "desktop", "session", "sid", "config", "nonce"}
+    if type(value) is not dict:
+        return None
+    if require_instance:
+        if value.keys() != base | {"instance"}:
+            return None
+    elif not base <= value.keys() <= base | {"instance"}:
+        return None
+    if (type(value["source_sha"]) is not str or re.fullmatch(r"[a-f0-9]{40}", value["source_sha"]) is None
+            or any(type(value[key]) is not str or re.fullmatch(r"[a-f0-9]{64}", value[key]) is None
+                   for key in ("source_digest", "config_digest", "desktop"))
+            or type(value["session"]) is not int or value["session"] <= 0
+            or type(value["sid"]) is not str or re.fullmatch(r"S-1-(?:\d+-){1,14}\d+", value["sid"]) is None
+            or type(value["config"]) is not str or not 0 < len(value["config"]) <= 2048
+            or any(ch in value["config"] for ch in "\x00\r\n")
+            or type(value["nonce"]) is not str or re.fullmatch(r"[a-f0-9]{32}", value["nonce"]) is None):
+        return None
+    if "instance" in value and (type(value["instance"]) is not str
+                                or _SUPERVISOR_INSTANCE.fullmatch(value["instance"]) is None):
+        return None
+    return value
+
+
+def _classify_pending_intent(raw, *, owner, desktop, sha, source):
+    intent = _parse_supervisor_intent(raw, require_instance=False)
+    if intent is None:
+        return "PEND_MALFORMED", None
+    if intent["sid"] != owner[2]:
+        return "PEND_OWNER_DRIFT", intent
+    prefix = "PEND_WITH_GUID_" if "instance" in intent else "PEND_NO_GUID_"
+    if intent["session"] != owner[1] or intent["desktop"] != desktop:
+        return prefix + "SESSION_DRIFT", intent
+    if intent["source_sha"] == sha and intent["source_digest"] == source:
+        return prefix + "SAME_SRC", intent
+    return prefix + "PRIOR_SRC", intent
+
+
+def _probe_supervisor_mutex(runtime):
+    try:
+        active = runtime._supervisor_active()
+    except Exception:
+        return "MUTEX_UNKNOWN"
+    if type(active) is not bool:
+        return "MUTEX_UNKNOWN"
+    return "MUTEX_ACTIVE" if active else "MUTEX_INACTIVE"
+
+
+def _probe_supervisor_health_state(runtime, intent, executable, owner, *, mutex_active):
+    try:
+        raw = runtime._supervisor_deployment_value("Health")
+    except Exception:
+        return "HEALTH_UNREADABLE"
+    if raw is None:
+        return "HEALTH_ABSENT"
+    if type(raw) is not str or not 0 < len(raw) <= 2048:
+        return "HEALTH_MALFORMED"
+    try:
+        value = json.loads(raw, object_pairs_hook=_object_unique)
+    except (Denied, ValueError, TypeError, RecursionError):
+        return "HEALTH_MALFORMED"
+    required = {
+        "source_sha", "source_digest", "config_digest", "desktop", "session", "nonce",
+        "pid", "created", "observed_ns", "health",
+    }
+    if (type(value) is not dict or not required <= value.keys() <= required | {"mode"}
+            or ("mode" in value and value["mode"] != runtime._CHROME_HEALTH_ONLY)
+            or type(value["source_sha"]) is not str or re.fullmatch(r"[a-f0-9]{40}", value["source_sha"]) is None
+            or any(type(value[key]) is not str or re.fullmatch(r"[a-f0-9]{64}", value[key]) is None
+                   for key in ("source_digest", "config_digest", "desktop"))
+            or type(value["session"]) is not int or value["session"] <= 0
+            or type(value["nonce"]) is not str or re.fullmatch(r"[a-f0-9]{32}", value["nonce"]) is None
+            or type(value["pid"]) is not int or not 0 < value["pid"] < 2**32
+            or type(value["created"]) is not int or value["created"] <= 0
+            or type(value["observed_ns"]) is not int
+            or value["health"] not in (
+                runtime._OBSERVED_CHROME_HEALTH | _SUPERVISOR_DESKTOP_HOLDS
+                | (_SUPERVISOR_CHROME_HOLDS if "mode" in value else frozenset()))):
+        return "HEALTH_MALFORMED"
+    if intent is None:
+        return "HEALTH_UNCORRELATED"
+    pin_keys = ("source_sha", "source_digest", "config_digest", "desktop", "session", "nonce")
+    if any(value[key] != intent[key] for key in pin_keys):
+        return "HEALTH_FOREIGN"
+    try:
+        process_ok = runtime._supervisor_process(value["pid"], executable, owner) == value["created"]
+    except Exception:
+        process_ok = False
+    if not process_ok:
+        return "HEALTH_MATCH_DEAD"
+    try:
+        age = runtime.monotonic_ns() - value["observed_ns"]
+        fresh = type(age) is int and 0 <= age <= runtime._SUPERVISOR_HEALTH_MAX_AGE_NS
+    except Exception:
+        fresh = False
+    if fresh and mutex_active:
+        return "HEALTH_MATCH_LIVE"
+    return "HEALTH_MATCH_STALE"
+
+
+def _probe_supervisor_run_state(runtime, intent):
+    try:
+        raw = runtime._supervisor_deployment_value("Run")
+    except Exception:
+        return "RUN_UNREADABLE"
+    if raw is None:
+        return "RUN_ABSENT"
+    parsed = _parse_supervisor_intent(raw, require_instance=True)
+    if parsed is None:
+        return "RUN_MALFORMED"
+    if intent is None:
+        return "RUN_UNCORRELATED"
+    if (parsed["nonce"] == intent["nonce"]
+            and ("instance" not in intent or parsed["instance"] == intent["instance"])
+            and all(parsed[key] == intent[key]
+                    for key in ("source_sha", "source_digest", "config_digest", "desktop", "session", "sid", "config"))):
+        return "RUN_MATCH"
+    return "RUN_PRIOR"
+
+
+def _classify_pending_supervisor_diagnosis(
+    task_code, pending_shape, mutex_state, health_state, run_state, history_code, log_code,
+):
+    if pending_shape == "PEND_MALFORMED":
+        return "UNKNOWN_PENDING_MALFORMED"
+    if pending_shape == "PEND_OWNER_DRIFT":
+        return "UNKNOWN_OWNER_DRIFT"
+    if task_code in _SUPERVISOR_TASK_MISMATCH_CODES:
+        return "UNKNOWN_TASK_DRIFT"
+    if mutex_state == "MUTEX_UNKNOWN" or health_state == "HEALTH_UNREADABLE" or run_state == "RUN_UNREADABLE":
+        return "UNKNOWN_EVIDENCE_UNAVAILABLE"
+    if health_state == "HEALTH_MATCH_LIVE":
+        if task_code in ("TASK_INSTANCE_MATCH", "TASK_INSTANCE_PRESENT"):
+            return "ACTIVE_HEALTH_UNRESOLVED"
+        return "ACTIVE_UNRESOLVED"
+    if task_code in ("TASK_INSTANCE_MATCH", "TASK_INSTANCE_PRESENT"):
+        return "STARTUP_HEALTH_MISSING"
+    if task_code in ("TASK_INSTANCE_OTHER", "TASK_BUSY"):
+        return "ACTIVE_UNRESOLVED"
+    # Task is TASK_READY (idle, zero instances).
+    if mutex_state == "MUTEX_ACTIVE" or health_state == "HEALTH_MATCH_STALE" or run_state == "RUN_MATCH":
+        return "ACTIVE_UNRESOLVED"
+    if pending_shape.startswith("PEND_WITH_GUID_"):
+        if log_code == "LOG_ACTION_START_FAILED":
+            return "ACTION_START_FAILED"
+        if (log_code in ("LOG_EXIT_0", "LOG_EXIT_1", "LOG_EXIT_2", "LOG_EXIT_OTHER",
+                         "LOG_ERR_SYSTEM", "LOG_TERMINATED", "LOG_COMPLETED")
+                or health_state == "HEALTH_MATCH_DEAD"):
+            return "TASK_EXITED_NO_HEALTH"
+        return "RUNEX_RETURNED_EXITED_UNCORRELATED"
+    # Valid pending intent with NO recorded instance GUID.
+    if health_state == "HEALTH_MATCH_DEAD":
+        return "TASK_EXITED_NO_HEALTH"
+    if history_code == "HIST_NEVER_RAN":
+        if log_code == "LOG_EMPTY":
+            return "ACTION_NOT_ATTEMPTED_EVIDENCE"
+        if log_code in ("LOG_DENIED", "LOG_DISABLED", "LOG_UNAVAILABLE"):
+            return "UNKNOWN_NO_GUID_LOG_UNAVAILABLE"
+        return "UNKNOWN_NO_GUID_UNCORRELATED"
+    if history_code == "HIST_UNAVAILABLE":
+        return "UNKNOWN_EVIDENCE_UNAVAILABLE"
+    return "UNKNOWN_NO_GUID_UNCORRELATED"
+
+
+def _supervisor_pending_public_code(
+    task_code, pending_shape, mutex_state, health_state, run_state, history_code, log_code,
+):
+    verdict = _classify_pending_supervisor_diagnosis(
+        task_code, pending_shape, mutex_state, health_state, run_state, history_code, log_code,
+    )
+    return "+".join((
+        "PENDING_INTENT_PRESENT", verdict, task_code, pending_shape,
+        mutex_state, health_state, run_state, history_code, log_code,
+    ))
+
+
+def _is_valid_supervisor_task_probe_code(code):
+    if type(code) is not str:
+        return False
+    if code in _SUPERVISOR_TASK_PROBE_CODES:
+        return True
+    parts = code.split("+")
+    if len(parts) != 9:
+        return False
+    prefix, verdict, task_code, pending_shape, mutex_state, health_state, run_state, history_code, log_code = parts
+    return (
+        prefix == "PENDING_INTENT_PRESENT"
+        and verdict in _SUPERVISOR_PENDING_VERDICTS
+        and task_code in _SUPERVISOR_PENDING_TASK_CODES
+        and pending_shape in _SUPERVISOR_PENDING_SHAPE_CODES
+        and mutex_state in _SUPERVISOR_PENDING_MUTEX_CODES
+        and health_state in _SUPERVISOR_PENDING_HEALTH_CODES
+        and run_state in _SUPERVISOR_PENDING_RUN_CODES
+        and history_code in _SUPERVISOR_PENDING_HISTORY_CODES
+        and log_code in _SUPERVISOR_PENDING_LOG_CODES
+    )
 
 
 def _supervisor_receipt(code, issue_number, sha=None):
@@ -1479,7 +1959,7 @@ def _probe_protected_supervisor_read(event, operation, inspect):
             if read_owner() != (owner, desktop):
                 deny(result["code"])
 
-        inspect(result, runtime, acquisition, root, owner, executable, arguments, recheck_identity)
+        inspect(result, runtime, acquisition, root, owner, executable, arguments, recheck_identity, (sha, source, desktop))
     except Exception:
         # The active check's fixed code is the entire public diagnostic.
         pass
@@ -1489,7 +1969,7 @@ def _probe_protected_supervisor_read(event, operation, inspect):
 
 
 def _probe_protected_supervisor_config(event):
-    def inspect(result, runtime, _acquisition, root, owner, _executable, _arguments, recheck_identity):
+    def inspect(result, runtime, _acquisition, root, owner, _executable, _arguments, recheck_identity, _identity):
         def resolve_config():
             result["code"] = "SUPERVISOR_RUNTIME_UNAVAILABLE"
             config, code = runtime._probe_supervisor_config(root, owner)
@@ -1513,19 +1993,60 @@ def _probe_protected_supervisor_config(event):
 
 
 def _probe_protected_supervisor_task(event):
-    def inspect(result, runtime, acquisition, root, owner, executable, arguments, recheck_identity):
+    def inspect(result, runtime, acquisition, root, owner, executable, arguments, recheck_identity, identity):
+        sha, source, desktop = identity
+
         def read_pending():
             try:
                 value = runtime._supervisor_deployment_value("StartPending")
             except Exception:
-                return "UNKNOWN"
+                return ("UNKNOWN", None)
             if value is None:
-                return "ABSENT"
-            return "PRESENT" if type(value) is str else "UNKNOWN"
+                return ("ABSENT", None)
+            return ("PRESENT", value) if type(value) is str else ("UNKNOWN", None)
 
         result["code"] = "SUPERVISOR_RUNTIME_UNAVAILABLE"
         pending_before = read_pending()
-        task_code = _supervisor_task_probe(acquisition, executable, arguments, root, owner)
+        if pending_before[0] != "PRESENT":
+            task_code = _supervisor_task_probe(acquisition, executable, arguments, root, owner)
+            recheck_identity()
+            result["code"] = "SUPERVISOR_RUNTIME_UNAVAILABLE"
+            if _supervisor_expected_registration(acquisition, root) != (executable, arguments):
+                deny("SUPERVISOR_RUNTIME_UNAVAILABLE")
+            pending_after = read_pending()
+            if pending_after != pending_before:
+                result["code"] = "PENDING_INTENT_CHANGED"
+                return
+            if pending_before[0] == "ABSENT":
+                code = task_code
+                status = "OBSERVED" if code in _SUPERVISOR_TASK_PROBE_OBSERVED else "HOLD"
+            else:
+                code = "PENDING_INTENT_UNKNOWN_" + task_code
+                status = "HOLD"
+            if not _is_valid_supervisor_task_probe_code(code):
+                deny("SUPERVISOR_RUNTIME_UNAVAILABLE")
+            result.update(status=status, code=code)
+            return
+
+        pending_shape, intent = _classify_pending_intent(
+            pending_before[1], owner=owner, desktop=desktop, sha=sha, source=source,
+        )
+        correlatable = intent if pending_shape not in ("PEND_MALFORMED", "PEND_OWNER_DRIFT") else None
+        pending_guid = (
+            correlatable["instance"]
+            if correlatable is not None and pending_shape.startswith("PEND_WITH_GUID_")
+            else ""
+        )
+        task_code, history_code, log_code = _supervisor_task_probe_pending(
+            acquisition, executable, arguments, root, owner, pending_guid=pending_guid,
+        )
+        if correlatable is None:
+            log_code = "LOG_NA"
+        mutex_state = _probe_supervisor_mutex(runtime)
+        health_state = _probe_supervisor_health_state(
+            runtime, correlatable, executable, owner, mutex_active=(mutex_state == "MUTEX_ACTIVE"),
+        )
+        run_state = _probe_supervisor_run_state(runtime, correlatable)
         recheck_identity()
         result["code"] = "SUPERVISOR_RUNTIME_UNAVAILABLE"
         if _supervisor_expected_registration(acquisition, root) != (executable, arguments):
@@ -1534,16 +2055,12 @@ def _probe_protected_supervisor_task(event):
         if pending_after != pending_before:
             result["code"] = "PENDING_INTENT_CHANGED"
             return
-        if pending_before == "ABSENT":
-            code = task_code
-            status = "OBSERVED" if code in _SUPERVISOR_TASK_PROBE_OBSERVED else "HOLD"
-        else:
-            prefix = "PENDING_INTENT_PRESENT_" if pending_before == "PRESENT" else "PENDING_INTENT_UNKNOWN_"
-            code = prefix + task_code
-            status = "HOLD"
-        if type(code) is not str or code not in _SUPERVISOR_TASK_PROBE_CODES:
+        code = _supervisor_pending_public_code(
+            task_code, pending_shape, mutex_state, health_state, run_state, history_code, log_code,
+        )
+        if not _is_valid_supervisor_task_probe_code(code):
             deny("SUPERVISOR_RUNTIME_UNAVAILABLE")
-        result.update(status=status, code=code)
+        result.update(status="HOLD", code=code)
 
     return _probe_protected_supervisor_read(event, _SUPERVISOR_TASK_PROBE, inspect)
 
