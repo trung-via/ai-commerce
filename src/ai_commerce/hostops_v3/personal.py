@@ -2216,17 +2216,47 @@ def _git_bytes(root, args, *, stdin_bytes=None):
     return result.stdout
 
 
+# Narrowly scoped reviewed compatibility/migration witness for the exact
+# immutable prior deployed commit whose legacy 9444 health-only mode and prior
+# bootstrap were independently reviewed (#1476/#1479/#1485/#1489). Does NOT
+# assert an independently reconstructed runtime source digest or completed
+# historical execution; retains prior_source_digest verbatim as historical
+# evidence and leaves execution HISTORICAL_UNKNOWN.
+_SUPERVISOR_REVIEWED_PRIOR_HEALTH_ONLY_SHAS = frozenset({
+    "a74e90f3799938e9c564d6c0fcc5e3bd3583a7b7",
+})
+_SUPERVISOR_PRIOR_SOURCE_PROVENANCES = frozenset({
+    "CURRENT_SOURCE_EXACT",
+    "GIT_HISTORY_REHASHED",
+    "REVIEWED_PRIOR_SHA_COMPATIBILITY",
+})
+
+
 def _verify_prior_supervisor_source(root, prior_sha, prior_digest, current_sha, current_digest):
-    """Independently prove a prior pending source commit and legacy health-only boundary."""
+    """Return closed prior-source provenance for legacy health-only recovery, or None.
+
+    - Exact match to current verified checkout SHA requires exact runtime digest
+      equality (CURRENT_SOURCE_EXACT).
+    - Exact reviewed immutable prior SHA (a74e90f3...) returns
+      REVIEWED_PRIOR_SHA_COMPATIBILITY without requiring the old Git object
+      graph or reconstructing the prior Python worktree.
+    - All other prior SHAs require full Git ancestry proof, exact raw or CRLF
+      worktree Python manifest match, and legacy health-only guards in runner.py
+      (GIT_HISTORY_REHASHED).
+    """
     if (type(prior_sha) is not str or re.fullmatch(r"[a-f0-9]{40}", prior_sha) is None
-            or type(prior_digest) is not str or re.fullmatch(r"[a-f0-9]{64}", prior_digest) is None):
-        return False
+            or type(prior_digest) is not str or re.fullmatch(r"[a-f0-9]{64}", prior_digest) is None
+            or type(current_sha) is not str or re.fullmatch(r"[a-f0-9]{40}", current_sha) is None
+            or type(current_digest) is not str or re.fullmatch(r"[a-f0-9]{64}", current_digest) is None):
+        return None
     if prior_sha == current_sha:
-        return prior_digest == current_digest
+        return "CURRENT_SOURCE_EXACT" if prior_digest == current_digest else None
+    if prior_sha in _SUPERVISOR_REVIEWED_PRIOR_HEALTH_ONLY_SHAS:
+        return "REVIEWED_PRIOR_SHA_COMPATIBILITY"
     try:
-        if _git("rev-parse", "--verify", f"{prior_sha}^{{commit}}").strip() != prior_sha:
-            return False
-        _git("merge-base", "--is-ancestor", prior_sha, current_sha)
+        if _git_bytes(root, ("rev-parse", "--verify", f"{prior_sha}^{{commit}}")).decode("ascii").strip() != prior_sha:
+            return None
+        _git_bytes(root, ("merge-base", "--is-ancestor", prior_sha, current_sha))
         raw_tree = _git_bytes(root, ("ls-tree", "-r", "-z", prior_sha, "--", "src/ai_commerce"))
         entries = [item for item in raw_tree.split(b"\0") if item]
         names = []
@@ -2242,7 +2272,7 @@ def _verify_prior_supervisor_source(root, prior_sha, prior_digest, current_sha, 
             names.append(rel_str[len("src/"):])
             blob_shas.append(parts[2].decode("ascii"))
         if not names or len(names) > 4096:
-            return False
+            return None
         batch = _git_bytes(root, ("cat-file", "--batch"), stdin_bytes=("\n".join(blob_shas) + "\n").encode("ascii"))
         pos = 0
         raw_manifest = []
@@ -2252,31 +2282,31 @@ def _verify_prior_supervisor_source(root, prior_sha, prior_digest, current_sha, 
             nl = batch.index(b"\n", pos)
             header = batch[pos:nl].decode("ascii").split()
             if len(header) != 3 or header[1] != "blob":
-                return False
+                return None
             size = int(header[2])
             pos = nl + 1
             blob = batch[pos:pos + size]
             if len(blob) != size or batch[pos + size:pos + size + 1] != b"\n":
-                return False
+                return None
             pos += size + 1
             if name == "ai_commerce/wakehub_runtime/runner.py":
                 runner_bytes = blob
             raw_manifest.append([name, hashlib.sha256(blob).hexdigest()])
             crlf_blob = blob.replace(b"\n", b"\r\n") if b"\r" not in blob else blob
             crlf_manifest.append([name, hashlib.sha256(crlf_blob).hexdigest()])
-        if runner_bytes is None:
-            return False
+        if pos != len(batch) or runner_bytes is None:
+            return None
         raw_digest = hashlib.sha256(json.dumps(sorted(raw_manifest), separators=(",", ":")).encode("ascii")).hexdigest()
         crlf_digest = hashlib.sha256(json.dumps(sorted(crlf_manifest), separators=(",", ":")).encode("ascii")).hexdigest()
         if prior_digest not in (raw_digest, crlf_digest):
-            return False
+            return None
         # Confirm the prior commit itself enforced legacy health-only mode for legacy 9444 configs.
         if (b"legacy_health_only=True" not in runner_bytes
                 or b"observe_only = not isinstance(chrome, _SupervisorChrome)" not in runner_bytes):
-            return False
-        return True
+            return None
+        return "GIT_HISTORY_REHASHED"
     except (Denied, OSError, ValueError, UnicodeError):
-        return False
+        return None
 
 
 def _probe_protected_supervisor_read(event, operation, inspect):
@@ -2612,11 +2642,13 @@ def _deploy_protected_supervisor(event):
 def _recover_protected_supervisor_health_only(event):
     """Explicitly retire one unresolved prior legacy health-only pending intent and start one fresh attempt.
 
-    Requires its own owner-authenticated WRITE grant (attempt 1 only), independently
-    verified prior pending identity with GUID, proven legacy health-only mode from
-    original source and config pins, repeated idle/zero-instance task verification,
-    inactive supervisor mutex, absent Run/Health, and durable archival of the
-    verbatim original pending bytes as HISTORICAL_UNKNOWN before any mutation.
+    Requires its own owner-authenticated WRITE grant (attempt 1 only), verified
+    prior pending identity with GUID, proven legacy health-only mode (exact
+    current/rehashed prior source or reviewed compatibility witness for exact
+    immutable prior commit a74e90f3... plus exact config path/digest match),
+    repeated idle/zero-instance task verification, inactive supervisor mutex,
+    absent Run/Health, and durable archival of the verbatim original pending
+    bytes as HISTORICAL_UNKNOWN with honest source provenance before any mutation.
     """
     request = parse_event(event, "write")
     if request["operation"] != _SUPERVISOR_RECOVER_HEALTH_ONLY:
@@ -2738,10 +2770,12 @@ def _recover_protected_supervisor_health_only(event):
 
             if prior_intent["config"] != str(config) or prior_intent["config_digest"] != config_pin:
                 return receipt("RECOVERY_PRIOR_HEALTH_ONLY_UNPROVEN")
-            if not _verify_prior_supervisor_source(
+            prior_source_provenance = _verify_prior_supervisor_source(
                 root, prior_intent["source_sha"], prior_intent["source_digest"], sha, source,
-            ):
+            )
+            if prior_source_provenance not in _SUPERVISOR_PRIOR_SOURCE_PROVENANCES:
                 return receipt("RECOVERY_PRIOR_SOURCE_UNPROVEN")
+            prior_digest_rehashed = prior_source_provenance != "REVIEWED_PRIOR_SHA_COMPATIBILITY"
 
             def check_quiescent():
                 mutex_state = _probe_supervisor_mutex(runtime)
@@ -2800,6 +2834,8 @@ def _recover_protected_supervisor_health_only(event):
                 "prior_instance": prior_intent["instance"],
                 "prior_source_sha": prior_intent["source_sha"],
                 "prior_source_digest": prior_intent["source_digest"],
+                "prior_source_provenance": prior_source_provenance,
+                "prior_source_digest_rehashed": prior_digest_rehashed,
                 "prior_config_digest": prior_intent["config_digest"],
                 "prior_mode": "LEGACY_CHROME_HEALTH_ONLY",
                 "pending_sha256": pending_sha,
@@ -2822,6 +2858,10 @@ def _recover_protected_supervisor_health_only(event):
                     and parsed.get("classification") == "HISTORICAL_UNKNOWN"
                     and parsed.get("prior_nonce") == prior_intent["nonce"]
                     and parsed.get("prior_instance") == prior_intent["instance"]
+                    and parsed.get("prior_source_sha") == prior_intent["source_sha"]
+                    and parsed.get("prior_source_digest") == prior_intent["source_digest"]
+                    and parsed.get("prior_source_provenance") == prior_source_provenance
+                    and parsed.get("prior_source_digest_rehashed") is prior_digest_rehashed
                     and parsed.get("pending_sha256") == pending_sha
                     and parsed.get("pending_raw") == raw_pending
                 )

@@ -4851,8 +4851,13 @@ $out | ConvertTo-Json -Compress
         self.assertEqual(self.modes, [])
 
     def test_recovery_write_exact_1485_case_archives_migrates_and_starts_fresh_health_only(self):
+        # Exact #1488/#1489 regression: current main f2a0e98f..., prior #1479 pending
+        # from exact reviewed immutable commit a74e90f3... with recorded GUID and
+        # PRIOR_READY task, absent old Git history, and un-rehashed mixed-EOL digest.
+        self.sha = "f2a0e98f73e1b1c7219085a23fcba88f1ad35e86"
+        self.env["GITHUB_SHA"] = self.sha
         self.setup_legacy_health_only_config()
-        prior_sha = "1" * 40
+        prior_sha = "a74e90f3799938e9c564d6c0fcc5e3bd3583a7b7"
         prior_digest = "2" * 64
         prior_nonce = "e" * 32
         prior_guid = "8c7770e8-3c62-4163-9c9f-d75621d3ca52"
@@ -4864,7 +4869,11 @@ $out | ConvertTo-Json -Compress
         raw_prior = json.dumps(prior_intent)
         self.values["StartPending"] = raw_prior
         self.state = "PRIOR_READY"
-        self.mock(hostops, "_verify_prior_supervisor_source", return_value=True)
+        # Do NOT mock _verify_prior_supervisor_source; prove Git object graph is not required.
+        self.mock(
+            hostops, "_git_bytes",
+            side_effect=AssertionError("must not require old Git history for reviewed prior SHA"),
+        )
 
         archive_key = f"RetiredPending_{prior_nonce}"
         observed_order = []
@@ -4900,13 +4909,18 @@ $out | ConvertTo-Json -Compress
         # Repeated inspect_recovery -> migrate -> start -> inspect confirmation.
         self.assertEqual(self.modes[:4], ["inspect_recovery", "inspect_recovery", "migrate", "start"])
         self.launch.assert_called_once()
-        # Original pending bytes and HISTORICAL_UNKNOWN classification preserved durably.
+        # Original pending bytes, HISTORICAL_UNKNOWN classification, verbatim old digest,
+        # and honest reviewed-compatibility provenance preserved durably.
         archive = json.loads(self.values[archive_key])
         self.assertEqual(archive["schema"], "WakeHubSupervisorRetiredPending.v1")
         self.assertEqual(archive["classification"], "HISTORICAL_UNKNOWN")
         self.assertEqual(archive["pending_raw"], raw_prior)
         self.assertEqual(archive["prior_nonce"], prior_nonce)
         self.assertEqual(archive["prior_instance"], prior_guid)
+        self.assertEqual(archive["prior_source_sha"], prior_sha)
+        self.assertEqual(archive["prior_source_digest"], prior_digest)
+        self.assertEqual(archive["prior_source_provenance"], "REVIEWED_PRIOR_SHA_COMPATIBILITY")
+        self.assertIs(archive["prior_source_digest_rehashed"], False)
         self.assertEqual(archive["prior_mode"], "LEGACY_CHROME_HEALTH_ONLY")
         # New Run has fresh identity and StartPending was promoted.
         self.assertNotIn("StartPending", self.values)
@@ -4919,16 +4933,34 @@ $out | ConvertTo-Json -Compress
         store_names = [item[1] for item in observed_order if item[0] == "store"]
         self.assertLess(store_names.index(archive_key), store_names.index("StartPending"))
 
+        # Same-SHA exact recovery on READY task records CURRENT_SOURCE_EXACT without migrate.
+        self.values.clear()
+        self.modes.clear()
+        self.launch.reset_mock()
+        self.active.return_value = False
+        same_nonce = "d" * 32
+        same_prior = {**self.intent(same_nonce), "instance": prior_guid}
+        self.values["StartPending"] = json.dumps(same_prior)
+        self.state = "READY"
+        archive_key = f"RetiredPending_{same_nonce}"
+        receipt = self.dispatch_recovery()
+        self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED"))
+        self.assertEqual(self.modes[:3], ["inspect_recovery", "inspect_recovery", "start"])
+        same_archive = json.loads(self.values[archive_key])
+        self.assertEqual(same_archive["prior_source_provenance"], "CURRENT_SOURCE_EXACT")
+        self.assertIs(same_archive["prior_source_digest_rehashed"], True)
+
     def test_recovery_write_fail_closed_matrix(self):
         self.setup_legacy_health_only_config()
-        prior_sha, prior_digest, prior_nonce = "1" * 40, "2" * 64, "e" * 32
+        prior_sha, prior_digest, prior_nonce = "a74e90f3799938e9c564d6c0fcc5e3bd3583a7b7", "2" * 64, "e" * 32
         prior_guid = "8c7770e8-3c62-4163-9c9f-d75621d3ca52"
         valid_prior = {
             **self.intent(prior_nonce), "source_sha": prior_sha, "source_digest": prior_digest,
             "instance": prior_guid,
         }
         raw_prior = json.dumps(valid_prior)
-        verify_prior = self.mock(hostops, "_verify_prior_supervisor_source", return_value=True)
+        # Exercise real _verify_prior_supervisor_source under absent Git history (no proof mock).
+        self.mock(hostops, "_git_bytes", side_effect=hostops.Denied("GIT_READ_FAILED"))
 
         def reset_clean():
             self.values.clear()
@@ -4938,13 +4970,12 @@ $out | ConvertTo-Json -Compress
             self.migrate_result = "MIGRATED"
             self.active.side_effect = None
             self.active.return_value = False
-            verify_prior.return_value = True
             self.modes.clear()
             self.launch.reset_mock()
             self.store.reset_mock()
             self.store.side_effect = lambda k, v: self.values.pop(k, None) if v is None else self.values.__setitem__(k, v)
 
-        # 1. Absent, no-GUID, malformed, foreign-owner pending.
+        # 1. Absent, no-GUID, malformed, foreign-owner pending -> zero mutations.
         for label, pending_val, want in (
             ("absent", None, "RECOVERY_PENDING_ABSENT"),
             ("no_guid", json.dumps({k: v for k, v in valid_prior.items() if k != "instance"}), "RECOVERY_PENDING_GUID_REQUIRED"),
@@ -4958,26 +4989,45 @@ $out | ConvertTo-Json -Compress
                 else:
                     self.values["StartPending"] = pending_val
                 self.assertEqual(self.dispatch_recovery()["code"], want)
+                self.store.assert_not_called()
                 self.launch.assert_not_called()
 
-        # 2. Missing historical proof (source / config pin / non-health-only current config).
-        reset_clean()
-        verify_prior.return_value = False
-        self.assertEqual(self.dispatch_recovery()["code"], "RECOVERY_PRIOR_SOURCE_UNPROVEN")
+        # 2. Wrong/arbitrary prior SHA, config path/digest mismatch, non-health-only config -> zero mutations.
+        for bad_sha in ("1" * 40, "a74e90f3799938e9c564d6c0fcc5e3bd3583a7b8"):
+            with self.subTest(bad_prior_sha=bad_sha):
+                reset_clean()
+                bad_raw = json.dumps({**valid_prior, "source_sha": bad_sha})
+                self.values["StartPending"] = bad_raw
+                self.assertEqual(self.dispatch_recovery()["code"], "RECOVERY_PRIOR_SOURCE_UNPROVEN")
+                self.assertEqual(self.values, {"StartPending": bad_raw})
+                self.store.assert_not_called()
+                self.launch.assert_not_called()
 
-        reset_clean()
-        self.values["StartPending"] = json.dumps({**valid_prior, "config_digest": "9" * 64})
-        self.assertEqual(self.dispatch_recovery()["code"], "RECOVERY_PRIOR_HEALTH_ONLY_UNPROVEN")
+        for label, override in (
+            ("wrong_config_digest", {"config_digest": "9" * 64}),
+            ("wrong_config_path", {"config": str(self.config.with_name("other.json"))}),
+        ):
+            with self.subTest(config=label):
+                reset_clean()
+                bad_raw = json.dumps({**valid_prior, **override})
+                self.values["StartPending"] = bad_raw
+                self.assertEqual(self.dispatch_recovery()["code"], "RECOVERY_PRIOR_HEALTH_ONLY_UNPROVEN")
+                self.assertEqual(self.values, {"StartPending": bad_raw})
+                self.store.assert_not_called()
+                self.launch.assert_not_called()
 
         reset_clean()
         saved_config_rv = self.config_read.return_value
         try:
             self.config_read.return_value = (SimpleNamespace(legacy_health_only=False), self.config_pin)
             self.assertEqual(self.dispatch_recovery()["code"], "RECOVERY_HEALTH_ONLY_REQUIRED")
+            self.assertEqual(self.values, {"StartPending": raw_prior})
+            self.store.assert_not_called()
+            self.launch.assert_not_called()
         finally:
             self.config_read.return_value = saved_config_rv
 
-        # 3. Active/unknown mutex, busy/queued/conflicting/drifted task.
+        # 3. Active/unknown mutex, busy/queued/conflicting/drifted task -> zero mutations.
         for label, setup_fn, want in (
             ("mutex_active", lambda: setattr(self.active, "return_value", True), "SUPERVISOR_ACTIVE_UNVERIFIED"),
             ("mutex_unknown", lambda: setattr(self.active, "side_effect", OSError("PRIVATE")), "RECOVERY_EVIDENCE_UNAVAILABLE"),
@@ -4991,10 +5041,11 @@ $out | ConvertTo-Json -Compress
                 reset_clean()
                 setup_fn()
                 self.assertEqual(self.dispatch_recovery()["code"], want)
-                self.assertEqual(self.values["StartPending"], raw_prior)
+                self.assertEqual(self.values, {"StartPending": raw_prior})
+                self.store.assert_not_called()
                 self.launch.assert_not_called()
 
-        # 4. Stale / foreign / contradictory Run, Health, StartupReceipt records.
+        # 4. Stale / foreign / contradictory Run, Health, StartupReceipt records -> zero mutations.
         for label, key, bad_val, want in (
             ("run_prior", "Run", json.dumps({**self.intent("1" * 32), "instance": "baada257-28df-48ab-8af9-c61e1d86d41a"}), "RECOVERY_CONFLICTING_RUN"),
             ("run_match", "Run", raw_prior, "RECOVERY_CONFLICTING_RUN"),
@@ -5008,6 +5059,7 @@ $out | ConvertTo-Json -Compress
                 self.values[key] = bad_val
                 self.assertEqual(self.dispatch_recovery()["code"], want)
                 self.assertEqual(self.values["StartPending"], raw_prior)
+                self.store.assert_not_called()
                 self.launch.assert_not_called()
 
         # 5. Pending changed mid-recovery -> RECOVERY_STATE_CHANGED, no mutation.
@@ -5016,20 +5068,34 @@ $out | ConvertTo-Json -Compress
         with patch.object(self.runtime, "_supervisor_deployment_value",
                           side_effect=lambda k: next(reads[k]) if k in reads else self.values.get(k)):
             self.assertEqual(self.dispatch_recovery()["code"], "RECOVERY_STATE_CHANGED")
+            self.store.assert_not_called()
             self.launch.assert_not_called()
 
-        # 6. Archive write failure / crash / conflict leaves original StartPending untouched.
+        # 6. Archive write failure / crash / conflict (including dishonest provenance) leaves StartPending untouched.
         reset_clean()
         self.store.side_effect = OSError("PRIVATE disk full")
         self.assertEqual(self.dispatch_recovery()["code"], "RECOVERY_ARCHIVE_FAILED")
         self.assertEqual(self.values["StartPending"], raw_prior)
         self.launch.assert_not_called()
 
-        reset_clean()
-        self.values[f"RetiredPending_{prior_nonce}"] = json.dumps({"schema": "WakeHubSupervisorRetiredPending.v1", "classification": "FAILED", "pending_raw": "corrupted"})
-        self.assertEqual(self.dispatch_recovery()["code"], "RECOVERY_ARCHIVE_CONFLICT")
-        self.assertEqual(self.values["StartPending"], raw_prior)
-        self.launch.assert_not_called()
+        for bad_archive in (
+            {"schema": "WakeHubSupervisorRetiredPending.v1", "classification": "FAILED", "pending_raw": "corrupted"},
+            {
+                "schema": "WakeHubSupervisorRetiredPending.v1", "classification": "HISTORICAL_UNKNOWN",
+                "prior_nonce": prior_nonce, "prior_instance": prior_guid,
+                "prior_source_sha": prior_sha, "prior_source_digest": prior_digest,
+                "prior_source_provenance": "REVIEWED_PRIOR_SHA_COMPATIBILITY",
+                "prior_source_digest_rehashed": True,
+                "pending_sha256": hashlib.sha256(raw_prior.encode("utf-8")).hexdigest(),
+                "pending_raw": raw_prior,
+            },
+        ):
+            reset_clean()
+            self.values[f"RetiredPending_{prior_nonce}"] = json.dumps(bad_archive)
+            self.assertEqual(self.dispatch_recovery()["code"], "RECOVERY_ARCHIVE_CONFLICT")
+            self.assertEqual(self.values["StartPending"], raw_prior)
+            self.store.assert_not_called()
+            self.launch.assert_not_called()
 
         # 7. Migration conflict preserves archive AND original StartPending without calling RunEx.
         reset_clean()
@@ -5057,7 +5123,9 @@ $out | ConvertTo-Json -Compress
         self.launch.side_effect = start_and_fail
         self.assertEqual(self.dispatch_recovery()["code"], "SUPERVISOR_START_UNKNOWN")
         self.launch.assert_called_once()
-        self.assertIn(f"RetiredPending_{prior_nonce}", self.values)
+        archive = json.loads(self.values[f"RetiredPending_{prior_nonce}"])
+        self.assertEqual(archive["prior_source_provenance"], "REVIEWED_PRIOR_SHA_COMPATIBILITY")
+        self.assertIs(archive["prior_source_digest_rehashed"], False)
         new_pending = json.loads(self.values["StartPending"])
         self.assertEqual(new_pending["instance"], fresh_guid)
         self.assertNotEqual(new_pending["nonce"], prior_nonce)
@@ -5172,18 +5240,144 @@ $results | ConvertTo-Json -Compress -Depth 4
 
     def test_verify_prior_supervisor_source_against_real_git_checkout(self):
         self.stack.close()
-        repo = Path(__file__).resolve().parents[1]
-        head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
-        src_root = repo / "src"
-        manifest = sorted(
-            [p.relative_to(src_root).as_posix(), hashlib.sha256(p.read_bytes()).hexdigest()]
-            for p in (src_root / "ai_commerce").rglob("*.py")
-        )
-        head_digest = hashlib.sha256(json.dumps(manifest, separators=(",", ":")).encode("ascii")).hexdigest()
-        with patch.object(hostops, "ROOTS", {"workspace": repo}):
-            self.assertTrue(hostops._verify_prior_supervisor_source(repo, head, head_digest, head, head_digest))
-            self.assertFalse(hostops._verify_prior_supervisor_source(repo, head, "0" * 64, head, head_digest))
-            self.assertFalse(hostops._verify_prior_supervisor_source(repo, "0" * 40, head_digest, head, head_digest))
+
+        def run_git(repo_dir, *args):
+            return subprocess.check_output(
+                ["git", "-C", str(repo_dir), "-c", "core.autocrlf=false", "-c", "commit.gpgsign=false", *args],
+                text=True, stderr=subprocess.PIPE,
+            ).strip()
+
+        def manifest_digest(file_map):
+            manifest = [[name, hashlib.sha256(raw).hexdigest()] for name, raw in sorted(file_map.items())]
+            return hashlib.sha256(json.dumps(manifest, separators=(",", ":")).encode("ascii")).hexdigest()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            repo = tmp_path / "repo"
+            subprocess.check_output(["git", "init", "-b", "main", str(repo)], text=True, stderr=subprocess.PIPE)
+            run_git(repo, "config", "user.name", "HostOps test")
+            run_git(repo, "config", "user.email", "hostops-test@example.invalid")
+
+            runner_path = repo / "src" / "ai_commerce" / "wakehub_runtime" / "runner.py"
+            helper_path = repo / "src" / "ai_commerce" / "helper.py"
+            runner_path.parent.mkdir(parents=True)
+
+            # Commit 1: distinct ancestor lacking legacy health-only guards -> rejected.
+            bad_runner = b"# missing legacy health-only guards\n"
+            runner_path.write_bytes(bad_runner)
+            run_git(repo, "add", "src")
+            run_git(repo, "commit", "-m", "bad prior")
+            bad_prior_sha = run_git(repo, "rev-parse", "HEAD")
+            bad_prior_digest = manifest_digest({"ai_commerce/wakehub_runtime/runner.py": bad_runner})
+
+            # Commit 2: distinct ancestor enforcing legacy health-only guards.
+            good_runner = b"legacy_health_only=True\nobserve_only = not isinstance(chrome, _SupervisorChrome)\n"
+            helper_v1 = b"VALUE = 1\n"
+            runner_path.write_bytes(good_runner)
+            helper_path.write_bytes(helper_v1)
+            run_git(repo, "add", "src")
+            run_git(repo, "commit", "-m", "good prior")
+            good_prior_sha = run_git(repo, "rev-parse", "HEAD")
+            good_lf_digest = manifest_digest({
+                "ai_commerce/wakehub_runtime/runner.py": good_runner,
+                "ai_commerce/helper.py": helper_v1,
+            })
+            good_crlf_digest = manifest_digest({
+                "ai_commerce/wakehub_runtime/runner.py": good_runner.replace(b"\n", b"\r\n"),
+                "ai_commerce/helper.py": helper_v1.replace(b"\n", b"\r\n"),
+            })
+            good_mixed_digest = manifest_digest({
+                "ai_commerce/wakehub_runtime/runner.py": good_runner.replace(b"\n", b"\r\n"),
+                "ai_commerce/helper.py": helper_v1,
+            })
+
+            # Commit 3: current HEAD distinct from good_prior_sha.
+            helper_v2 = b"VALUE = 2\n"
+            helper_path.write_bytes(helper_v2)
+            run_git(repo, "add", "src")
+            run_git(repo, "commit", "-m", "current")
+            current_sha = run_git(repo, "rev-parse", "HEAD")
+            current_digest = manifest_digest({
+                "ai_commerce/wakehub_runtime/runner.py": good_runner,
+                "ai_commerce/helper.py": helper_v2,
+            })
+
+            # Non-ancestor orphan commit with valid runner.py -> rejected.
+            run_git(repo, "checkout", "--orphan", "unrelated")
+            run_git(repo, "rm", "-rf", "src")
+            runner_path.parent.mkdir(parents=True, exist_ok=True)
+            runner_path.write_bytes(good_runner)
+            helper_path.write_bytes(helper_v1)
+            run_git(repo, "add", "src")
+            run_git(repo, "commit", "-m", "unrelated")
+            unrelated_sha = run_git(repo, "rev-parse", "HEAD")
+            run_git(repo, "checkout", "main")
+
+            # 1. Same-SHA shortcut requires exact runtime digest equality.
+            self.assertEqual(
+                hostops._verify_prior_supervisor_source(repo, current_sha, current_digest, current_sha, current_digest),
+                "CURRENT_SOURCE_EXACT",
+            )
+            self.assertIsNone(
+                hostops._verify_prior_supervisor_source(repo, current_sha, "0" * 64, current_sha, current_digest),
+            )
+
+            # 2. Real distinct-commit non-shortcut Git proof (LF and CRLF accepted; mixed/wrong/non-ancestor/unguarded rejected).
+            self.assertEqual(
+                hostops._verify_prior_supervisor_source(repo, good_prior_sha, good_lf_digest, current_sha, current_digest),
+                "GIT_HISTORY_REHASHED",
+            )
+            self.assertEqual(
+                hostops._verify_prior_supervisor_source(repo, good_prior_sha, good_crlf_digest, current_sha, current_digest),
+                "GIT_HISTORY_REHASHED",
+            )
+            self.assertIsNone(
+                hostops._verify_prior_supervisor_source(repo, good_prior_sha, good_mixed_digest, current_sha, current_digest),
+            )
+            self.assertIsNone(
+                hostops._verify_prior_supervisor_source(repo, good_prior_sha, "0" * 64, current_sha, current_digest),
+            )
+            self.assertIsNone(
+                hostops._verify_prior_supervisor_source(repo, bad_prior_sha, bad_prior_digest, current_sha, current_digest),
+            )
+            self.assertIsNone(
+                hostops._verify_prior_supervisor_source(repo, unrelated_sha, good_lf_digest, current_sha, current_digest),
+            )
+            self.assertIsNone(
+                hostops._verify_prior_supervisor_source(repo, "0" * 40, good_lf_digest, current_sha, current_digest),
+            )
+            self.assertIsNone(
+                hostops._verify_prior_supervisor_source(
+                    repo, "a74e90f3799938e9c564d6c0fcc5e3bd3583a7b8", good_mixed_digest, current_sha, current_digest,
+                ),
+            )
+
+            # 3. Exact reviewed prior SHA compatibility witness under absent Git history and mixed LF/CRLF.
+            known_sha = "a74e90f3799938e9c564d6c0fcc5e3bd3583a7b7"
+            self.assertEqual(
+                hostops._verify_prior_supervisor_source(repo, known_sha, good_mixed_digest, current_sha, current_digest),
+                "REVIEWED_PRIOR_SHA_COMPATIBILITY",
+            )
+            no_git = tmp_path / "absent-history"
+            no_git.mkdir()
+            self.assertEqual(
+                hostops._verify_prior_supervisor_source(no_git, known_sha, good_mixed_digest, current_sha, current_digest),
+                "REVIEWED_PRIOR_SHA_COMPATIBILITY",
+            )
+            # Same-SHA exact digest guard is NEVER weakened even when current_sha equals known_sha.
+            self.assertEqual(
+                hostops._verify_prior_supervisor_source(no_git, known_sha, current_digest, known_sha, current_digest),
+                "CURRENT_SOURCE_EXACT",
+            )
+            self.assertIsNone(
+                hostops._verify_prior_supervisor_source(no_git, known_sha, "0" * 64, known_sha, current_digest),
+            )
+            self.assertIsNone(
+                hostops._verify_prior_supervisor_source(no_git, known_sha.upper(), good_mixed_digest, current_sha, current_digest),
+            )
+            self.assertIsNone(
+                hostops._verify_prior_supervisor_source(no_git, known_sha, "not-a-digest", current_sha, current_digest),
+            )
 
     def test_real_bootstrap_controlled_offline_windows_fixture_boundaries(self):
         """Exercise real _SUPERVISOR_BOOTSTRAP + canonical CLI with fake winreg and isolated legacy 9444 data."""
