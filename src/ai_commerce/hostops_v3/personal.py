@@ -2696,9 +2696,8 @@ def _probe_supervisor_active_run(runtime, acquisition, root, owner, executable, 
             return "HEALTH_UNREADABLE"
         if health is None:
             return "ACTIVE_HEALTH_CHANGED"
-        lock_migration = _supervisor_upgrade_from_lock_hold(runtime, health)
-        if (health["health"] not in runtime._OBSERVED_CHROME_HEALTH
-                and (not lock_migration or run["source_sha"] == sha)):
+        legacy_hold = _supervisor_upgrade_from_legacy_hold(runtime, health, run["source_sha"], sha)
+        if health["health"] not in runtime._OBSERVED_CHROME_HEALTH and not legacy_hold:
             return health["health"]
         if run["source_sha"] == sha:
             if run["source_digest"] != source:
@@ -2719,7 +2718,7 @@ def _probe_supervisor_active_run(runtime, acquisition, root, owner, executable, 
         except Exception:
             return "ACTIVE_ENROLLMENT_UNVERIFIED"
         try:
-            options = {"expected_health": "CHROME_OWNED"} if lock_migration or legacy_retirement else {}
+            options = {"expected_health": "CHROME_OWNED"} if legacy_hold or legacy_retirement else {}
             _supervisor_upgrade_chrome_pin(runtime, acquisition, root, owner, config, config_pin, mode, **options)
         except Exception as exc:
             if mode == runtime._CHROME_HEALTH_ONLY:
@@ -2736,7 +2735,7 @@ def _probe_supervisor_active_run(runtime, acquisition, root, owner, executable, 
             latest = _read_supervisor_health(runtime, pins, executable, owner)
         except Exception:
             return "HEALTH_UNREADABLE"
-        if latest is None or any(latest.get(key) != health.get(key) for key in ("pid", "created", "mode", "health")):
+        if not _supervisor_upgrade_health_matches(health, latest, legacy_hold=legacy_hold):
             return "ACTIVE_HEALTH_CHANGED"
         return "ACTIVE_LEGACY_RETIREMENT_ELIGIBLE" if legacy_retirement else "ACTIVE_READ_CHECKS_COMPLETE"
 
@@ -2838,9 +2837,16 @@ def _probe_protected_supervisor_task(event):
     return _probe_protected_supervisor_read(event, _SUPERVISOR_TASK_PROBE, inspect)
 
 
-def _supervisor_upgrade_from_lock_hold(runtime, health):
-    return (health.get("mode") == runtime._CHROME_HEALTH_ONLY
-            and health["health"] == "ENROLLMENT_PROFILE_LOCK_UNPROVEN")
+def _supervisor_upgrade_from_legacy_hold(runtime, health, prior_sha, current_sha):
+    return (prior_sha != current_sha and health.get("mode") == runtime._CHROME_HEALTH_ONLY
+            and health["health"] in _SUPERVISOR_CHROME_HOLDS)
+
+
+def _supervisor_upgrade_health_matches(health, latest, *, legacy_hold):
+    if latest is None or any(latest.get(key) != health.get(key) for key in ("pid", "created", "mode")):
+        return False
+    # With independent owned Chrome proof, the legacy HOLD only corroborates process liveness.
+    return latest["health"] == health["health"] or (legacy_hold and latest["health"] in _SUPERVISOR_CHROME_HOLDS)
 
 
 def _supervisor_upgrade_chrome_hold(runtime, acquisition, error, *, fallback="CHROME_OWNER_UNPROVEN"):
@@ -3071,8 +3077,8 @@ def _deploy_protected_supervisor(event):
             health = _read_supervisor_health(runtime, pins, executable, owner)
             if health is None:
                 deny(failure)
-            lock_migration = _supervisor_upgrade_from_lock_hold(runtime, health)
-            if health["health"] not in runtime._OBSERVED_CHROME_HEALTH and not lock_migration:
+            legacy_hold = _supervisor_upgrade_from_legacy_hold(runtime, health, prior["source_sha"], sha)
+            if health["health"] not in runtime._OBSERVED_CHROME_HEALTH and not legacy_hold:
                 deny(failure)
             mode = health.get("mode")
             if mode not in (runtime._CHROME_HEALTH_ONLY, runtime._OPERATIONAL_TICK_V1):
@@ -3089,7 +3095,7 @@ def _deploy_protected_supervisor(event):
 
             def observe_browser():
                 nonlocal failure
-                if not lock_migration and not legacy_retirement:
+                if not legacy_hold and not legacy_retirement:
                     return chrome_pin(mode)
                 try:
                     return chrome_pin(mode, expected_health="CHROME_OWNED")
@@ -3108,14 +3114,13 @@ def _deploy_protected_supervisor(event):
                         or (legacy_retirement and not _legacy_retirement_startup_matches(runtime, prior, pid))):
                     deny(failure)
                 if observe_browser() != browser:
-                    if lock_migration or legacy_retirement:
+                    if legacy_hold or legacy_retirement:
                         failure = "CHROME_OBSERVATION_CHANGED"
                     deny(failure)
                 if not _supervisor_upgrade_task_process(acquisition, executable, arguments, root, owner, prior, pid):
                     deny(failure)
                 latest = _read_supervisor_health(runtime, pins, executable, owner)
-                if (latest is None or (latest["pid"], latest["created"], latest.get("mode"), latest["health"])
-                        != (pid, created, mode, health["health"])):
+                if not _supervisor_upgrade_health_matches(health, latest, legacy_hold=legacy_hold):
                     deny(failure)
                 upgrade = {"issue": issue_number, "comment": approval, "start_comment": approval,
                            "run": raw_run, "pid": pid, "created": created, "mode": mode,
