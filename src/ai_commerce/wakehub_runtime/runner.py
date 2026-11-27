@@ -4106,6 +4106,7 @@ _SUPERVISOR_DEPLOY_MUTEX = r"Global\AI-Commerce-WakeHub-Supervisor-Deploy-v1"
 _SUPERVISOR_TICK_MUTEX = r"Global\AI-Commerce-WakeHub-Supervisor-Tick-v1"
 _OPERATIONAL_TICK_V1 = "OPERATIONAL_TICK_V1"
 _SUPERVISOR_DEPLOYMENT_KEY = r"Software\AI-Commerce\WakeHubSupervisor"
+_SUPERVISOR_INTENT_LIMIT = 2048  # Shared with the registered bootstrap's StartPending reader.
 _SUPERVISOR_HEALTH_MAX_AGE_NS = 60_000_000_000
 _ENROLLMENT_SCHEMA = "WakeHubChatEnrollment.v1"
 _ENROLLMENT_OPERATION = "enroll_wakehub_chat"
@@ -4314,8 +4315,9 @@ def _supervisor_deployment_value(name: str) -> str | None:
             value, kind = winreg.QueryValueEx(key, name)
     except FileNotFoundError:
         return None
-    limit = 4096 if name == "UpgradePending" or name.startswith("RetiredPending_") else 2048
-    _require(kind == winreg.REG_SZ and 0 < len(value) <= limit, "SUPERVISOR_EVIDENCE_INVALID")
+    limit = 4096 if name == "UpgradePending" or name.startswith("RetiredPending_") else _SUPERVISOR_INTENT_LIMIT
+    _require(kind == winreg.REG_SZ and type(value) is str and 0 < len(value) <= limit,
+             "SUPERVISOR_EVIDENCE_INVALID")
     return value
 
 

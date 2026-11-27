@@ -12,6 +12,7 @@ import io
 from io import BytesIO
 from itertools import count
 import json
+import os
 from pathlib import Path, PureWindowsPath
 import re
 import stat
@@ -3554,6 +3555,8 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.modes = []
         self.captured_task_envs = []
         self.captured_pending_guids = []
+        self.git_run, self.git_popen = subprocess.run, subprocess.Popen
+        self.source_commitment = {}
         clock = count()
         self.mock(hostops, "time", new=SimpleNamespace(monotonic=lambda: next(clock), sleep=Mock()))
         self.mock(hostops, "os", new=SimpleNamespace(name="nt", environ=self.env))
@@ -3650,7 +3653,7 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
     def intent(self, nonce):
         return {"source_sha": self.sha, "source_digest": self.source, "config_digest": self.config_pin,
                 "desktop": self.desktop, "session": self.owner[1], "sid": self.owner[2],
-                "config": str(self.config), "nonce": nonce}
+                "config": str(self.config), "nonce": nonce, **self.source_commitment}
 
     def start_healthy(self, nonce):
         self.state = self.instance
@@ -3725,7 +3728,7 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
             "approval_channel": "CHATGPT_TO_AI_COMMERCE_ISSUE", "remote_shell_enabled": False,
         })
         self.assertEqual(hostops._persistent_clean_source.call_args_list,
-                         [call(acquisition, self.sha, pin_runtime=True)] * 2)
+                         [call(acquisition, self.sha, pin_runtime=True, runtime_commitment=None)] * 2)
         self.assertEqual(self.owner_session.call_args_list, [call()] * 2)
         self.assertEqual([c.args[:3] for c in self.config_read.call_args_list],
                          [(self.config, self.workspace, self.owner)] * 2)
@@ -3838,7 +3841,7 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         })
         probe_env = self.captured_task_envs[-1]
         self.assertEqual(hostops._persistent_clean_source.call_args_list,
-                         [call(acquisition, self.sha, pin_runtime=True)] * 2)
+                         [call(acquisition, self.sha, pin_runtime=True, runtime_commitment=None)] * 2)
         self.assertEqual(self.owner_session.call_args_list, [call()] * 2)
 
         self.probe_state = "TASK_INSTANCE_PRESENT"
@@ -4847,7 +4850,7 @@ $out | ConvertTo-Json -Compress
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_ACTIVE_UNVERIFIED")
         self.assertEqual(set(self.modes), {"inspect"})
 
-    def stale_supervisor(self, *, operational=False, health="CHROME_OWNED", mock_browser=True):
+    def stale_supervisor(self, *, operational=False, health="CHROME_OWNED", mock_browser=True, mock_history=True):
         self.approval["comment"]["id"] = 1001
         self.state = self.instance
         self.prior = {**self.intent(self.nonce), "instance": self.instance,
@@ -4856,7 +4859,8 @@ $out | ConvertTo-Json -Compress
         self.supervisor_mode = self.runtime._OPERATIONAL_TICK_V1 if operational else self.runtime._CHROME_HEALTH_ONLY
         self.publish_health(source_sha=self.prior["source_sha"], source_digest=self.prior["source_digest"],
                             mode=self.supervisor_mode, health=health)
-        self.history = self.mock(hostops, "_verify_prior_supervisor_source", return_value="GIT_HISTORY_REHASHED")
+        if mock_history:
+            self.history = self.mock(hostops, "_verify_prior_supervisor_source", return_value="GIT_HISTORY_REHASHED")
         if mock_browser:
             self.browser = self.mock(hostops, "_supervisor_upgrade_chrome_pin", return_value="2" * 64)
         self.mock(acquisition, "_commandline_argv", side_effect=lambda raw: (
@@ -4903,7 +4907,7 @@ $out | ConvertTo-Json -Compress
         self.assertFalse(receipt["exact_chat_verified"])
         self.assertNotIn(self.prior["instance"], json.dumps(receipt))
         self.history.assert_called_once_with(self.workspace, self.prior["source_sha"], self.prior["source_digest"],
-                                             self.sha, self.source, require_rehashed=True)
+                                             self.sha, self.source, require_rehashed=True, allow_legacy_retirement=True)
         self.assertEqual(self.config.read_bytes(), b"existing Chrome config")
         self.assertEqual(self.values["RetiredPending_old"], "original historical UNKNOWN")
         self.assertEqual(json.loads(self.values["Run"]), {**self.intent(self.launch.call_args.args[0]),
@@ -4918,10 +4922,7 @@ $out | ConvertTo-Json -Compress
         self.assertNotIn("install", self.modes)
         self.spawn.assert_not_called()
 
-    def test_upgrade_migrates_exact_legacy_lock_hold_with_live_owned_chrome(self):
-        env, _ = self.setup_legacy_health_only_config()
-        self.stale_supervisor(health="ENROLLMENT_PROFILE_LOCK_UNPROVEN", mock_browser=False)
-        prior_guid = self.state
+    def mock_owned_legacy_chrome(self, env):
         marker = env.user_data_dir / "lockfile"
         marker.write_bytes(b"opaque marker")
         proc = {"ProcessId": 700, "ExecutablePath": str(env.executable), "CommandLine": json.dumps(env.command()),
@@ -4935,6 +4936,13 @@ $out | ConvertTo-Json -Compress
         native = self.mock(acquisition, "_NativeEnrollment", return_value=SimpleNamespace(observe_marker=holder))
         observed = []
         self.mock(acquisition, "_probe_cdp", side_effect=lambda _: observed.append(self.state))
+        return marker, expected, query, native, holder, observed
+
+    def test_upgrade_migrates_exact_legacy_lock_hold_with_live_owned_chrome(self):
+        env, _ = self.setup_legacy_health_only_config()
+        self.stale_supervisor(health="ENROLLMENT_PROFILE_LOCK_UNPROVEN", mock_browser=False)
+        prior_guid = self.state
+        marker, expected, query, native, holder, observed = self.mock_owned_legacy_chrome(env)
         config_bytes = self.config.read_bytes()
 
         approval = self.approval
@@ -5055,14 +5063,15 @@ $out | ConvertTo-Json -Compress
     def test_upgrade_rejects_unproven_source_identity_or_inflight_work(self):
         self.stale_supervisor()
         clean = dict(self.values)
-        for fault in ("missing_source", "reviewed_only", "instance", "pid", "creation", "owner", "desktop",
-                      "operational", "stale_health", "task_changed", "commandline", "enrollment", "start_pending"):
+        for fault in ("missing_source", "reviewed_only", "instance", "pid", "creation", "owner", "desktop", "config",
+                      "operational", "stale_health", "task_changed", "commandline", "enrollment", "start_pending",
+                      "orphan_enrollment_receipt"):
             with self.subTest(fault=fault):
                 self.values.clear()
                 self.values.update(clean)
                 self.state = self.instance
                 self.history.return_value = {"missing_source": None, "reviewed_only": "REVIEWED_PRIOR_SHA_COMPATIBILITY"}.get(
-                    fault, "GIT_HISTORY_REHASHED",
+                    fault, hostops._SUPERVISOR_LEGACY_RETIREMENT,
                 )
                 run, health = (json.loads(self.values[key]) for key in ("Run", "Health"))
                 if fault == "instance":
@@ -5075,6 +5084,8 @@ $out | ConvertTo-Json -Compress
                     run["sid"] = "S-1-5-21-123-1002"
                 if fault == "desktop":
                     health["desktop"] = "0" * 64
+                if fault == "config":
+                    run["config_digest"] = "0" * 64
                 if fault == "operational":
                     health.pop("mode")
                 if fault == "stale_health":
@@ -5084,6 +5095,8 @@ $out | ConvertTo-Json -Compress
                 if fault == "enrollment":
                     self.mock(self.runtime, "_parse_enrollment_intent", return_value={})
                     self.values[self.runtime._ENROLLMENT_INTENT] = "pending approval"
+                if fault == "orphan_enrollment_receipt":
+                    self.values[self.runtime._ENROLLMENT_RECEIPT] = json.dumps({"code": self.runtime._ENROLLMENT_UNKNOWN})
                 if fault == "start_pending":
                     self.values["StartPending"] = json.dumps(run)
                 self.values.update(Run=json.dumps(run), Health=json.dumps(health))
@@ -5218,6 +5231,7 @@ $out | ConvertTo-Json -Compress
 
     def test_upgrade_can_continue_on_a_verified_newer_main_after_observed_exit(self):
         self.stale_supervisor()
+        self.history.return_value = hostops._SUPERVISOR_LEGACY_RETIREMENT
         self.launch.return_value = "NOT_ATTEMPTED"
         self.launch.side_effect = None
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_START_NOT_ATTEMPTED")
@@ -5236,7 +5250,7 @@ $out | ConvertTo-Json -Compress
             reserved = json.loads(self.values["UpgradePending"])
             self.assertEqual((reserved["target_sha"], reserved["start_comment"], reserved["nonce"]),
                              (self.sha, 1002, nonce))
-            for key in ("run", "pid", "created", "comment", "chrome"):
+            for key in ("run", "pid", "created", "comment", "chrome", "prior_source_provenance"):
                 self.assertEqual(reserved[key], prior[key])
             return self.start_replacement(nonce)
 
@@ -5912,7 +5926,15 @@ $results | ConvertTo-Json -Compress -Depth 4
         self.assertEqual(data["migrate_busy_blocked"], {"out": "BUSY", "calls": []})
 
     def test_verify_prior_supervisor_source_against_real_git_checkout(self):
-        self.stack.close()
+        def transport(argv, **kwargs):
+            if argv[0] != "git":
+                return self.task_transport(argv, **kwargs)
+            if "env" in kwargs:
+                kwargs["env"] = {**os.environ, **kwargs["env"]}
+            with patch.object(subprocess, "Popen", self.git_popen):
+                return self.git_run(argv, **kwargs)
+
+        subprocess.run.side_effect = transport
 
         def run_git(repo_dir, *args):
             return subprocess.check_output(
@@ -5944,8 +5966,14 @@ $results | ConvertTo-Json -Compress -Depth 4
             bad_prior_digest = manifest_digest({"ai_commerce/wakehub_runtime/runner.py": bad_runner})
 
             # Commit 2: distinct ancestor enforcing legacy health-only guards.
-            good_runner = (b"legacy_health_only=True\nobserve_only = not isinstance(chrome, _SupervisorChrome)\n"
-                           b"_deployment_health(deployment, health_only=True)\n")
+            good_runner = (
+                b"\ndef _observe_only_config():\n    return NativeChrome9444(legacy_health_only=True)\n\n\n"
+                b"def _observe_only_supervisor():\n    _deployment_health(deployment, health_only=True)\n"
+                b"    def observe():\n        state, provenance, pending = sender.lifecycle_snapshot()\n"
+                b"    result = _registered_result(observe)\n    return result\n\n\n"
+                b"def run_supervisor():\n    observe_only = not isinstance(chrome, _SupervisorChrome)\n"
+                b"    if observe_only:\n        return _observe_only_supervisor()\n"
+            )
             helper_v1 = b"VALUE = 1\n"
             runner_path.write_bytes(good_runner)
             helper_path.write_bytes(helper_v1)
@@ -6073,6 +6101,99 @@ $results | ConvertTo-Json -Compress -Depth 4
             self.assertIsNone(
                 hostops._verify_prior_supervisor_source(no_git, known_sha, "not-a-digest", current_sha, current_digest),
             )
+
+            for ancestor, digest, options, outcome in (
+                (good_prior_sha, good_mixed_digest, {}, hostops._SUPERVISOR_LEGACY_RETIREMENT),
+                (good_prior_sha, good_mixed_digest, {"require_tick": True}, None),
+                (bad_prior_sha, good_mixed_digest, {}, None),
+                (unrelated_sha, good_mixed_digest, {}, None),
+                (known_sha, good_mixed_digest, {}, None),
+                (good_prior_sha, good_mixed_digest, {"source_eols": "CQ"}, "GIT_HISTORY_REHASHED"),
+                (good_prior_sha, good_mixed_digest, {"source_eols": "BQ"}, None),
+            ):
+                with self.subTest(ancestor=ancestor, options=options):
+                    self.assertEqual(hostops._verify_prior_supervisor_source(
+                        repo, ancestor, digest, current_sha, current_digest,
+                        require_rehashed=True, allow_legacy_retirement=True, **options,
+                    ), outcome)
+
+            self.assertFalse(hostops._prior_legacy_retirement_guards(
+                good_runner + b"\n\ndef _receive_enrollment():\n    launch()\n",
+            ))
+
+            self.workspace = hostops.ROOTS["workspace"] = repo
+            self.sha = self.env["GITHUB_SHA"] = current_sha
+            self.source = current_digest
+            env, _ = self.setup_legacy_health_only_config()
+            self.stale_supervisor(mock_history=False, mock_browser=False)
+            self.prior.update(source_sha=good_prior_sha, source_digest=good_mixed_digest)
+            self.values["Run"] = json.dumps(self.prior)
+            self.publish_health(source_sha=good_prior_sha, source_digest=good_mixed_digest,
+                                mode=self.supervisor_mode, health="CHROME_OWNED")
+            marker, _, _, _, holder, observed = self.mock_owned_legacy_chrome(env)
+            config_bytes = self.config.read_bytes()
+            startup = {key: self.prior[key] for key in (*self.runtime._ENROLLMENT_PINS, "config_digest")}
+            startup.update(schema="WakeHubSupervisorStartupReceipt.v1", stage="FIRST_HEALTH",
+                           reason="HEALTH_PUBLISHED", correlated=True, pid=123, observed_ns=98_000_000_000)
+            self.values["StartupReceipt"] = json.dumps(startup)
+
+            approval = self.approval
+            self.probe_state = "TASK_INSTANCE_PRESENT"
+            self.env["AI_COMMERCE_WAKEHUB_CONFIG"] = str(self.config)
+            self.assertEqual(self.dispatch_task_probe()["code"],
+                             "TASK_INSTANCE_PRESENT+ACTIVE_LEGACY_RETIREMENT_ELIGIBLE+RUN_MATCH+MUTEX_ACTIVE"
+                             "+HEALTH_MATCH_LIVE+UPGRADE_ABSENT")
+            self.store.assert_not_called()
+            self.approval = approval
+            self.env["GITHUB_EVENT_NAME"] = "issue_comment"
+            for key, row in (
+                ("StartupReceipt", {**startup, "pid": 999}),
+                ("Health", {**json.loads(self.values["Health"]), "mode": self.runtime._OPERATIONAL_TICK_V1}),
+            ):
+                previous = self.values[key]
+                self.values[key] = json.dumps(row)
+                self.assertEqual(self.dispatch()["code"], "SUPERVISOR_ACTIVE_UNVERIFIED")
+                self.values[key] = previous
+            holder.return_value = False
+            self.assertEqual(self.dispatch()["status"], "HOLD")
+            holder.return_value = True
+            self.stop.assert_not_called()
+            self.launch.assert_not_called()
+            self.store.assert_not_called()
+
+            self.source_commitment = {"source_eols": "BQ"}
+
+            def source(_acquisition, _sha, *, pin_runtime, runtime_commitment=None):
+                if runtime_commitment is not None:
+                    runtime_commitment.update(self.source_commitment)
+                return self.source
+
+            hostops._persistent_clean_source.side_effect = source
+
+            def start(nonce):
+                reservation = json.loads(self.values["UpgradePending"])
+                self.assertEqual(reservation["prior_source_provenance"], hostops._SUPERVISOR_LEGACY_RETIREMENT)
+                self.assertEqual(json.loads(reservation["run"])["source_digest"], good_mixed_digest)
+                return self.start_replacement(nonce)
+
+            prior_guid = self.state
+            observed.clear()
+            self.launch.side_effect = start
+            receipt = self.dispatch()
+            self.assertEqual((receipt["status"], receipt["code"]),
+                             ("OBSERVED", "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED"))
+            self.assertEqual(observed, [prior_guid] * 4 + ["READY"] * 2 + [self.state] * 2)
+            self.assertEqual(json.loads(self.values["Run"]),
+                             {**self.intent(self.replacement_nonce), "instance": self.state})
+            health = json.loads(self.values["Health"])
+            self.assertEqual((health["source_sha"], health["source_digest"], health["health"]),
+                             (current_sha, current_digest, "CHROME_OWNED"))
+            self.assertIsNone(self.values["UpgradePending"])
+            self.assertEqual((self.config.read_bytes(), marker.read_bytes()), (config_bytes, b"opaque marker"))
+            self.assertEqual(self.dispatch(), receipt)
+            self.stop_effect.assert_called_once_with(123, 456)
+            self.launch.assert_called_once()
+            self.spawn.assert_not_called()
 
     def test_recovery_exact_1493_1494_c8d77c15_and_observation_hold_classification(self):
         """Exact #1493/#1494 regression, c8d77c15 compatibility, and CHROME_OBSERVATION_HOLD HostOps receipt."""
@@ -7507,7 +7628,10 @@ class PersonalClean9444AutostartTests(unittest.TestCase):
                 patch.object(hostops, "__file__", workflow / "src/ai_commerce/hostops_v3/personal.py"), \
                 patch.object(self.acq, "__file__", peer), \
                 patch.object(hostops, "_git", side_effect=lambda *args: git[args]) as git_call:
-            self.assertEqual(self.real_source(self.acq, self.sha, pin_runtime=True), expected)
+            commitment = {}
+            self.assertEqual(self.real_source(self.acq, self.sha, pin_runtime=True, runtime_commitment=commitment),
+                             expected)
+            self.assertEqual(commitment, {"source_eols": "CQ"})
             self.assertEqual([call.args for call in git_call.call_args_list if call.args[0] == "status"],
                              [scoped_status])
             git_call.reset_mock()
