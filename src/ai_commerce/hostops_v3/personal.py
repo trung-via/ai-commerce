@@ -1031,6 +1031,18 @@ _SUPERVISOR_HOLDS = frozenset({
     "LOCAL_CONFIG_CHANGED", "SUPERVISOR_RUNTIME_UNAVAILABLE", "SUPERVISOR_ACTIVE_UNVERIFIED",
     "SUPERVISOR_START_UNKNOWN", "SUPERVISOR_TASK_CONFLICT", "SUPERVISOR_START_NOT_ATTEMPTED",
 }) | _SUPERVISOR_DESKTOP_HOLDS | _SUPERVISOR_CHROME_HOLDS
+_SUPERVISOR_RETIREMENT_HOLDS = frozenset({
+    "SUPERVISOR_ENROLLMENT_UNRESOLVED", "SUPERVISOR_DELIVERY_UNRESOLVED",
+    "SUPERVISOR_RETIREMENT_CUSTODY_UNVERIFIED", "SUPERVISOR_RETIREMENT_MODE_UNVERIFIED",
+    "SUPERVISOR_RETIREMENT_ARCHIVE_UNVERIFIED",
+    "EXACT_CHAT_PRELOAD_RECONCILE_REQUIRED", "WAKEHUB_ENROLLMENT_UNKNOWN_EFFECT",
+    "JOURNAL_CORRUPT", "JOURNAL_BUSY", "JOURNAL_INVALID", "JOURNAL_PROOF_MISSING",
+    "JOURNAL_SCHEMA_INCOMPATIBLE", "JOURNAL_OWNER_DRIFT", "REGISTRATION_DRIFT",
+    "CHROME_JOURNAL_INVALID", "LOCAL_ORIGIN_JOURNAL_INVALID", "LOCAL_CONFIG_INVALID",
+    "CHROME_LAUNCH_RECONCILE_REQUIRED", "SUPERVISOR_STOP_UNKNOWN",
+    "SUPERVISOR_OPERATIONAL_TICK_ACTIVE",
+})
+_SUPERVISOR_BROWSER_RESULTS = _SUPERVISOR_CHROME_PROBE_HOLDS | {"CHROME_OWNED", "CHROME_ABSENT", "CHROME_CHECK_SKIPPED"}
 _SUPERVISOR_RECOVERY_OBSERVED = frozenset({"SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED"})
 _SUPERVISOR_RECOVERY_HOLDS = _SUPERVISOR_HOLDS | frozenset({
     "RECOVERY_PENDING_ABSENT", "RECOVERY_PENDING_GUID_REQUIRED", "RECOVERY_PENDING_MALFORMED",
@@ -1114,7 +1126,7 @@ _SUPERVISOR_SOURCE_PROBE_STAGES = frozenset({
 })
 _SUPERVISOR_ACTIVE_PROBE_STAGES = (
     _SUPERVISOR_PENDING_RUN_CODES | _SUPERVISOR_PENDING_HEALTH_CODES | _SUPERVISOR_UPGRADE_PROBE_CODES
-    | _SUPERVISOR_CHROME_PROBE_HOLDS | _SUPERVISOR_SOURCE_PROBE_STAGES | {
+    | _SUPERVISOR_RETIREMENT_HOLDS | _SUPERVISOR_CHROME_PROBE_HOLDS | _SUPERVISOR_SOURCE_PROBE_STAGES | {
         "ACTIVE_TASK_UNVERIFIED", "ACTIVE_TASK_INSTANCE_MISMATCH", "ACTIVE_RUN_OWNER_DRIFT",
         "ACTIVE_RUN_SESSION_DRIFT", "ACTIVE_CONFIG_PATH_MISMATCH",
         "ACTIVE_CONFIG_DIGEST_MISMATCH", "ACTIVE_RUN_SOURCE_UNVERIFIED", "ACTIVE_HEALTH_CHANGED",
@@ -1124,6 +1136,17 @@ _SUPERVISOR_ACTIVE_PROBE_STAGES = (
         "ACTIVE_LEGACY_RETIREMENT_ELIGIBLE",
     }
 )
+_SUPERVISOR_ACTIVE_CONFIG_CODES = frozenset({
+    "ACTIVE_CONFIG_MATCH", "ACTIVE_CONFIG_CHECK_SKIPPED", "ACTIVE_CONFIG_UNVERIFIED",
+    "ACTIVE_CONFIG_PATH_MISMATCH", "ACTIVE_CONFIG_DIGEST_MISMATCH",
+})
+_SUPERVISOR_ACTIVE_SOURCE_CODES = _SUPERVISOR_SOURCE_PROBE_STAGES | {
+    "CURRENT_SOURCE_EXACT", "GIT_HISTORY_REHASHED", "LEGACY_RETIREMENT_GUARDS_VERIFIED",
+    "ACTIVE_SOURCE_CHECK_SKIPPED", "ACTIVE_STARTUP_UNVERIFIED", "ACTIVE_RUN_SOURCE_UNVERIFIED",
+}
+_SUPERVISOR_ACTIVE_CUSTODY_CODES = _SUPERVISOR_RETIREMENT_HOLDS | {
+    "ACTIVE_CUSTODY_CLEAR", "ACTIVE_CUSTODY_CHECK_SKIPPED", "ACTIVE_ENROLLMENT_UNVERIFIED",
+}
 _SUPERVISOR_PENDING_HISTORY_CODES = frozenset({
     "HIST_NA", "HIST_NEVER_RAN", "HIST_RUNNING", "HIST_QUEUED",
     "HIST_EXIT_0", "HIST_EXIT_1", "HIST_EXIT_2", "HIST_EXIT_OTHER",
@@ -1415,6 +1438,17 @@ function Read-Registration {
         if ($_.Exception.GetBaseException().HResult -ne -2147024894) { throw }
     }
 }
+
+function Test-PriorRegistration($task, $status) {
+    $priorArgs = $env:AI_COMMERCE_SUPERVISOR_PRIOR_ARGUMENTS
+    if ($status -cne 'TASK_ACTION_ARGS_MISMATCH' -or [string]::IsNullOrEmpty($priorArgs)) { return $false }
+    $priorAction = [pscustomobject]@{
+        Path = $action.Path
+        Arguments = $priorArgs
+        WorkingDirectory = $action.WorkingDirectory
+    }
+    return (Get-SupervisorRegistrationStatus $task $expected $priorAction $name $sid) -ceq 'OK'
+}
 """
 
 _SUPERVISOR_PENDING_DIAGNOSTIC_FUNCTIONS = r"""
@@ -1611,19 +1645,8 @@ if (!$task) {
     exit
 }
 $status = Get-SupervisorRegistrationStatus $task $expected $action $name $sid
-$priorMatch = $false
-if ($status -ceq 'TASK_ACTION_ARGS_MISMATCH' -and ![string]::IsNullOrEmpty($env:AI_COMMERCE_SUPERVISOR_PRIOR_ARGUMENTS)) {
-    $priorAction = [pscustomobject]@{
-        Path = $action.Path
-        Arguments = $env:AI_COMMERCE_SUPERVISOR_PRIOR_ARGUMENTS
-        WorkingDirectory = $action.WorkingDirectory
-    }
-    if ((Get-SupervisorRegistrationStatus $task $expected $priorAction $name $sid) -ceq 'OK') {
-        $priorMatch = $true
-        $status = 'OK'
-    }
-}
-if ($status -cne 'OK') {
+$priorMatch = Test-PriorRegistration $task $status
+if ($status -cne 'OK' -and !$priorMatch) {
     if ($mode -ceq 'probe_pending') { $status + '+HIST_NA+LOG_NA' } else { $status }
     exit
 }
@@ -1631,7 +1654,7 @@ $instances = $task.GetInstances(0)
 if ($null -eq $instances) { throw 'Instances unavailable' }
 $pendingGuid = if ($mode -ceq 'probe_pending') { [string]$env:AI_COMMERCE_SUPERVISOR_PENDING_GUID } else { '' }
 $hasPendingGuid = ($pendingGuid -cmatch '^[a-f0-9]{8}-([a-f0-9]{4}-){3}[a-f0-9]{12}$')
-if ($priorMatch) {
+if ($priorMatch -and !($mode -ceq 'probe' -and $instances.Count -eq 1 -and $instances.Item(1).State -eq 4)) {
     if ($task.State -eq 3 -and $instances.Count -eq 0) {
         $taskCode = 'TASK_PRIOR_BOOTSTRAP_READY'
     } else {
@@ -1676,21 +1699,8 @@ $task = Read-Registration
 $mode = $env:AI_COMMERCE_SUPERVISOR_MODE
 if ($mode -ceq 'inspect_recovery' -or $mode -ceq 'migrate') {
     if (!$task) { 'MISSING'; exit }
-    $priorArgs = $env:AI_COMMERCE_SUPERVISOR_PRIOR_ARGUMENTS
-    $priorAction = if (![string]::IsNullOrEmpty($priorArgs)) {
-        [pscustomobject]@{
-            Path = $action.Path
-            Arguments = $priorArgs
-            WorkingDirectory = $action.WorkingDirectory
-        }
-    } else { $null }
     $status = Get-SupervisorRegistrationStatus $task $expected $action $name $sid
-    $isPrior = $false
-    if ($status -ceq 'TASK_ACTION_ARGS_MISMATCH' -and $null -ne $priorAction) {
-        if ((Get-SupervisorRegistrationStatus $task $expected $priorAction $name $sid) -ceq 'OK') {
-            $isPrior = $true
-        }
-    }
+    $isPrior = Test-PriorRegistration $task $status
     if ($mode -ceq 'inspect_recovery') {
         if ($status -cne 'OK' -and !$isPrior) { 'CONFLICT'; exit }
         $instances = $task.GetInstances(0)
@@ -1724,7 +1734,12 @@ if (!$task -and $mode -ceq 'install') {
     $task = Read-Registration
 }
 if (!$task) { 'MISSING'; exit }
-if ((Get-SupervisorRegistrationStatus $task $expected $action $name $sid) -cne 'OK') { 'CONFLICT'; exit }
+$status = Get-SupervisorRegistrationStatus $task $expected $action $name $sid
+$isPrior = $false
+if ($mode -cin @('inspect', 'prove_upgrade')) {
+    $isPrior = Test-PriorRegistration $task $status
+}
+if ($status -cne 'OK' -and !$isPrior) { 'CONFLICT'; exit }
 $instances = $task.GetInstances(0)
 if ($null -eq $instances) { throw 'Instances unavailable' }
 if ($mode -ceq 'start') {
@@ -1735,7 +1750,8 @@ if ($mode -ceq 'start') {
     # TASK_RUN_USE_SESSION_ID | TASK_RUN_USER_SID. The only substitution is a nonce.
     $instance = $task.RunEx($nonce, 12, $session, $sid)
 } elseif ($task.State -eq 3 -and $instances.Count -eq 0) {
-    'READY'; exit
+    if ($isPrior) { 'PRIOR_READY' } else { 'READY' }
+    exit
 } elseif ($instances.Count -eq 1 -and $instances.Item(1).State -eq 4) {
     $instance = $instances.Item(1)
 } else {
@@ -1750,7 +1766,8 @@ if ($mode -ceq 'prove_upgrade') {
     $processId = [uint32]$env:AI_COMMERCE_SUPERVISOR_PROCESS_ID
     $process = @(Get-CimInstance Win32_Process -Filter "ProcessId = $processId" -OperationTimeoutSec 3)
     if ($process.Count -ne 1 -or !$process[0].CommandLine) { 'CONFLICT'; exit }
-    [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($process[0].CommandLine))
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($process[0].CommandLine))
+    if ($isPrior) { 'PRIOR+' + $encoded } else { $encoded }
     exit
 }
 $guid
@@ -1920,15 +1937,20 @@ def _run_supervisor_task_script(
     return result.stdout.strip().decode("ascii")
 
 
-def _supervisor_upgrade_task_process(acquisition, executable, arguments, root, owner, intent, pid):
+def _supervisor_upgrade_task_process(acquisition, executable, arguments, root, owner, intent, pid, *, prior_arguments=""):
     # The native comparator must still see the exact registration and sole GUID.
     # Bind the action process to the nonce that this RunEx instance received.
     raw = _run_supervisor_task_script(
         acquisition, _SUPERVISOR_TASK_SCRIPT, executable, arguments, root, owner,
-        mode="prove_upgrade", pending_guid=intent["instance"], process_id=pid,
+        mode="prove_upgrade", pending_guid=intent["instance"], process_id=pid, prior_arguments=prior_arguments,
     )
-    if raw in {"MISSING", "READY", "BUSY", "CONFLICT"} or not 0 < len(raw) <= 131072:
+    if raw in {"MISSING", "READY", "PRIOR_READY", "BUSY", "CONFLICT"} or not 0 < len(raw) <= 131072:
         return False
+    if raw.startswith("PRIOR+"):
+        if not prior_arguments:
+            return False
+        raw = raw.removeprefix("PRIOR+")
+        arguments = prior_arguments
     running = acquisition._commandline_argv(base64.b64decode(raw, validate=True).decode("utf-8"))
     expected = acquisition._commandline_argv(
         subprocess.list2cmdline([str(executable)]) + " " + arguments.removesuffix("$(Arg0)") + intent["nonce"],
@@ -1946,6 +1968,8 @@ def _supervisor_task(
     allowed = {"MISSING", "CONFLICT", "READY", "BUSY", "NOT_ATTEMPTED"}
     if mode == "inspect_recovery":
         allowed = {"MISSING", "CONFLICT", "READY", "PRIOR_READY", "BUSY"}
+    elif mode == "inspect" and prior_arguments:
+        allowed.add("PRIOR_READY")
     elif mode == "migrate":
         allowed = {"MISSING", "CONFLICT", "BUSY", "MIGRATED"}
     if code not in allowed and (mode in ("inspect_recovery", "migrate") or not _SUPERVISOR_INSTANCE.fullmatch(code)):
@@ -2035,19 +2059,13 @@ def _probe_supervisor_mutex(runtime):
     return "MUTEX_ACTIVE" if active else "MUTEX_INACTIVE"
 
 
-def _probe_supervisor_health_state(runtime, intent, executable, owner, *, mutex_active):
-    try:
-        raw = runtime._supervisor_deployment_value("Health")
-    except Exception:
-        return "HEALTH_UNREADABLE"
-    if raw is None:
-        return "HEALTH_ABSENT"
+def _parse_supervisor_health(runtime, raw):
     if type(raw) is not str or not 0 < len(raw) <= 2048:
-        return "HEALTH_MALFORMED"
+        return None
     try:
         value = json.loads(raw, object_pairs_hook=_object_unique)
     except (Denied, ValueError, TypeError, RecursionError):
-        return "HEALTH_MALFORMED"
+        return None
     required = {
         "source_sha", "source_digest", "config_digest", "desktop", "session", "nonce",
         "pid", "created", "observed_ns", "health",
@@ -2061,11 +2079,24 @@ def _probe_supervisor_health_state(runtime, intent, executable, owner, *, mutex_
             or type(value["nonce"]) is not str or re.fullmatch(r"[a-f0-9]{32}", value["nonce"]) is None
             or type(value["pid"]) is not int or not 0 < value["pid"] < 2**32
             or type(value["created"]) is not int or value["created"] <= 0
-            or type(value["observed_ns"]) is not int
+            or type(value["observed_ns"]) is not int or value["observed_ns"] < 0
             or type(value["health"]) is not str
             or value["health"] not in (
                 runtime._OBSERVED_CHROME_HEALTH | _SUPERVISOR_DESKTOP_HOLDS
                 | (_SUPERVISOR_CHROME_HOLDS if value.get("mode") == runtime._CHROME_HEALTH_ONLY else frozenset()))):
+        return None
+    return value
+
+
+def _probe_supervisor_health_state(runtime, intent, executable, owner, *, mutex_active):
+    try:
+        raw = runtime._supervisor_deployment_value("Health")
+    except Exception:
+        return "HEALTH_UNREADABLE"
+    if raw is None:
+        return "HEALTH_ABSENT"
+    value = _parse_supervisor_health(runtime, raw)
+    if value is None:
         return "HEALTH_MALFORMED"
     if intent is None:
         return "HEALTH_UNCORRELATED"
@@ -2225,11 +2256,14 @@ def _is_valid_supervisor_task_probe_code(code):
     if code in _SUPERVISOR_TASK_PROBE_CODES:
         return True
     parts = code.split("+")
-    if len(parts) == 6:
-        task, stage, run, mutex, health, upgrade = parts
+    if len(parts) in (6, 10) and parts[0] in _SUPERVISOR_TASK_BASE_CODES:
+        task, stage, run, mutex, health, upgrade = parts[:6]
         return (task in _SUPERVISOR_TASK_BASE_CODES and stage in _SUPERVISOR_ACTIVE_PROBE_STAGES
                 and run in _SUPERVISOR_PENDING_RUN_CODES and mutex in _SUPERVISOR_PENDING_MUTEX_CODES
-                and health in _SUPERVISOR_PENDING_HEALTH_CODES and upgrade in _SUPERVISOR_UPGRADE_PROBE_CODES)
+                and health in _SUPERVISOR_PENDING_HEALTH_CODES and upgrade in _SUPERVISOR_UPGRADE_PROBE_CODES
+                and (len(parts) == 6 or (parts[6] in _SUPERVISOR_ACTIVE_CONFIG_CODES
+                     and parts[7] in _SUPERVISOR_BROWSER_RESULTS and parts[8] in _SUPERVISOR_ACTIVE_SOURCE_CODES
+                     and parts[9] in _SUPERVISOR_ACTIVE_CUSTODY_CODES)))
     if len(parts) not in (9, 10):
         return False
     prefix, verdict, task_code, pending_shape, mutex_state, health_state, run_state, history_code, log_code = parts[:9]
@@ -2254,7 +2288,10 @@ def _supervisor_receipt(code, issue_number, sha=None, *, operation=_SUPERVISOR_D
         allowed = observed | _SUPERVISOR_RECOVERY_HOLDS
     else:
         observed = _SUPERVISOR_OBSERVED
-        allowed = observed | _SUPERVISOR_HOLDS | _SUPERVISOR_CHROME_PROBE_HOLDS
+        allowed = (observed | _SUPERVISOR_HOLDS | _SUPERVISOR_CHROME_PROBE_HOLDS | _SUPERVISOR_RETIREMENT_HOLDS
+                   | {f"{state}+{browser}" for state in ("SUPERVISOR_STARTED_HEALTH_OBSERVED",
+                                                         "SUPERVISOR_REUSED_HEALTH_OBSERVED")
+                      for browser in _SUPERVISOR_BROWSER_RESULTS - {"CHROME_OWNED", "CHROME_CHECK_SKIPPED"}})
     if type(code) is not str or code not in allowed:
         code = "SUPERVISOR_RUNTIME_UNAVAILABLE"
     if type(sha) is not str or re.fullmatch(r"[a-f0-9]{40}", sha) is None:
@@ -2273,24 +2310,14 @@ def _supervisor_receipt(code, issue_number, sha=None, *, operation=_SUPERVISOR_D
     return result
 
 
-def _read_supervisor_health(runtime, expected, executable, owner):
+def _read_supervisor_health(runtime, expected, executable, owner, *, require_fresh=True):
     raw = runtime._supervisor_deployment_value("Health")
-    if raw is None or not runtime._supervisor_active():
+    value = _parse_supervisor_health(runtime, raw)
+    if value is None or any(value.get(key) != pin for key, pin in expected.items()) or not runtime._supervisor_active():
         return None
     try:
-        value = json.loads(raw, object_pairs_hook=_object_unique)
-        required = expected.keys() | {"pid", "created", "observed_ns", "health"}
-        if (type(value) is not dict or not required <= value.keys() <= required | {"mode"}
-                or ("mode" in value and value["mode"] not in (runtime._CHROME_HEALTH_ONLY, runtime._OPERATIONAL_TICK_V1))
-                or any(value[key] != pin for key, pin in expected.items())
-                or type(value["session"]) is not int
-                or type(value["pid"]) is not int or not 0 < value["pid"] < 2**32
-                or type(value["created"]) is not int or value["created"] <= 0
-                or type(value["observed_ns"]) is not int
-                or not 0 <= runtime.monotonic_ns() - value["observed_ns"] <= runtime._SUPERVISOR_HEALTH_MAX_AGE_NS
-                or value["health"] not in (
-                    runtime._OBSERVED_CHROME_HEALTH | _SUPERVISOR_DESKTOP_HOLDS
-                    | (_SUPERVISOR_CHROME_HOLDS if value.get("mode") == runtime._CHROME_HEALTH_ONLY else frozenset()))):
+        age = runtime.monotonic_ns() - value["observed_ns"]
+        if age < 0 or (require_fresh and age > runtime._SUPERVISOR_HEALTH_MAX_AGE_NS):
             return None
         if (runtime._supervisor_process(value["pid"], executable, owner) == value["created"]
                 and runtime._supervisor_active() and runtime._supervisor_deployment_value("Health") == raw):
@@ -2367,6 +2394,7 @@ _SUPERVISOR_PRIOR_SOURCE_PROVENANCES = frozenset({
     "REVIEWED_PRIOR_SHA_COMPATIBILITY",
 })
 _SUPERVISOR_LEGACY_RETIREMENT = "LEGACY_RETIREMENT_GUARDS_VERIFIED"
+_SUPERVISOR_RETIREMENT_SOURCES = frozenset({"GIT_HISTORY_REHASHED", _SUPERVISOR_LEGACY_RETIREMENT})
 
 
 def _prior_legacy_retirement_guards(runner_bytes):
@@ -2494,7 +2522,7 @@ def _verify_prior_supervisor_source(root, prior_sha, prior_digest, current_sha, 
         if (b"legacy_health_only=True" not in runner_bytes
                 or b"observe_only = not isinstance(chrome, _SupervisorChrome)" not in runner_bytes
                 or (require_rehashed and b"_deployment_health(deployment, health_only=True)" not in runner_bytes)
-                or (not rehashed and not _prior_legacy_retirement_guards(runner_bytes))):
+                or (allow_legacy_retirement and not require_tick and not _prior_legacy_retirement_guards(runner_bytes))):
             return unverified("ACTIVE_SOURCE_LEGACY_GUARD_MISSING")
         if require_tick and (b'_OPERATIONAL_TICK_V1 = "OPERATIONAL_TICK_V1"' not in runner_bytes
                              or b"_protected_operational_tick(run," not in runner_bytes
@@ -2530,6 +2558,22 @@ def _legacy_retirement_startup_matches(runtime, prior, pid):
         startup.startswith(prefix) and startup.removeprefix(prefix) in (
             {"HEALTH_PUBLISHED"} | _SUPERVISOR_DESKTOP_HOLDS | _SUPERVISOR_CHROME_HOLDS
             | runtime._LEGACY_BROWSER_OBSERVATION_HOLDS))
+
+
+def _supervisor_retirement_source(runtime, root, prior, sha, source, health, *, report_failure=False):
+    # The protected bootstrap verifies the original manifest before dispatch.
+    # Historical source must show the observer-only branch and the enrollment
+    # fence. Mode is independently checked against the launch config, and the
+    # health PID is bound to the verified bootstrap, nonce and process handle.
+    # A missing optional startup receipt provides no mode or launch evidence.
+    provenance = _supervisor_upgrade_source(
+        runtime, root, prior, sha, source, runtime._CHROME_HEALTH_ONLY, report_failure=report_failure,
+    )
+    if provenance in _SUPERVISOR_RETIREMENT_SOURCES and not _legacy_retirement_startup_matches(
+        runtime, prior, health["pid"],
+    ):
+        return "ACTIVE_STARTUP_UNVERIFIED" if report_failure else None
+    return provenance
 
 
 def _probe_protected_supervisor_read(event, operation, inspect):
@@ -2612,8 +2656,9 @@ def _probe_protected_supervisor_config(event):
     return _probe_protected_supervisor_read(event, _SUPERVISOR_CONFIG_PROBE, inspect)
 
 
-def _probe_supervisor_active_run(runtime, acquisition, root, owner, executable, arguments, identity, task_code):
-    """Report the first failed read-side check and the current record correlations."""
+def _probe_supervisor_active_run(runtime, acquisition, root, owner, executable, arguments, identity, task_code,
+                                 *, prior_arguments):
+    """Project bounded task, custody, source and browser observations together."""
     sha, source, desktop = identity
     unreadable = object()
 
@@ -2625,25 +2670,12 @@ def _probe_supervisor_active_run(runtime, acquisition, root, owner, executable, 
 
     raw_run, raw_upgrade = read("Run"), read("UpgradePending")
     run = _parse_supervisor_intent(raw_run, require_instance=True)
-    owner_drift = None
-    if raw_run is unreadable:
-        run_state = "RUN_UNREADABLE"
-    elif raw_run is None:
-        run_state = "RUN_ABSENT"
-    elif run is None:
-        run_state = "RUN_MALFORMED"
-    else:
-        run_state = "RUN_UNCORRELATED"
-        if run["sid"] != owner[2]:
-            owner_drift = "ACTIVE_RUN_OWNER_DRIFT"
-        elif (run["session"], run["desktop"]) != (owner[1], desktop):
-            owner_drift = "ACTIVE_RUN_SESSION_DRIFT"
-
+    run_state = ("RUN_UNREADABLE" if raw_run is unreadable else "RUN_ABSENT" if raw_run is None else
+                 "RUN_MALFORMED" if run is None else "RUN_UNCORRELATED")
+    upgrade_state = "UPGRADE_ABSENT"
     if raw_upgrade is unreadable:
         upgrade_state = "UPGRADE_UNREADABLE"
-    elif raw_upgrade is None:
-        upgrade_state = "UPGRADE_ABSENT"
-    else:
+    elif raw_upgrade is not None:
         try:
             upgrade = _parse_supervisor_upgrade(runtime, raw_upgrade)
             upgrade_state = "UPGRADE_MATCH_RUN" if _parse_supervisor_intent(
@@ -2653,104 +2685,144 @@ def _probe_supervisor_active_run(runtime, acquisition, root, owner, executable, 
             upgrade_state = "UPGRADE_MALFORMED"
 
     mutex_state = _probe_supervisor_mutex(runtime)
+    owner_drift = None
+    if run is not None:
+        if run["sid"] != owner[2]:
+            owner_drift = "ACTIVE_RUN_OWNER_DRIFT"
+        elif (run["session"], run["desktop"]) != (owner[1], desktop):
+            owner_drift = "ACTIVE_RUN_SESSION_DRIFT"
     health_state = _probe_supervisor_health_state(
         runtime, run if owner_drift is None else None, executable, owner,
         mutex_active=(mutex_state == "MUTEX_ACTIVE"),
     )
+    if (task_code != "TASK_INSTANCE_PRESENT" and raw_run is None and raw_upgrade is None
+            and health_state == "HEALTH_ABSENT" and mutex_state == "MUTEX_INACTIVE"):
+        return task_code
 
-    def first_stage():
-        nonlocal run_state
-        if upgrade_state in {"UPGRADE_UNREADABLE", "UPGRADE_MALFORMED"}:
-            return upgrade_state
-        if task_code != "TASK_INSTANCE_PRESENT":
-            if task_code == "TASK_READY" and raw_upgrade is not None:
-                return upgrade_state
-            return "ACTIVE_TASK_UNVERIFIED"
-        if run is None:
-            return run_state
+    config_state = "ACTIVE_CONFIG_CHECK_SKIPPED"
+    browser = "CHROME_CHECK_SKIPPED"
+    source_state = "ACTIVE_SOURCE_CHECK_SKIPPED"
+    custody = "ACTIVE_CUSTODY_CHECK_SKIPPED"
+    task_stage = "ACTIVE_TASK_UNVERIFIED"
+    eligibility = None
+    if task_code == "TASK_INSTANCE_PRESENT" and run is not None:
         try:
-            instance = _supervisor_task(acquisition, executable, arguments, root, owner)
+            instance = _supervisor_task(acquisition, executable, arguments, root, owner,
+                                        prior_arguments=prior_arguments)
+            if instance == run["instance"]:
+                task_stage = owner_drift
+                run_state = "RUN_MATCH"
+            else:
+                task_stage = ("ACTIVE_TASK_INSTANCE_MISMATCH" if _SUPERVISOR_INSTANCE.fullmatch(instance)
+                              else "ACTIVE_READ_STATE_CHANGED")
         except subprocess.TimeoutExpired:
-            return "ACTIVE_TASK_PROBE_TIMEOUT"
+            task_stage = "ACTIVE_TASK_PROBE_TIMEOUT"
         except Exception:
-            return "ACTIVE_TASK_UNVERIFIED"
-        if not _SUPERVISOR_INSTANCE.fullmatch(instance):
-            return "ACTIVE_READ_STATE_CHANGED"
-        if instance != run["instance"]:
-            return "ACTIVE_TASK_INSTANCE_MISMATCH"
-        run_state = "RUN_MATCH"
-        if owner_drift is not None:
-            return owner_drift
+            pass
+
+    if run_state == "RUN_MATCH" and owner_drift is None:
+        config = None
         try:
             config, config_pin = runtime._resolve_runtime_config(root, owner=owner, observe_only=True, protected=True)
+            config_state = ("ACTIVE_CONFIG_PATH_MISMATCH" if run["config"] != str(config) else
+                            "ACTIVE_CONFIG_DIGEST_MISMATCH" if run["config_digest"] != config_pin else
+                            "ACTIVE_CONFIG_MATCH")
         except Exception:
-            return "ACTIVE_CONFIG_UNVERIFIED"
-        if run["config"] != str(config):
-            return "ACTIVE_CONFIG_PATH_MISMATCH"
-        if run["config_digest"] != config_pin:
-            return "ACTIVE_CONFIG_DIGEST_MISMATCH"
-        if raw_upgrade is not None:
-            return upgrade_state
-        if health_state != "HEALTH_MATCH_LIVE":
-            return health_state
-        pins = {key: run[key] for key in (*runtime._ENROLLMENT_PINS, "config_digest")}
-        try:
-            health = _read_supervisor_health(runtime, pins, executable, owner)
-        except Exception:
-            return "HEALTH_UNREADABLE"
-        if health is None:
-            return "ACTIVE_HEALTH_CHANGED"
-        legacy_hold = _supervisor_upgrade_from_legacy_hold(runtime, health, run["source_sha"], sha)
-        if health["health"] not in runtime._OBSERVED_CHROME_HEALTH and not legacy_hold:
-            return health["health"]
-        if run["source_sha"] == sha:
-            if run["source_digest"] != source:
-                return "ACTIVE_SOURCE_CURRENT_DIGEST_MISMATCH"
-            return "ACTIVE_READ_CHECKS_COMPLETE"
-        mode = health.get("mode")
-        if mode not in (runtime._CHROME_HEALTH_ONLY, runtime._OPERATIONAL_TICK_V1):
-            return "ACTIVE_HEALTH_MODE_UNVERIFIED"
-        prior_source = _supervisor_upgrade_source(runtime, root, run, sha, source, mode, report_failure=True)
-        legacy_retirement = mode == runtime._CHROME_HEALTH_ONLY and prior_source == _SUPERVISOR_LEGACY_RETIREMENT
-        if prior_source != "GIT_HISTORY_REHASHED" and not legacy_retirement:
-            return prior_source if prior_source in _SUPERVISOR_SOURCE_PROBE_STAGES else "ACTIVE_RUN_SOURCE_UNVERIFIED"
-        if legacy_retirement and not _legacy_retirement_startup_matches(runtime, run, health["pid"]):
-            return "ACTIVE_STARTUP_UNVERIFIED"
-        try:
-            if _supervisor_upgrade_enrollment_pending(runtime, run, health["pid"]):
-                return "ACTIVE_ENROLLMENT_UNVERIFIED"
-        except Exception:
-            return "ACTIVE_ENROLLMENT_UNVERIFIED"
-        try:
-            options = {"expected_health": "CHROME_OWNED"} if legacy_hold or legacy_retirement else {}
-            _supervisor_upgrade_chrome_pin(runtime, acquisition, root, owner, config, config_pin, mode, **options)
-        except Exception as exc:
-            if mode == runtime._CHROME_HEALTH_ONLY:
-                return _supervisor_upgrade_chrome_hold(runtime, acquisition, exc)
-            return "ACTIVE_CHROME_UNVERIFIED"
-        try:
-            if not _supervisor_upgrade_task_process(acquisition, executable, arguments, root, owner, run, health["pid"]):
-                return "ACTIVE_TASK_PROCESS_UNVERIFIED"
-        except subprocess.TimeoutExpired:
-            return "ACTIVE_TASK_PROCESS_TIMEOUT"
-        except Exception:
-            return "ACTIVE_TASK_PROCESS_UNVERIFIED"
-        try:
-            latest = _read_supervisor_health(runtime, pins, executable, owner)
-        except Exception:
-            return "HEALTH_UNREADABLE"
-        if not _supervisor_upgrade_health_matches(health, latest, legacy_hold=legacy_hold):
-            return "ACTIVE_HEALTH_CHANGED"
-        return "ACTIVE_LEGACY_RETIREMENT_ELIGIBLE" if legacy_retirement else "ACTIVE_READ_CHECKS_COMPLETE"
+            config_state = "ACTIVE_CONFIG_UNVERIFIED"
+        if config is not None:
+            try:
+                browser = _supervisor_upgrade_chrome_pin(
+                    runtime, acquisition, root, owner, config, config_pin, None, observation=True,
+                )
+                if browser not in _SUPERVISOR_BROWSER_RESULTS:
+                    browser = "CHROME_OWNER_UNPROVEN"
+            except Exception as exc:
+                browser = _supervisor_upgrade_chrome_hold(runtime, acquisition, exc)
 
-    stage = first_stage()
+        pins = {key: run[key] for key in (*runtime._ENROLLMENT_PINS, "config_digest")}
+        same_source = run["source_sha"] == sha
+        if same_source:
+            source_state = ("CURRENT_SOURCE_EXACT" if run["source_digest"] == source
+                            else "ACTIVE_SOURCE_CURRENT_DIGEST_MISMATCH")
+        try:
+            health = _read_supervisor_health(runtime, pins, executable, owner, require_fresh=same_source)
+        except Exception:
+            health = None
+        if health is None:
+            eligibility = "ACTIVE_HEALTH_CHANGED" if health_state == "HEALTH_MATCH_LIVE" else health_state
+        elif same_source:
+            eligibility = ("ACTIVE_READ_CHECKS_COMPLETE" if source_state == "CURRENT_SOURCE_EXACT"
+                           else source_state)
+        else:
+            mode = health.get("mode")
+            legacy = mode == runtime._CHROME_HEALTH_ONLY
+            if legacy:
+                source_state = _supervisor_retirement_source(
+                    runtime, root, run, sha, source, health, report_failure=True,
+                )
+                if config is not None:
+                    custody = _supervisor_retirement_custody(
+                        runtime, root, owner, run, health["pid"], config,
+                    ) or "ACTIVE_CUSTODY_CLEAR"
+            elif mode == runtime._OPERATIONAL_TICK_V1:
+                source_state = _supervisor_upgrade_source(
+                    runtime, root, run, sha, source, mode, report_failure=True,
+                )
+                try:
+                    custody = ("ACTIVE_ENROLLMENT_UNVERIFIED" if
+                               _supervisor_upgrade_enrollment_pending(runtime, run, health["pid"])
+                               else "ACTIVE_CUSTODY_CLEAR")
+                except Exception:
+                    custody = "ACTIVE_ENROLLMENT_UNVERIFIED"
+            else:
+                eligibility = "ACTIVE_HEALTH_MODE_UNVERIFIED"
+            if source_state not in _SUPERVISOR_ACTIVE_SOURCE_CODES:
+                source_state = "ACTIVE_RUN_SOURCE_UNVERIFIED"
+            if eligibility is None:
+                eligibility = source_state
+                if source_state in _SUPERVISOR_RETIREMENT_SOURCES:
+                    try:
+                        matches = _supervisor_upgrade_task_process(
+                            acquisition, executable, arguments, root, owner, run, health["pid"],
+                            **({"prior_arguments": prior_arguments} if legacy else {}),
+                        )
+                        latest = _read_supervisor_health(runtime, pins, executable, owner, require_fresh=not legacy)
+                        if not matches:
+                            eligibility = "ACTIVE_TASK_PROCESS_UNVERIFIED"
+                        elif not _supervisor_upgrade_health_matches(health, latest, identity_only=legacy):
+                            eligibility = "ACTIVE_HEALTH_CHANGED"
+                        elif custody != "ACTIVE_CUSTODY_CLEAR":
+                            eligibility = (custody if custody in _SUPERVISOR_RETIREMENT_HOLDS
+                                           else "ACTIVE_ENROLLMENT_UNVERIFIED")
+                        elif config_state == "ACTIVE_CONFIG_UNVERIFIED" or (
+                            not legacy and config_state != "ACTIVE_CONFIG_MATCH"
+                        ):
+                            eligibility = config_state
+                        elif not legacy and browser not in runtime._OBSERVED_CHROME_HEALTH:
+                            eligibility = "ACTIVE_CHROME_UNVERIFIED"
+                        else:
+                            eligibility = ("ACTIVE_LEGACY_RETIREMENT_ELIGIBLE" if legacy
+                                           else "ACTIVE_READ_CHECKS_COMPLETE")
+                    except subprocess.TimeoutExpired:
+                        eligibility = "ACTIVE_TASK_PROCESS_TIMEOUT"
+                    except Exception:
+                        eligibility = "ACTIVE_TASK_PROCESS_UNVERIFIED"
+
+    stage = task_stage or eligibility or run_state
+    if task_code == "TASK_INSTANCE_PRESENT" and run is None:
+        stage = run_state
+    if upgrade_state in {"UPGRADE_UNREADABLE", "UPGRADE_MALFORMED"} or (
+        raw_upgrade is not None and task_code in {"TASK_INSTANCE_PRESENT", "TASK_READY", "TASK_PRIOR_BOOTSTRAP_READY"}
+    ):
+        stage = upgrade_state
     if (read("Run"), read("UpgradePending")) != (raw_run, raw_upgrade):
         stage = "ACTIVE_READ_STATE_CHANGED"
-    elif (task_code != "TASK_INSTANCE_PRESENT" and raw_run is None and raw_upgrade is None
-          and health_state == "HEALTH_ABSENT" and mutex_state == "MUTEX_INACTIVE"):
-        # Keep the scalar result when no exact instance or deployment evidence is present.
-        return task_code
-    return "+".join((task_code, stage, run_state, mutex_state, health_state, upgrade_state))
+        config_state, browser = "ACTIVE_CONFIG_CHECK_SKIPPED", "CHROME_CHECK_SKIPPED"
+        source_state, custody = "ACTIVE_SOURCE_CHECK_SKIPPED", "ACTIVE_CUSTODY_CHECK_SKIPPED"
+    base = (task_code, stage, run_state, mutex_state, health_state, upgrade_state)
+    if run_state != "RUN_MATCH" or owner_drift is not None:
+        return "+".join(base)
+    return "+".join((*base, config_state, browser, source_state, custody))
 
 
 def _probe_protected_supervisor_task(event):
@@ -2780,7 +2852,7 @@ def _probe_protected_supervisor_task(event):
             code = task_code
             if pending_before[0] == "ABSENT":
                 code = _probe_supervisor_active_run(runtime, acquisition, root, owner, executable, arguments,
-                                                    identity, task_code)
+                                                    identity, task_code, prior_arguments=prior_arguments)
             recheck_identity()
             result["code"] = "SUPERVISOR_RUNTIME_UNAVAILABLE"
             if (_supervisor_expected_registration(acquisition, root) != (executable, arguments)
@@ -2841,16 +2913,69 @@ def _probe_protected_supervisor_task(event):
     return _probe_protected_supervisor_read(event, _SUPERVISOR_TASK_PROBE, inspect)
 
 
-def _supervisor_upgrade_from_legacy_hold(runtime, health, prior_sha, current_sha):
-    return (prior_sha != current_sha and health.get("mode") == runtime._CHROME_HEALTH_ONLY
-            and health["health"] in _SUPERVISOR_CHROME_HOLDS)
+def _supervisor_upgrade_health_matches(health, latest, *, identity_only):
+    keys = ("pid", "created", "mode") if identity_only else ("pid", "created", "mode", "health")
+    return latest is not None and all(latest.get(key) == health.get(key) for key in keys)
 
 
-def _supervisor_upgrade_health_matches(health, latest, *, legacy_hold):
-    if latest is None or any(latest.get(key) != health.get(key) for key in ("pid", "created", "mode")):
+def _supervisor_retirement_custody(runtime, root, owner, prior, pid, config):
+    try:
+        if _supervisor_upgrade_enrollment_pending(runtime, prior, pid):
+            return "SUPERVISOR_ENROLLMENT_UNRESOLVED"
+    except (Denied, OSError, ValueError, TypeError, RecursionError):
+        return "SUPERVISOR_ENROLLMENT_UNRESOLVED"
+    try:
+        runtime._supervisor_retirement_custody(
+            root, owner, Path(prior["config"]), config, prior_pin=prior["config_digest"],
+        )
+    except sqlite3.Error as exc:
+        if getattr(exc, "sqlite_errorcode", None) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            return "JOURNAL_BUSY"
+        return "JOURNAL_CORRUPT"
+    except Exception as exc:
+        code = str(exc) if isinstance(exc, runtime.RuntimeHold) else None
+        return code if code in _SUPERVISOR_RETIREMENT_HOLDS else "SUPERVISOR_RETIREMENT_CUSTODY_UNVERIFIED"
+    return None
+
+
+def _supervisor_retired_run_record(retirement):
+    return {"schema": "WakeHubSupervisorRetiredRun.v1", "run": retirement["run"],
+            "pid": retirement["pid"], "created": retirement["created"], "mode": retirement["mode"],
+            "source_provenance": retirement["prior_source_provenance"]}
+
+
+def _supervisor_archived_run_valid(runtime, prior, retirement, raw):
+    archived = json.loads(raw, object_pairs_hook=_object_unique)
+    record = _supervisor_retired_run_record(retirement)
+    if (type(archived) is not dict or archived.keys() != record.keys() | {"health", "startup"}
+            or any(archived[key] != value for key, value in record.items())):
         return False
-    # With independent owned Chrome proof, the legacy HOLD only corroborates process liveness.
-    return latest["health"] == health["health"] or (legacy_hold and latest["health"] in _SUPERVISOR_CHROME_HOLDS)
+    health = _parse_supervisor_health(runtime, archived["health"])
+    return (health is not None
+            and all(health[key] == prior[key] for key in (*runtime._ENROLLMENT_PINS, "config_digest"))
+            and all(health[key] == retirement[key] for key in ("pid", "created", "mode")))
+
+
+def _archive_supervisor_run(runtime, prior, retirement):
+    read, store = runtime._supervisor_deployment_value, runtime._store_supervisor_deployment_value
+    key = f"RetiredRun_{prior['nonce']}"
+    raw = read(key)
+    if raw is None:
+        raw = json.dumps({**_supervisor_retired_run_record(retirement),
+                          "health": read("Health"), "startup": read("StartupReceipt")},
+                         separators=(",", ":"))
+        if not _supervisor_archived_run_valid(runtime, prior, retirement, raw):
+            deny("SUPERVISOR_RETIREMENT_ARCHIVE_UNVERIFIED")
+        store(key, raw)
+    if read(key) != raw or not _supervisor_archived_run_valid(runtime, prior, retirement, raw):
+        deny("SUPERVISOR_RETIREMENT_ARCHIVE_UNVERIFIED")
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _supervisor_archive_matches(runtime, prior, upgrade):
+    raw = runtime._supervisor_deployment_value(f"RetiredRun_{prior['nonce']}")
+    return (raw is not None and hashlib.sha256(raw.encode("utf-8")).hexdigest() == upgrade["archive"]
+            and _supervisor_archived_run_valid(runtime, prior, upgrade, raw))
 
 
 def _supervisor_upgrade_chrome_hold(runtime, acquisition, error, *, fallback="CHROME_OWNER_UNPROVEN"):
@@ -2862,7 +2987,8 @@ def _supervisor_upgrade_chrome_hold(runtime, acquisition, error, *, fallback="CH
     return fallback
 
 
-def _supervisor_upgrade_chrome_pin(runtime, acquisition, root, owner, config, config_pin, mode, *, expected_health=None):
+def _supervisor_upgrade_chrome_pin(runtime, acquisition, root, owner, config, config_pin, mode, *,
+                                  expected_health=None, observation=False):
     def read_config():
         try:
             return runtime._observe_only_config(config, root, owner, lambda: False, protected=True)
@@ -2872,11 +2998,15 @@ def _supervisor_upgrade_chrome_pin(runtime, acquisition, root, owner, config, co
     chrome, pin = read_config()
     if pin != config_pin:
         deny("LOCAL_CONFIG_CHANGED")
-    if mode == runtime._OPERATIONAL_TICK_V1 and isinstance(chrome, runtime._SupervisorChrome):
+    if mode in (None, runtime._OPERATIONAL_TICK_V1) and isinstance(chrome, runtime._SupervisorChrome):
         with acquisition._prefer_installed_powershell():
             state, provenance, pending = chrome.sender.lifecycle_snapshot(hostops=True)
         if pending or provenance[:3] != owner or state not in ("OWNED", "ABSENT"):
             deny("SUPERVISOR_ACTIVE_UNVERIFIED")
+        if observation:
+            if read_config()[1] != pin:
+                deny("LOCAL_CONFIG_CHANGED")
+            return f"CHROME_{state}"
         journal = chrome.runtime.journal
         before = journal.path.stat()
         origin = journal.enrolled_origin(chrome.runtime.registration, owner[2], for_upgrade=True)
@@ -2887,7 +3017,7 @@ def _supervisor_upgrade_chrome_pin(runtime, acquisition, root, owner, config, co
         listeners, processes = provenance[4]
         browser_identity = [[list(row) for row in listeners], [list(row) for row in processes]]
         return runtime.digest([state, browser_identity, provenance[5], origin, list(identity)])
-    if (mode != runtime._CHROME_HEALTH_ONLY or not isinstance(chrome, runtime.NativeChrome9444)
+    if (mode not in (None, runtime._CHROME_HEALTH_ONLY) or not isinstance(chrome, runtime.NativeChrome9444)
             or not chrome.legacy_health_only):
         deny("CHROME_ENROLLMENT_DRIFT")
     state, provenance, pending = chrome.lifecycle_snapshot(hostops=True)
@@ -2902,32 +3032,37 @@ def _supervisor_upgrade_chrome_pin(runtime, acquisition, root, owner, config, co
         deny("LOCAL_CONFIG_CHANGED")
     identity = provenance[4]
     # Preserve the persisted R2 digest so interrupted upgrades retain their browser pin.
-    return hashlib.sha256(json.dumps((state, identity), separators=(",", ":")).encode("utf-8")).hexdigest()
+    return f"CHROME_{state}" if observation else hashlib.sha256(
+        json.dumps((state, identity), separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def _parse_supervisor_upgrade(runtime, raw):
     value = json.loads(raw, object_pairs_hook=_object_unique)
-    base = {"issue", "comment", "start_comment", "run", "pid", "created", "target", "chrome"}
+    base = {"issue", "comment", "start_comment", "run", "pid", "created", "target"}
     if (type(value) is not dict
-            or not base <= value.keys() <= base | {"target_sha", "mode", "nonce", "prior_source_provenance"}
+            or not base <= value.keys() <= base | {"target_sha", "mode", "nonce", "prior_source_provenance", "archive", "chrome"}
+            or ("archive" in value) == ("chrome" in value)
             or any(type(value[key]) is not int or value[key] <= 0
                    for key in ("issue", "comment", "start_comment", "pid", "created"))
             or any(value[key] > 2**53 - 1 for key in ("issue", "comment", "start_comment"))
             or value["start_comment"] < value["comment"]
             or value["pid"] >= 2**32
             or any(type(value[key]) is not str or not re.fullmatch(r"[a-f0-9]{64}", value[key])
-                   for key in ("target", "chrome"))
+                   for key in ("target", "archive" if "archive" in value else "chrome"))
             or ("target_sha" in value and (type(value["target_sha"]) is not str
                                            or not re.fullmatch(r"[a-f0-9]{40}", value["target_sha"])))
             or ("mode" in value and value["mode"] not in (runtime._CHROME_HEALTH_ONLY, runtime._OPERATIONAL_TICK_V1))
             or ("nonce" in value and (type(value["nonce"]) is not str
                                       or not re.fullmatch(r"[a-f0-9]{32}", value["nonce"])))
             or ("prior_source_provenance" in value and (
-                value["prior_source_provenance"] != _SUPERVISOR_LEGACY_RETIREMENT
-                or value.get("mode") != runtime._CHROME_HEALTH_ONLY or "target_sha" not in value))):
+                value["prior_source_provenance"] not in (
+                    _SUPERVISOR_RETIREMENT_SOURCES if "archive" in value else {_SUPERVISOR_LEGACY_RETIREMENT})
+                or value.get("mode") != runtime._CHROME_HEALTH_ONLY or "target_sha" not in value))
+            or ("archive" in value and "prior_source_provenance" not in value)):
         deny("SUPERVISOR_ACTIVE_UNVERIFIED")
     prior = _parse_supervisor_intent(value["run"], require_instance=True)
-    if prior is None or ("prior_source_provenance" in value and "source_eols" in prior):
+    if prior is None or (value.get("prior_source_provenance") == _SUPERVISOR_LEGACY_RETIREMENT
+                         and "source_eols" in prior):
         deny("SUPERVISOR_ACTIVE_UNVERIFIED")
     return value
 
@@ -2950,7 +3085,8 @@ def _supervisor_upgrade_enrollment_pending(runtime, prior, pid):
     return receipt is None or receipt["code"] == runtime._ENROLLMENT_UNKNOWN
 
 
-def _confirmed_supervisor_health(runtime, expected, executable, owner, task, recheck, intent, instance):
+def _confirmed_supervisor_health(runtime, expected, executable, owner, task, recheck, intent, instance, *,
+                                 observe_browser_separately=False):
     pins = {**expected, "nonce": intent["nonce"]}
     proof = _read_supervisor_health(runtime, pins, executable, owner)
     if proof is None or task() != instance:
@@ -2958,8 +3094,9 @@ def _confirmed_supervisor_health(runtime, expected, executable, owner, task, rec
     if proof["health"] not in _SUPERVISOR_DESKTOP_HOLDS:
         recheck()
     latest = _read_supervisor_health(runtime, pins, executable, owner)
-    if (latest is not None and all(latest.get(key) == proof.get(key) for key in ("pid", "created", "health", "mode"))
-            and task() == instance):
+    identity_only = (observe_browser_separately and proof.get("mode") == runtime._CHROME_HEALTH_ONLY
+                     and proof["health"] not in _SUPERVISOR_DESKTOP_HOLDS)
+    if _supervisor_upgrade_health_matches(proof, latest, identity_only=identity_only) and task() == instance:
         return latest
     return None
 
@@ -2991,6 +3128,25 @@ def _complete_supervisor_start(runtime, intent, instance, pending, *, upgrade=No
     if upgrade is not None:
         store("UpgradePending", None)
     return True
+
+
+def _supervisor_deploy_browser_result(runtime, acquisition, health, chrome_pin, upgrade):
+    """Check browser readiness independently of current launch identity."""
+    browser, mode = health["health"], health.get("mode")
+    legacy = mode == runtime._CHROME_HEALTH_ONLY
+    if upgrade is not None and "archive" not in upgrade:
+        # Interrupted transactions keep their original browser and mode fence.
+        if mode != upgrade.get("mode", runtime._CHROME_HEALTH_ONLY) or browser not in runtime._OBSERVED_CHROME_HEALTH:
+            return None
+        options = {"expected_health": browser} if legacy else {}
+        return browser if chrome_pin(mode, **options) == upgrade["chrome"] else None
+    if browser == "CHROME_OWNED" and (legacy or upgrade is not None):
+        try:
+            options = {"expected_health": browser} if legacy else {}
+            chrome_pin(mode, **options)
+        except Exception as exc:
+            return _supervisor_upgrade_chrome_hold(runtime, acquisition, exc)
+    return browser
 
 
 def _deploy_protected_supervisor(event):
@@ -3054,8 +3210,14 @@ def _deploy_protected_supervisor(event):
             if resolve_config() != (config, config_pin):
                 deny(failure)
 
-        def task(**kwargs):
+        def task(*, allow_prior=False, **kwargs):
+            if allow_prior:
+                kwargs["prior_arguments"] = _supervisor_prior_registration(acquisition, root)[1]
             return _supervisor_task(acquisition, executable, arguments, root, owner, **kwargs)
+
+        def prove_task_process(intent, pid, *, allow_prior=False):
+            options = {"prior_arguments": _supervisor_prior_registration(acquisition, root)[1]} if allow_prior else {}
+            return _supervisor_upgrade_task_process(acquisition, executable, arguments, root, owner, intent, pid, **options)
 
         def chrome_pin(mode, **options):
             return _supervisor_upgrade_chrome_pin(runtime, acquisition, root, owner, config, config_pin, mode, **options)
@@ -3078,34 +3240,22 @@ def _deploy_protected_supervisor(event):
             if rerun or not approval_known or prior["source_sha"] == sha or not prior_owner_matches():
                 deny(failure)
             pins = {key: prior[key] for key in (*runtime._ENROLLMENT_PINS, "config_digest")}
-            health = _read_supervisor_health(runtime, pins, executable, owner)
+            health = _read_supervisor_health(runtime, pins, executable, owner, require_fresh=False)
             if health is None:
                 deny(failure)
-            legacy_hold = _supervisor_upgrade_from_legacy_hold(runtime, health, prior["source_sha"], sha)
-            if health["health"] not in runtime._OBSERVED_CHROME_HEALTH and not legacy_hold:
-                deny(failure)
-            mode = health.get("mode")
-            if mode not in (runtime._CHROME_HEALTH_ONLY, runtime._OPERATIONAL_TICK_V1):
-                # Older operational runtimes have no shared tick fence.
-                deny(failure)
-            operational = mode == runtime._OPERATIONAL_TICK_V1
-            provenance = _supervisor_upgrade_source(runtime, root, prior, sha, source, mode)
-            legacy_retirement = not operational and provenance == _SUPERVISOR_LEGACY_RETIREMENT
-            if provenance != "GIT_HISTORY_REHASHED" and not legacy_retirement:
-                deny(failure)
             pid, created = health["pid"], health["created"]
-            if legacy_retirement and not _legacy_retirement_startup_matches(runtime, prior, pid):
+            mode = health.get("mode")
+            legacy = mode == runtime._CHROME_HEALTH_ONLY
+            if legacy:
+                if health["health"] not in runtime._OBSERVED_CHROME_HEALTH | _SUPERVISOR_CHROME_HOLDS:
+                    deny(failure)
+                provenance = _supervisor_retirement_source(runtime, root, prior, sha, source, health)
+                if provenance not in _SUPERVISOR_RETIREMENT_SOURCES:
+                    deny(failure)
+            elif (mode != runtime._OPERATIONAL_TICK_V1 or not prior_config_matches()
+                  or health["health"] not in runtime._OBSERVED_CHROME_HEALTH
+                  or _supervisor_upgrade_source(runtime, root, prior, sha, source, mode) != "GIT_HISTORY_REHASHED"):
                 deny(failure)
-
-            def observe_browser():
-                nonlocal failure
-                if not legacy_hold and not legacy_retirement:
-                    return chrome_pin(mode)
-                try:
-                    return chrome_pin(mode, expected_health="CHROME_OWNED")
-                except Exception as exc:
-                    failure = _supervisor_upgrade_chrome_hold(runtime, acquisition, exc)
-                    raise
 
             def checkpoint():
                 nonlocal failure, upgrade
@@ -3113,72 +3263,103 @@ def _deploy_protected_supervisor(event):
                 failure = "SUPERVISOR_ACTIVE_UNVERIFIED"
                 if (runtime._supervisor_deployment_value("Run") != raw_run
                         or runtime._supervisor_deployment_value("StartPending") is not None
-                        or runtime._supervisor_deployment_value(upgrade_key) is not None
-                        or enrollment_pending(prior, pid)
-                        or (legacy_retirement and not _legacy_retirement_startup_matches(runtime, prior, pid))):
+                        or runtime._supervisor_deployment_value(upgrade_key) is not None):
                     deny(failure)
-                if observe_browser() != browser:
-                    if legacy_hold or legacy_retirement:
-                        failure = "CHROME_OBSERVATION_CHANGED"
+                check_custody(prior, pid, legacy=legacy)
+                if legacy:
+                    if not _legacy_retirement_startup_matches(runtime, prior, pid):
+                        deny(failure)
+                elif chrome_pin(mode) != browser:
                     deny(failure)
-                if not _supervisor_upgrade_task_process(acquisition, executable, arguments, root, owner, prior, pid):
+                if not prove_task_process(prior, pid, allow_prior=legacy):
                     deny(failure)
-                latest = _read_supervisor_health(runtime, pins, executable, owner)
-                if not _supervisor_upgrade_health_matches(health, latest, legacy_hold=legacy_hold):
+                latest = _read_supervisor_health(runtime, pins, executable, owner, require_fresh=not legacy)
+                if not _supervisor_upgrade_health_matches(health, latest, identity_only=legacy):
                     deny(failure)
-                upgrade = {"issue": issue_number, "comment": approval, "start_comment": approval,
-                           "run": raw_run, "pid": pid, "created": created, "mode": mode,
-                           "target": target, "target_sha": sha, "chrome": browser}
-                if legacy_retirement:
-                    upgrade["prior_source_provenance"] = provenance
+                reservation = {"issue": issue_number, "comment": approval, "start_comment": approval,
+                               "run": raw_run, "pid": pid, "created": created, "mode": mode,
+                               "target": target, "target_sha": sha}
+                if legacy:
+                    failure = "SUPERVISOR_RETIREMENT_ARCHIVE_UNVERIFIED"
+                    reservation["prior_source_provenance"] = provenance
+                    reservation["archive"] = _archive_supervisor_run(runtime, prior, reservation)
+                else:
+                    reservation["chrome"] = browser
+                upgrade = reservation
                 remember_upgrade()
 
+            # The deploy mutex fences enrollment. The tick slot excludes a
+            # synchronous operational effect even while identifying a legacy run.
             with ExitStack() as fence:
-                # Legacy health-only enrollment already holds the deploy mutex.
-                # Operational ticks try both slots without waiting for HostOps.
-                if operational:
-                    deadline = time.monotonic() + 3
-                    while True:
-                        try:
-                            fence.enter_context(runtime._supervisor_slot(runtime._SUPERVISOR_TICK_MUTEX))
-                            break
-                        except runtime.RuntimeHold as exc:
-                            if str(exc) != "SUPERVISOR_ACTIVE" or time.monotonic() >= deadline:
-                                raise
-                            time.sleep(0.25)
-                if enrollment_pending(prior, pid):
+                failure = "SUPERVISOR_OPERATIONAL_TICK_ACTIVE"
+                deadline = time.monotonic() + 3
+                while True:
+                    try:
+                        fence.enter_context(runtime._supervisor_slot(runtime._SUPERVISOR_TICK_MUTEX))
+                        break
+                    except runtime.RuntimeHold as exc:
+                        if str(exc) != "SUPERVISOR_ACTIVE":
+                            failure = "SUPERVISOR_ACTIVE_UNVERIFIED"
+                            raise
+                        if legacy or time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.25)
+                failure = "SUPERVISOR_ACTIVE_UNVERIFIED"
+                if not prove_task_process(prior, pid, allow_prior=legacy):
                     deny(failure)
-                browser = observe_browser()
+                check_custody(prior, pid, legacy=legacy)
+                browser = None if legacy else chrome_pin(mode)
                 try:
                     runtime._stop_verified_supervisor(pid, created, executable, owner, checkpoint)
                 except (OSError, runtime.RuntimeHold):
                     if upgrade is None or runtime._supervisor_deployment_value(upgrade_key) != raw_upgrade:
                         raise
                 # A lost stop reply has the same readback as a successful one.
+                failure = "SUPERVISOR_STOP_UNKNOWN"
                 deadline = time.monotonic() + 10
                 while not upgrade_idle():
                     if time.monotonic() >= deadline:
                         deny(failure)
                     time.sleep(0.25)
 
+        def legacy_transaction():
+            return upgrade is not None and "archive" in upgrade
+
         def upgrade_idle():
-            return (task() == "READY" and not runtime._supervisor_active()
+            states = ("READY", "PRIOR_READY") if legacy_transaction() else ("READY",)
+            return (task(allow_prior=legacy_transaction()) in states and not runtime._supervisor_active()
                     and runtime._supervisor_process_exited(upgrade["pid"], upgrade["created"]))
 
         def prior_owner_matches():
-            return all(prior[key] == intent_pins[key] for key in ("sid", "desktop", "session", "config", "config_digest"))
+            return all(prior[key] == intent_pins[key] for key in ("sid", "desktop", "session"))
+
+        def prior_config_matches():
+            return all(prior[key] == intent_pins[key] for key in ("config", "config_digest"))
 
         def upgrade_mode():
             return upgrade.get("mode", runtime._CHROME_HEALTH_ONLY)
+
+        def check_custody(run, pid, *, legacy):
+            nonlocal failure
+            if legacy:
+                hold = _supervisor_retirement_custody(runtime, root, owner, run, pid, config)
+            else:
+                hold = "SUPERVISOR_ENROLLMENT_UNRESOLVED" if enrollment_pending(run, pid) else None
+            if hold is not None:
+                failure = hold
+                deny(hold)
 
         def retire_stopped_run():
             nonlocal failure
             recheck(check_source=True)
             failure = "SUPERVISOR_ACTIVE_UNVERIFIED"
-            if (not prior_owner_matches() or runtime._supervisor_deployment_value(upgrade_key) != raw_upgrade
+            independent_retirement = legacy_transaction()
+            if (not prior_owner_matches() or (not independent_retirement and not prior_config_matches())
+                    or runtime._supervisor_deployment_value(upgrade_key) != raw_upgrade
                     or runtime._supervisor_deployment_value("StartPending") is not None
-                    or not upgrade_idle() or enrollment_pending(prior, upgrade["pid"])):
+                    or not upgrade_idle()):
                 deny(failure)
+            check_custody(prior, upgrade["pid"], legacy=independent_retirement)
             legacy_retirement = upgrade.get("prior_source_provenance") == _SUPERVISOR_LEGACY_RETIREMENT
             retarget = upgrade["target"] != target or upgrade.get("target_sha", sha) != sha
             if retarget:
@@ -3188,7 +3369,20 @@ def _deploy_protected_supervisor(event):
                 if previous_target is None or previous_target == sha:
                     deny(failure)
                 _git_bytes(root, ("merge-base", "--is-ancestor", previous_target, sha))
-            if retarget or (legacy_retirement and not reserved_here):
+            if independent_retirement:
+                if not _supervisor_archive_matches(runtime, prior, upgrade):
+                    failure = "SUPERVISOR_RETIREMENT_ARCHIVE_UNVERIFIED"
+                    deny(failure)
+                if task(allow_prior=True) == "PRIOR_READY":
+                    failure = "SUPERVISOR_TASK_CONFLICT"
+                    try:
+                        task(mode="migrate", allow_prior=True)
+                    except (subprocess.SubprocessError, OSError):
+                        pass  # Read back the exact task after a lost migration reply.
+                    if task() != "READY":
+                        deny(failure)
+                    failure = "SUPERVISOR_ACTIVE_UNVERIFIED"
+            elif retarget or (legacy_retirement and not reserved_here):
                 provenance = _supervisor_upgrade_source(
                     runtime, root, prior, sha, source, upgrade_mode(), allow_legacy=legacy_retirement,
                 )
@@ -3196,7 +3390,7 @@ def _deploy_protected_supervisor(event):
                         and not (legacy_retirement and provenance == _SUPERVISOR_LEGACY_RETIREMENT))):
                     deny(failure)
             options = {"expected_health": "CHROME_OWNED"} if legacy_retirement else {}
-            if chrome_pin(upgrade_mode(), **options) != upgrade["chrome"]:
+            if not independent_retirement and chrome_pin(upgrade_mode(), **options) != upgrade["chrome"]:
                 deny(failure)
             run = runtime._supervisor_deployment_value("Run")
             stale_health = runtime._supervisor_deployment_value("Health")
@@ -3228,39 +3422,55 @@ def _deploy_protected_supervisor(event):
                 upgrade["target"] != target or upgrade.get("target_sha") != sha
                 or upgrade.get("nonce") != intent["nonce"] or intent["nonce"] == prior["nonce"]
                 or instance == prior["instance"] or not prior_owner_matches()
+                or (not legacy_transaction() and not prior_config_matches())
                 or runtime._supervisor_deployment_value(upgrade_key) != raw_upgrade
                 or not runtime._supervisor_process_exited(upgrade["pid"], upgrade["created"])
-                or enrollment_pending(prior, upgrade["pid"])
             ):
                 return "SUPERVISOR_START_UNKNOWN"
+            if upgrade is not None:
+                check_custody(prior, upgrade["pid"], legacy=legacy_transaction())
+                if legacy_transaction() and not _supervisor_archive_matches(runtime, prior, upgrade):
+                    return "SUPERVISOR_RETIREMENT_ARCHIVE_UNVERIFIED"
             proven = _confirmed_supervisor_health(
                 runtime, expected, executable, owner, task, recheck_completion, intent, instance,
+                observe_browser_separately=legacy_transaction() or upgrade is None,
             )
             if proven is None:
                 return None
             if proven["health"] in _SUPERVISOR_DESKTOP_HOLDS:
                 return proven["health"]
-            legacy_upgrade = upgrade is not None and upgrade_mode() == runtime._CHROME_HEALTH_ONLY
-            options = {"expected_health": proven["health"]} if legacy_upgrade else {}
             if upgrade is not None and (
-                proven.get("mode") != upgrade_mode() or proven["health"] not in runtime._OBSERVED_CHROME_HEALTH
-                or (proven["pid"], proven["created"]) == (upgrade["pid"], upgrade["created"])
-                or chrome_pin(upgrade_mode(), **options) != upgrade["chrome"]
-                or not _supervisor_upgrade_task_process(acquisition, executable, arguments, root, owner,
-                                                        {**intent, "instance": instance}, proven["pid"])
-                or not 0 <= runtime.monotonic_ns() - proven["observed_ns"] <= runtime._SUPERVISOR_HEALTH_MAX_AGE_NS
+                (proven["pid"], proven["created"]) == (upgrade["pid"], upgrade["created"])
+                or not prove_task_process({**intent, "instance": instance}, proven["pid"])
             ):
                 return "SUPERVISOR_START_UNKNOWN"
-            if legacy_upgrade:
+            mode = proven.get("mode")
+            if legacy_transaction() and mode not in (runtime._CHROME_HEALTH_ONLY, runtime._OPERATIONAL_TICK_V1):
+                return "SUPERVISOR_START_UNKNOWN"
+            browser = _supervisor_deploy_browser_result(runtime, acquisition, proven, chrome_pin, upgrade)
+            if browser is None:
+                return "SUPERVISOR_START_UNKNOWN"
+            check_browser = proven["health"] == "CHROME_OWNED" and mode == runtime._CHROME_HEALTH_ONLY
+            if upgrade is not None or check_browser:
                 latest = _read_supervisor_health(runtime, {**expected, "nonce": intent["nonce"]}, executable, owner)
-                if latest is None or any(latest.get(key) != proven.get(key) for key in ("pid", "created", "mode", "health")):
+                separate = mode == runtime._CHROME_HEALTH_ONLY and (legacy_transaction() or upgrade is None)
+                if not _supervisor_upgrade_health_matches(proven, latest, identity_only=separate) or task() != instance:
                     return "SUPERVISOR_START_UNKNOWN"
-            if pending is not None or upgrade is not None:
+                if separate and latest["health"] != proven["health"]:
+                    browser = latest["health"] if latest["health"] in _SUPERVISOR_CHROME_PROBE_HOLDS else "CHROME_OBSERVATION_CHANGED"
+            # A newly selected operational runtime stays behind the pending
+            # effect fence when its independent browser observation conflicts.
+            operational_hold = (legacy_transaction() and mode == runtime._OPERATIONAL_TICK_V1
+                                and browser in _SUPERVISOR_CHROME_PROBE_HOLDS)
+            if (pending is not None or upgrade is not None) and not operational_hold:
                 if not _complete_supervisor_start(runtime, intent, instance, pending, upgrade=raw_upgrade):
                     return "SUPERVISOR_START_UNKNOWN"
-            if proven["health"] in _SUPERVISOR_CHROME_HOLDS:
-                return proven["health"]
-            if proven.get("mode") == runtime._CHROME_HEALTH_ONLY:
+            if browser in _SUPERVISOR_CHROME_PROBE_HOLDS or (browser == "CHROME_ABSENT" and (
+                legacy_transaction() or mode == runtime._CHROME_HEALTH_ONLY
+            )):
+                started = "SUPERVISOR_STARTED_HEALTH_OBSERVED" if pending is not None else "SUPERVISOR_REUSED_HEALTH_OBSERVED"
+                return f"{started}+{browser}"
+            if mode == runtime._CHROME_HEALTH_ONLY:
                 return "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED"
             if pending is not None:
                 return "SUPERVISOR_STARTED_HEALTH_OBSERVED"
@@ -3289,7 +3499,7 @@ def _deploy_protected_supervisor(event):
                 upgrade = _parse_supervisor_upgrade(runtime, raw_upgrade)
                 prior = _parse_supervisor_intent(upgrade["run"], require_instance=True)
             reserved_here = False
-            state = task()
+            state = task(allow_prior=pending is None)
             if pending is not None or _SUPERVISOR_INSTANCE.fullmatch(state):
                 failure = "SUPERVISOR_START_UNKNOWN" if pending is not None else "SUPERVISOR_ACTIVE_UNVERIFIED"
                 record = pending if pending is not None else runtime._supervisor_deployment_value("Run")
@@ -3301,18 +3511,20 @@ def _deploy_protected_supervisor(event):
                 if all(intent[key] == pin for key, pin in intent_pins.items()):
                     return _supervisor_receipt(finish(intent, state, pending) or failure, issue_number, sha)
                 if pending is not None or upgrade is not None:
+                    if pending is None and upgrade["run"] == record:
+                        failure = "SUPERVISOR_STOP_UNKNOWN"
                     deny(failure)
                 prior = intent
                 reserve_stop(record)
                 reserved_here = True
-                state = "READY"  # reserve_stop independently observed the idle task.
-            if state == "CONFLICT":
+                state = task(allow_prior=legacy_transaction())
+            if state == "CONFLICT" or (state == "PRIOR_READY" and not legacy_transaction()):
                 return _supervisor_receipt("SUPERVISOR_TASK_CONFLICT", issue_number, sha)
             if state == "BUSY" or runtime._supervisor_active():
                 return _supervisor_receipt("SUPERVISOR_ACTIVE_UNVERIFIED", issue_number, sha)
             if upgrade is not None:
                 failure = "SUPERVISOR_ACTIVE_UNVERIFIED"
-                if state != "READY":
+                if state not in ("READY", "PRIOR_READY"):
                     deny(failure)
                 if not reserved_here and (rerun or not approval_known
                                           or approval <= max(upgrade["comment"], upgrade["start_comment"])):
@@ -3335,6 +3547,14 @@ def _deploy_protected_supervisor(event):
                     return _supervisor_receipt("SUPERVISOR_ACTIVE_UNVERIFIED", issue_number, sha)
                 recheck(check_source=True)
 
+            if upgrade is not None:
+                recheck(check_source=True)
+                failure = "SUPERVISOR_ACTIVE_UNVERIFIED"
+                if (task() != "READY" or not upgrade_idle()
+                        or runtime._supervisor_deployment_value(upgrade_key) != raw_upgrade
+                        or runtime._supervisor_deployment_value("StartPending") is not None
+                        or runtime._supervisor_deployment_value("Run") is not None):
+                    deny(failure)
             failure = "SUPERVISOR_START_UNKNOWN"
             nonce = secrets.token_hex(16)
             if upgrade is not None:
@@ -3351,6 +3571,8 @@ def _deploy_protected_supervisor(event):
                 deny(failure)
             instance = task(mode="start", nonce=intent["nonce"])
             if instance in {"NOT_ATTEMPTED", "MISSING", "CONFLICT"}:
+                if runtime._supervisor_deployment_value("StartPending") != pending:
+                    deny(failure)
                 runtime._store_supervisor_deployment_value("StartPending", None)
                 code = "SUPERVISOR_TASK_CONFLICT" if instance == "CONFLICT" else "SUPERVISOR_START_NOT_ATTEMPTED"
                 return _supervisor_receipt(code, issue_number, sha)

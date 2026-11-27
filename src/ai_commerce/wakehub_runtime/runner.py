@@ -1841,12 +1841,28 @@ class Journal:
         actual = json.dumps(_decode_unique(rows[0][1]), sort_keys=True)
         _require(actual == json.dumps(asdict(registration), sort_keys=True), "REGISTRATION_DRIFT")
 
-    def enrolled_origin(self, registration: Registration, principal: str, *, for_upgrade: bool = False) -> dict | None:
+    @staticmethod
+    def _read_events(db, registration: Registration, data: dict) -> None:
+        for key, event_id, sha, attempt, generation, raw in db.execute("SELECT * FROM events"):
+            record = _decode_unique(raw)
+            _require(type(record) is dict and type(record.get("event")) is dict, "JOURNAL_INVALID")
+            _require((event_id, sha, attempt, generation) ==
+                     (*_event_columns(record["event"], registration),
+                      registration.binding.generation), "JOURNAL_INVALID")
+            data["events"][key] = record
+        _validate_records(data, registration)
+
+    def enrolled_origin(self, registration: Registration, principal: str, *, for_upgrade: bool = False,
+                        for_retirement: bool = False) -> dict | None:
         """Read the exact existing enrollment without creating, migrating or recovering state."""
         with _private_access(self.path, self.repository_root) as (owner, _):
             _require(owner == principal, "JOURNAL_OWNER_DRIFT")
             self._owner(owner)
             if not self.path.exists():
+                if for_retirement:
+                    _require(not any(os.path.lexists(self.path.with_name(self.path.name + suffix))
+                                     for suffix in (".lock", "-journal", "-wal", "-shm")),
+                             "JOURNAL_PROOF_MISSING")
                 return None
             with closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=0)) as db:
                 db.execute("PRAGMA trusted_schema=OFF")
@@ -1855,20 +1871,27 @@ class Journal:
                          and db.execute("PRAGMA application_id").fetchone() == (_APP_ID,),
                          "JOURNAL_SCHEMA_INCOMPATIBLE")
                 schemas = dict(db.execute("SELECT name, sql FROM sqlite_master WHERE type='table' "
-                                          "AND name IN ('identity', 'local_origin', 'events', 'chrome_lifecycle')"))
+                                          "AND name IN ('identity', 'local_origin', 'events', 'chrome_lifecycle', "
+                                          "'source_identities')"))
                 _require(schemas.get("identity") == _TABLES["identity"], "JOURNAL_SCHEMA_INCOMPATIBLE")
                 self._check_registration(db, owner, registration)
-                if "local_origin" not in schemas:
+                if "local_origin" not in schemas and not for_retirement:
                     return None
-                _require(schemas["local_origin"] == _ORIGIN_TABLE, "JOURNAL_SCHEMA_INCOMPATIBLE")
-                rows = db.execute("SELECT singleton, record FROM local_origin").fetchall()
-                _require(len(rows) == 1 and rows[0][0] == 1, "LOCAL_ORIGIN_JOURNAL_INVALID")
-                origin = _decode_unique(rows[0][1])
-                _validate_local_origin(origin, registration)
-                if for_upgrade:
+                origin = None
+                if "local_origin" in schemas:
+                    _require(schemas["local_origin"] == _ORIGIN_TABLE, "JOURNAL_SCHEMA_INCOMPATIBLE")
+                    rows = db.execute("SELECT singleton, record FROM local_origin").fetchall()
+                    _require(len(rows) == 1 and rows[0][0] == 1, "LOCAL_ORIGIN_JOURNAL_INVALID")
+                    origin = _decode_unique(rows[0][1])
+                    _validate_local_origin(origin, registration)
+                if for_upgrade or for_retirement:
                     # The tick slot excludes synchronous effects. Durable
                     # records still need to rule out detached or interrupted ones.
                     _require(schemas.get("events") == _TABLES["events"], "JOURNAL_SCHEMA_INCOMPATIBLE")
+                    if for_retirement:
+                        _require(db.execute("PRAGMA quick_check").fetchall() == [("ok",)], "JOURNAL_CORRUPT")
+                        _require(db.execute("PRAGMA user_version").fetchone() != (3,) or "chrome_lifecycle" in schemas,
+                                 "JOURNAL_SCHEMA_INCOMPATIBLE")
                     if "chrome_lifecycle" in schemas:
                         _require(schemas["chrome_lifecycle"] == _CHROME_TABLE, "JOURNAL_SCHEMA_INCOMPATIBLE")
                         rows = db.execute("SELECT singleton, record FROM chrome_lifecycle").fetchall()
@@ -1876,18 +1899,30 @@ class Journal:
                         chrome = _decode_unique(rows[0][1])
                         _validate_chrome(chrome)
                         _require(chrome["launch"] is None, _LAUNCH_UNKNOWN)
-                    navigation = origin["navigation"]
+                    navigation = origin["navigation"] if origin is not None else None
                     _require(navigation is None or navigation["phase"] != "RESERVED",
                              "EXACT_CHAT_PRELOAD_RECONCILE_REQUIRED")
-                    for (raw,) in db.execute("SELECT record FROM events"):
-                        record = _decode_unique(raw)
+                    if for_retirement and origin is not None:
+                        submission = origin.get("submission")
+                        _require(submission is None or submission["document"] is None, _ENROLLMENT_UNKNOWN)
+                    if for_retirement:
+                        data = {"events": {}, "source_identities": {}, "local_origin": origin}
+                        if "source_identities" in schemas:
+                            _require(schemas["source_identities"] == _SOURCE_TABLE, "JOURNAL_SCHEMA_INCOMPATIBLE")
+                            for key, event_key, raw in db.execute("SELECT * FROM source_identities"):
+                                data["source_identities"][key] = (event_key, _decode_unique(raw))
+                        self._read_events(db, registration, data)
+                        records = data["events"].values()
+                    else:
+                        records = (_decode_unique(raw) for (raw,) in db.execute("SELECT record FROM events"))
+                    for record in records:
                         send = record["evidence"].get("local_send", {})
                         _require(record["status"] != "RESERVED"
-                                 and not (record["status"] == "UNKNOWN_EFFECT" and (
+                                 and not (record["status"] == "UNKNOWN_EFFECT" and (for_retirement or
                                      send.get("agy_attempt", {}).get("code") == "AGY_PROCESS_UNPROVEN"
                                      or send.get("transport") == _AGY and "agy_attempt" not in send)),
-                                 "SUPERVISOR_ACTIVE_UNVERIFIED")
-                return origin if origin["phase"] == "ENROLLED" else None
+                                 "SUPERVISOR_DELIVERY_UNRESOLVED" if for_retirement else "SUPERVISOR_ACTIVE_UNVERIFIED")
+                return origin if origin is not None and origin["phase"] == "ENROLLED" else None
 
     @contextmanager
     def locked(self, registration: Registration):
@@ -1980,14 +2015,7 @@ class Journal:
                 if source_table:
                     for source_key, event_key, identity in db.execute("SELECT * FROM source_identities"):
                         data["source_identities"][source_key] = (event_key, _decode_unique(identity))
-                for key, event_id, sha, attempt, generation, raw in db.execute("SELECT * FROM events"):
-                    record = _decode_unique(raw)
-                    _require(type(record) is dict and type(record.get("event")) is dict, "JOURNAL_INVALID")
-                    _require((event_id, sha, attempt, generation) ==
-                             (*_event_columns(record["event"], registration),
-                              registration.binding.generation), "JOURNAL_INVALID")
-                    data["events"][key] = record
-                _validate_records(data, registration)
+                self._read_events(db, registration, data)
                 if version == 3:
                     rows = db.execute("SELECT singleton, record FROM chrome_lifecycle").fetchall()
                     _require(len(rows) == 1 and rows[0][0] == 1, "CHROME_JOURNAL_INVALID")
@@ -4337,7 +4365,8 @@ def _supervisor_deployment_value(name: str) -> str | None:
             value, kind = winreg.QueryValueEx(key, name)
     except FileNotFoundError:
         return None
-    limit = 4096 if name == "UpgradePending" or name.startswith("RetiredPending_") else _SUPERVISOR_INTENT_LIMIT
+    limit = (16384 if name.startswith("RetiredRun_") else 4096
+             if name == "UpgradePending" or name.startswith("RetiredPending_") else _SUPERVISOR_INTENT_LIMIT)
     _require(kind == winreg.REG_SZ and type(value) is str and 0 < len(value) <= limit,
              "SUPERVISOR_EVIDENCE_INVALID")
     return value
@@ -4357,7 +4386,7 @@ def _store_supervisor_deployment_value(name: str, value: str | None) -> None:
         else:
             winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
         if name in {"StartPending", "Run", "StartupReceipt", "UpgradePending", _ENROLLMENT_INTENT, _ENROLLMENT_RECEIPT
-                    } or name.startswith("RetiredPending_"):
+                    } or name.startswith(("RetiredPending_", "RetiredRun_")):
             winreg.FlushKey(key)
 
 
@@ -4923,6 +4952,44 @@ def _operational_enrollment_config(root: Path, owner: tuple[Path, int, str]) -> 
         _require(chrome.runtime.journal.path == config.with_name("enrollment.sqlite3"), "LOCAL_CONFIG_INVALID")
         return config, pin
     return None
+
+
+def _supervisor_retirement_custody(root: Path, owner: tuple[Path, int, str], prior_config: Path,
+                                  current_config: Path, *, prior_pin: str) -> None:
+    """Read the selected and enrollment journals while HostOps holds the effect fences."""
+    if chrome_acquisition._clean_launch_pending():
+        raise RuntimeHold(_LAUNCH_UNKNOWN)
+    local, _, sid = owner
+    enrollment = local / "AI-Commerce" / _ENROLLMENT_CONFIG_LOCATION
+    enrollment_journal = enrollment.with_name("enrollment.sqlite3")
+    for config in dict.fromkeys((prior_config, current_config, enrollment)):
+        _require(chrome_acquisition._no_links(config), "LOCAL_CONFIG_INVALID")
+        try:
+            config.lstat()
+        except FileNotFoundError:
+            if config != enrollment:
+                raise
+            _require(not any(os.path.lexists(enrollment_journal.with_name(enrollment_journal.name + suffix))
+                             for suffix in ("", "-journal", ".lock")), "JOURNAL_PROOF_MISSING")
+            continue
+        chrome, pin = _observe_only_config(config, root, owner, lambda: False, protected=True)
+        if config == prior_config:
+            # Protected dispatch chooses its mode from the validated launch
+            # config. A dedicated legacy slot and verified native config shape
+            # corroborate its observer mode even when the old pin has changed.
+            dedicated = (any(config == local / "AI-Commerce" / relative
+                             for relative in chrome_acquisition._CONFIG_9444_RELATIVE_PATHS
+                             if relative not in _RUNTIME_CONFIG_LOCATIONS)
+                         and isinstance(chrome, NativeChrome9444) and chrome.legacy_health_only)
+            _require(isinstance(chrome, NativeChrome9444) and (pin == prior_pin or dedicated),
+                     "SUPERVISOR_RETIREMENT_MODE_UNVERIFIED")
+        if config != enrollment and isinstance(chrome, NativeChrome9444) and chrome.legacy_health_only:
+            continue  # The validated legacy 9444 config and wrapper have no journal reference.
+        runtime = chrome.runtime if isinstance(chrome, _SupervisorChrome) else _read_runtime_config(
+            config, root, registration_only=True)
+        _require(runtime.principal == sid and (config != enrollment or runtime.journal.path == enrollment_journal),
+                 "JOURNAL_OWNER_DRIFT")
+        runtime.journal.enrolled_origin(runtime.registration, sid, for_retirement=True)
 
 
 def _deployment_health(deployment: dict, *, health_only: bool = False):
