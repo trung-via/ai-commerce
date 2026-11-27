@@ -916,6 +916,37 @@ def test_legacy_and_corrupt_journals_are_refused_without_reset(composition, raw,
     assert path.read_bytes() == raw
 
 
+def test_supervisor_retirement_reads_runtime_journal_without_repair(composition, monkeypatch):
+    make, _, registration, _, path, _ = composition
+    runtime = make()
+    journal = runtime.journal
+    owner = (path.parent, 7, r._private_identity(path.parent))
+    config = path.parent / "runtime-config.json"
+    config.touch()
+    monkeypatch.setattr(r.chrome_acquisition, "_clean_launch_pending", lambda: False)
+    observer = r.NativeChrome9444(journal.repository_root, supervised=True)
+    monkeypatch.setattr(r, "_observe_only_config", lambda *_args, **_kwargs: (observer, "prior-pin"))
+    monkeypatch.setattr(r, "_read_runtime_config", lambda *_args, **_kwargs: SimpleNamespace(
+        principal=owner[2], registration=registration, journal=journal,
+    ))
+    assert runtime.run_once().status == "ACK"
+    before = path.read_bytes()
+    r._supervisor_retirement_custody(journal.repository_root, owner, config, config, prior_pin="prior-pin")
+    assert path.read_bytes() == before
+    with pytest.raises(r.RuntimeHold, match="^SUPERVISOR_RETIREMENT_MODE_UNVERIFIED$"):
+        r._supervisor_retirement_custody(journal.repository_root, owner, config, config, prior_pin="other-mode")
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE events SET record = '{}'")
+    corrupted = path.read_bytes()
+    with pytest.raises(r.RuntimeHold, match="^JOURNAL_INVALID$"):
+        r._supervisor_retirement_custody(journal.repository_root, owner, config, config, prior_pin="prior-pin")
+    assert path.read_bytes() == corrupted
+    monkeypatch.setattr(r.chrome_acquisition, "_clean_launch_pending", lambda: True)
+    with pytest.raises(r.RuntimeHold, match="^CHROME_LAUNCH_RECONCILE_REQUIRED$"):
+        r._supervisor_retirement_custody(journal.repository_root, owner, config, config, prior_pin="prior-pin")
+    assert path.read_bytes() == corrupted
+
+
 @pytest.mark.parametrize("mutation,code", [
     ("PRAGMA user_version=99", "JOURNAL_SCHEMA_INCOMPATIBLE"),
     ("UPDATE identity SET owner='other-owner'", "JOURNAL_OWNER_DRIFT"),
@@ -3197,7 +3228,17 @@ def test_health_uses_existing_9444_without_route_or_journal(observe_only, monkey
     assert canonical.parent.exists() is wrapper
 
     if fault == "locked_profile":
-        (s.i["environment"].user_data_dir / "Default" / r.chrome_acquisition._MARKERS[0]).touch()
+        marker = s.i["environment"].user_data_dir / "Default" / r.chrome_acquisition._MARKERS[0]
+        marker.touch()
+
+        def conflicting_holder(native, path):
+            assert native.identity[0] == s.i["process"]["ProcessId"]
+            assert path == marker
+            return False
+
+        # The listener PID is synthetic. Supply a native conflict result for this marker.
+        monkeypatch.setattr(r.chrome_acquisition._NativeEnrollment, "_bind", lambda _: None)
+        monkeypatch.setattr(r.chrome_acquisition._NativeEnrollment, "observe_marker", conflicting_holder)
     elif fault == "foreign_port":
         s.i["inventory"]["listeners"][0]["LocalPort"] = 9333
     session, sid = s.owner()[1:]
@@ -6053,6 +6094,8 @@ def test_upgrade_keeps_the_journal_read_only_when_agy_exit_is_unproven(dual_rout
     before = f.s.path.read_bytes()
     with pytest.raises(r.RuntimeHold, match="^SUPERVISOR_ACTIVE_UNVERIFIED$"):
         runtime.journal.enrolled_origin(runtime.registration, runtime.principal, for_upgrade=True)
+    with pytest.raises(r.RuntimeHold, match="^SUPERVISOR_DELIVERY_UNRESOLVED$"):
+        runtime.journal.enrolled_origin(runtime.registration, runtime.principal, for_retirement=True)
     assert f.s.path.read_bytes() == before
     assert f.rows()[event_id]["status"] == "UNKNOWN_EFFECT"
     assert len(f.agy.calls) == 1 and f.ui.clicks == 0

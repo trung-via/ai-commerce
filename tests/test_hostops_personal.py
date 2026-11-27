@@ -3391,6 +3391,8 @@ class PersonalCdp9444ConfigRegistryTests(unittest.TestCase):
             ("SUPERVISOR_TASK_CONFLICT", "HOLD"),
             ("SUPERVISOR_START_NOT_ATTEMPTED", "HOLD"),
             ("CDP_PROTOCOL_UNAVAILABLE", "HOLD"),
+            ("SUPERVISOR_STARTED_HEALTH_OBSERVED+PROFILE_LOCK_HOLD", "HOLD"),
+            ("SUPERVISOR_REUSED_HEALTH_OBSERVED+FOREIGN_PORT_OWNER", "HOLD"),
             ("LOCAL_CONFIG_REQUIRED", "HOLD"),
             ("LOCAL_CONFIG_STALE", "HOLD"),
             ("LOCAL_CONFIG_AMBIGUOUS", "HOLD"),
@@ -3553,6 +3555,7 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.probe_pending_state = None
         self.upgrade_process_matches = True
         self.upgrade_task_matches = True
+        self.prior_task_definition = False
         self.modes = []
         self.captured_task_envs = []
         self.captured_pending_guids = []
@@ -3561,7 +3564,7 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         clock = count()
         self.mock(hostops, "time", new=SimpleNamespace(monotonic=lambda: next(clock), sleep=Mock()))
         self.mock(hostops, "os", new=SimpleNamespace(name="nt", environ=self.env))
-        self.mock(runner, "os", new=SimpleNamespace(name="nt", environ=self.env))
+        self.mock(runner, "os", new=SimpleNamespace(name="nt", environ=self.env, path=os.path))
         self.mock(hostops.sys, "_base_executable", new=str(self.executable))
         self.mock(hostops.sys, "prefix", new=str(self.root))
         self.mock(hostops, "ROOTS", new={"workspace": self.workspace})
@@ -3571,6 +3574,8 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.owner_session = self.mock(runner, "_supervisor_owner_session", return_value=(self.owner, self.desktop))
         self.user_config = self.mock(runner, "_user_runtime_config", return_value=None)
         self.config_read = self.mock(runner, "_observe_only_config", return_value=(None, self.config_pin))
+        self.read_retirement_custody = runner._supervisor_retirement_custody
+        self.retirement_custody = self.mock(runner, "_supervisor_retirement_custody")
         self.active = self.mock(runner, "_supervisor_active", return_value=False)
         self.mock(runner, "_supervisor_deployment_value", side_effect=self.values.get)
         self.store = self.mock(runner, "_store_supervisor_deployment_value", side_effect=self.values.__setitem__)
@@ -3630,6 +3635,7 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
             self.assertTrue(env.get("AI_COMMERCE_SUPERVISOR_PRIOR_ARGUMENTS", "").endswith(" $(Arg0)"))
             if self.migrate_result == "MIGRATED":
                 self.state = "READY"
+                self.prior_task_definition = False
             return SimpleNamespace(stdout=self.migrate_result.encode("ascii"))
         if mode == "prove_upgrade":
             guid = env["AI_COMMERCE_SUPERVISOR_PENDING_GUID"]
@@ -3640,8 +3646,18 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
             nonce = self.prior["nonce"] if guid == self.prior["instance"] else self.replacement_nonce
             if not self.upgrade_process_matches:
                 nonce = "0" * 32
+            prefix = b""
+            if self.prior_task_definition:
+                action = env.get("AI_COMMERCE_SUPERVISOR_PRIOR_ARGUMENTS")
+                if not action:
+                    return SimpleNamespace(stdout=b"CONFLICT")
+                prefix = b"PRIOR+"
             commandline = subprocess.list2cmdline([str(self.executable)]) + " " + action.replace("$(Arg0)", nonce)
-            return SimpleNamespace(stdout=base64.b64encode(commandline.encode("utf-8")))
+            return SimpleNamespace(stdout=prefix + base64.b64encode(commandline.encode("utf-8")))
+        if mode == "inspect" and self.prior_task_definition:
+            if not env.get("AI_COMMERCE_SUPERVISOR_PRIOR_ARGUMENTS"):
+                return SimpleNamespace(stdout=b"CONFLICT")
+            return SimpleNamespace(stdout=b"PRIOR_READY" if self.state == "READY" else self.state.encode("ascii"))
         if mode == "install":
             self.assertEqual(self.state, "MISSING")
             self.state = "READY"
@@ -3877,12 +3893,12 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         prior = {**self.intent(self.nonce), "instance": self.instance}
         self.values["Run"] = json.dumps(prior)
         self.publish_health(health="CHROME_OBSERVATION_HOLD", mode=self.runtime._CHROME_HEALTH_ONLY)
-        browser = self.mock(hostops, "_supervisor_upgrade_chrome_pin")
+        browser = self.mock(hostops, "_supervisor_upgrade_chrome_pin", return_value="PROFILE_LOCK_HOLD")
 
         receipt = self.dispatch_task_probe()
         self.assertEqual((receipt["status"], receipt["code"]), (
-            "OBSERVED", "TASK_INSTANCE_PRESENT+CHROME_OBSERVATION_HOLD+RUN_MATCH+MUTEX_ACTIVE"
-            "+HEALTH_MATCH_LIVE+UPGRADE_ABSENT",
+            "OBSERVED", self.active_probe_code("ACTIVE_READ_CHECKS_COMPLETE", "PROFILE_LOCK_HOLD",
+                                               "CURRENT_SOURCE_EXACT", custody="ACTIVE_CUSTODY_CHECK_SKIPPED"),
         ))
 
         self.state = "8c7770e8-3c62-4163-9c9f-d75621d3ca53"
@@ -3897,8 +3913,8 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
             "pid": 123, "created": 456, "target": "a" * 64, "chrome": "b" * 64,
         })
         self.assertEqual(self.dispatch_task_probe()["code"],
-                         "TASK_INSTANCE_PRESENT+UPGRADE_MATCH_RUN+RUN_MATCH+MUTEX_ACTIVE"
-                         "+HEALTH_MATCH_LIVE+UPGRADE_MATCH_RUN")
+                         self.active_probe_code("UPGRADE_MATCH_RUN", "PROFILE_LOCK_HOLD", "CURRENT_SOURCE_EXACT",
+                                                custody="ACTIVE_CUSTODY_CHECK_SKIPPED", upgrade="UPGRADE_MATCH_RUN"))
 
         self.probe_state = "TASK_BUSY"
         receipt = self.dispatch_task_probe()
@@ -3908,24 +3924,24 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         ))
         self.assertNotIn("StartPending", self.values)
         self.assertEqual(set(self.modes), {"probe", "inspect"})
-        browser.assert_not_called()
+        self.assertEqual(browser.call_count, 2)
         self.assert_task_probe_has_no_effects(config_inspected=True)
 
-    def test_task_probe_reports_source_failures_before_browser_proof(self):
+    def test_task_probe_reports_source_failures_alongside_browser_hold(self):
         self.probe_state = "TASK_INSTANCE_PRESENT"
         self.state = self.instance
-        browser = self.mock(hostops, "_supervisor_upgrade_chrome_pin")
+        browser = self.mock(hostops, "_supervisor_upgrade_chrome_pin", return_value="PROFILE_LOCK_HOLD")
         task_run = hostops.subprocess.run
         git_run = Mock()
         self.mock(hostops.subprocess, "run", side_effect=lambda argv, **kwargs: (
             git_run(argv, **kwargs) if argv[0] == "git" else task_run(argv, **kwargs)
         ))
 
-        def check(stage):
+        def check(stage, *, custody="ACTIVE_CUSTODY_CLEAR"):
             before = dict(self.values)
             receipt = self.dispatch_task_probe()
             self.assertEqual((receipt["status"], receipt["code"]), (
-                "OBSERVED", f"TASK_INSTANCE_PRESENT+{stage}+RUN_MATCH+MUTEX_ACTIVE+HEALTH_MATCH_LIVE+UPGRADE_ABSENT",
+                "OBSERVED", self.active_probe_code(stage, "PROFILE_LOCK_HOLD", stage, custody=custody),
             ))
             self.assertEqual(self.values, before)
 
@@ -3933,7 +3949,7 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         intent = {**self.intent(self.nonce), "instance": self.instance, "source_digest": wrong_digest}
         self.values["Run"] = json.dumps(intent)
         self.publish_health(source_digest=wrong_digest, health="CHROME_OWNED")
-        check("ACTIVE_SOURCE_CURRENT_DIGEST_MISMATCH")
+        check("ACTIVE_SOURCE_CURRENT_DIGEST_MISMATCH", custody="ACTIVE_CUSTODY_CHECK_SKIPPED")
         git_run.assert_not_called()
 
         prior = "2" * 40
@@ -3947,6 +3963,8 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
 
         prior_reads = [output(prior.encode() + b"\n"), output(b""),
                        output(b"100644 blob " + oid + b"\tsrc/ai_commerce/wakehub_runtime/runner.py\0")]
+        self.publish_health(mode=self.runtime._OPERATIONAL_TICK_V1, source_sha=prior,
+                            source_digest=wrong_digest, health="CHROME_OWNED")
         for batch, stage in (
             (subprocess.TimeoutExpired("PRIVATE", 15), "ACTIVE_SOURCE_BATCH_TIMEOUT"),
             (FileNotFoundError("PRIVATE"), "ACTIVE_SOURCE_BATCH_UNAVAILABLE"),
@@ -3958,7 +3976,11 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
                 git_run.side_effect = [*prior_reads, batch]
                 check(stage)
 
-        browser.assert_not_called()
+        self.assertEqual(browser.call_count, 6)
+        self.publish_health(mode=self.runtime._CHROME_HEALTH_ONLY, source_sha=prior,
+                            source_digest=wrong_digest, health="ENROLLMENT_PROFILE_LOCK_UNPROVEN")
+        git_run.side_effect = [*prior_reads[:2], subprocess.TimeoutExpired("PRIVATE", 15)]
+        check("ACTIVE_SOURCE_RUNNER_TIMEOUT")
         self.assertFalse(hostops._is_valid_supervisor_task_probe_code(
             "TASK_INSTANCE_PRESENT+ACTIVE_SOURCE_BATCH_PRIVATE+RUN_MATCH+MUTEX_ACTIVE+HEALTH_MATCH_LIVE+UPGRADE_ABSENT",
         ))
@@ -4782,12 +4804,18 @@ $out | ConvertTo-Json -Compress
         self.config_pin = self.runtime._legacy_health_config(self.workspace, self.owner)[1]
         self.launch.side_effect = start
         held = self.dispatch()
-        self.assertEqual((held["status"], held["code"]), ("HOLD", "CDP_PROTOCOL_UNAVAILABLE"))
+        self.assertEqual((held["status"], held["code"]),
+                         ("HOLD", "SUPERVISOR_STARTED_HEALTH_OBSERVED+CDP_PROTOCOL_UNAVAILABLE"))
         self.assertIsNone(self.values["StartPending"])
         intent = json.loads(self.values["Run"])
         self.assertEqual(intent["config"], str(self.config))
         nonce = intent["nonce"]
-        self.publish_health(nonce=nonce, mode=self.runtime._CHROME_HEALTH_ONLY)
+        self.publish_health(nonce=nonce, mode=self.runtime._CHROME_HEALTH_ONLY, health="CHROME_ABSENT")
+        absent = self.dispatch()
+        self.assertEqual((absent["status"], absent["code"]),
+                         ("HOLD", "SUPERVISOR_REUSED_HEALTH_OBSERVED+CHROME_ABSENT"))
+        self.publish_health(nonce=nonce, mode=self.runtime._CHROME_HEALTH_ONLY, health="CHROME_OWNED")
+        self.mock(hostops, "_supervisor_upgrade_chrome_pin", return_value="2" * 64)
         receipt = self.dispatch()
         self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED"))
         self.assertFalse(receipt["wake_sent"])
@@ -4851,6 +4879,18 @@ $out | ConvertTo-Json -Compress
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_ACTIVE_UNVERIFIED")
         self.assertEqual(set(self.modes), {"inspect"})
 
+    def prior_startup(self, **changes):
+        pins = {key: self.prior[key] for key in (*self.runtime._ENROLLMENT_PINS, "config_digest")}
+        row = {**pins, "schema": "WakeHubSupervisorStartupReceipt.v1", "stage": "FIRST_HEALTH",
+               "reason": "HEALTH_PUBLISHED", "correlated": True, "pid": 123, "observed_ns": 98_000_000_000}
+        self.values["StartupReceipt"] = json.dumps({**row, **changes})
+
+    @staticmethod
+    def active_probe_code(stage, browser, source, *, config="ACTIVE_CONFIG_MATCH", custody="ACTIVE_CUSTODY_CLEAR",
+                          health="HEALTH_MATCH_LIVE", upgrade="UPGRADE_ABSENT"):
+        return "+".join(("TASK_INSTANCE_PRESENT", stage, "RUN_MATCH", "MUTEX_ACTIVE", health, upgrade,
+                         config, browser, source, custody))
+
     def stale_supervisor(self, *, operational=False, health="CHROME_OWNED", mock_browser=True, mock_history=True):
         self.approval["comment"]["id"] = 1001
         self.state = self.instance
@@ -4879,6 +4919,10 @@ $out | ConvertTo-Json -Compress
         self.assertEqual((reserved["issue"], reserved["comment"], reserved["pid"], reserved["created"]),
                          (17, 1001, 123, 456))
         self.assertEqual(json.loads(reserved["run"]), self.prior)
+        if self.supervisor_mode != self.runtime._OPERATIONAL_TICK_V1:
+            raw_archive = self.values[f"RetiredRun_{self.prior['nonce']}"]
+            self.assertEqual(hashlib.sha256(raw_archive.encode()).hexdigest(), reserved["archive"])
+            self.assertEqual(json.loads(raw_archive)["run"], reserved["run"])
         self.assertEqual(self.values["Run"], reserved["run"])
         self.assertIsNone(self.values.get("StartPending"))
         self.stop_effect(pid, created)
@@ -4903,31 +4947,33 @@ $out | ConvertTo-Json -Compress
         self.values["RetiredPending_old"] = "original historical UNKNOWN"
         receipt = self.dispatch()
         self.assertEqual((receipt["status"], receipt["code"], receipt["source_sha"]),
-                         ("OBSERVED", "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED", self.sha))
+                         ("HOLD", "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED+CHROME_CONTINUITY_UNKNOWN", self.sha))
         self.assertFalse(receipt["wake_sent"])
         self.assertFalse(receipt["exact_chat_verified"])
         self.assertNotIn(self.prior["instance"], json.dumps(receipt))
         self.history.assert_called_once_with(self.workspace, self.prior["source_sha"], self.prior["source_digest"],
-                                             self.sha, self.source, require_rehashed=True, allow_legacy_retirement=True)
+                                             self.sha, self.source, retirement_only=True)
         self.assertEqual(self.config.read_bytes(), b"existing Chrome config")
         self.assertEqual(self.values["RetiredPending_old"], "original historical UNKNOWN")
         self.assertEqual(json.loads(self.values["Run"]), {**self.intent(self.launch.call_args.args[0]),
                                                           "instance": self.state})
         self.assertIsNone(self.values["UpgradePending"])
         self.assertIsNone(self.values["StartPending"])
-        self.assertEqual(self.dispatch(), receipt)
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED")
         self.stop.assert_called_once()
         self.stop_effect.assert_called_once_with(123, 456)
         self.launch.assert_called_once()
-        self.assertEqual(self.modes.count("prove_upgrade"), 2)
+        self.assertEqual(self.modes.count("prove_upgrade"), 3)
         self.assertNotIn("install", self.modes)
         self.spawn.assert_not_called()
 
     def mock_owned_legacy_chrome(self, env):
         marker = env.user_data_dir / "lockfile"
         marker.write_bytes(b"opaque marker")
+        created = "2026-11-26T01:00:00Z"
         proc = {"ProcessId": 700, "ExecutablePath": str(env.executable), "CommandLine": json.dumps(env.command()),
-                "SessionId": self.owner[1], "OwnerSid": self.owner[2], "CreationDate": "2026-11-26T01:00:00Z"}
+                "SessionId": self.owner[1], "OwnerSid": self.owner[2], "CreationDate": created,
+                "CreatedTicks": acquisition._creation_ticks(created)}
         inventory = {"listeners": [{"OwningProcess": 700, "LocalAddress": "127.0.0.1", "LocalPort": 9444}],
                      "processes": [proc]}
         expected = acquisition._legacy_health_inventory(env, inventory, session=self.owner[1], sid=self.owner[2])
@@ -4951,8 +4997,8 @@ $out | ConvertTo-Json -Compress
         self.env["AI_COMMERCE_WAKEHUB_CONFIG"] = str(self.config)
         before = dict(self.values)
         self.assertEqual(self.dispatch_task_probe()["code"],
-                         "TASK_INSTANCE_PRESENT+ACTIVE_READ_CHECKS_COMPLETE+RUN_MATCH+MUTEX_ACTIVE"
-                         "+HEALTH_MATCH_LIVE+UPGRADE_ABSENT")
+                         self.active_probe_code("ACTIVE_LEGACY_RETIREMENT_ELIGIBLE", "CHROME_OWNED",
+                                                "GIT_HISTORY_REHASHED"))
         self.assertEqual(self.values, before)
         self.store.assert_not_called()
         self.stop.assert_not_called()
@@ -4968,10 +5014,13 @@ $out | ConvertTo-Json -Compress
         self.approval = approval
         self.env["GITHUB_EVENT_NAME"] = "issue_comment"
         receipt = self.dispatch()
-        self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED"))
-        self.assertEqual(observed, [prior_guid] * 4 + ["READY"] * 2 + [self.state] * 2)
-        self.assertEqual(query.call_count, 10)
-        self.assertEqual(holder.call_count, 10)
+        self.assertEqual((receipt["status"], receipt["code"]),
+                         ("OBSERVED", "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED+CHROME_CONTINUITY_SAME"))
+        self.assertEqual(observed, [self.state] * 2)
+        self.assertEqual(query.call_count, 6)
+        self.assertEqual([call.kwargs for call in query.call_args_list if call.kwargs],
+                         [{"listener_only": True}, {"listener_only": True}])
+        self.assertEqual(holder.call_count, 4)
         holder.assert_called_with(marker)
         native.assert_called_with(env, *self.owner, expected[1][1][0])
         self.assertEqual(json.loads(self.values["Health"])["health"], "CHROME_OWNED")
@@ -4979,39 +5028,141 @@ $out | ConvertTo-Json -Compress
         self.assertIsNone(self.values["UpgradePending"])
         self.assertIsNone(self.values["StartPending"])
         self.assertEqual((self.config.read_bytes(), marker.read_bytes()), (config_bytes, b"opaque marker"))
-        self.assertEqual(self.dispatch(), receipt)
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED")
         self.stop_effect.assert_called_once_with(123, 456)
         self.launch.assert_called_once()
         self.spawn.assert_not_called()
 
-    def test_legacy_lock_hold_requires_owned_proof_and_unchanged_chrome_at_reservation(self):
+    def test_legacy_retirement_migrates_only_exact_obsolete_registration_after_exit(self):
         self.stale_supervisor(health="ENROLLMENT_PROFILE_LOCK_UNPROVEN")
+        self.prior_task_definition = True
+
+        def start(nonce):
+            self.stop_effect.assert_called_once()
+            self.assertFalse(self.prior_task_definition)
+            self.assertEqual(self.modes.count("migrate"), 1)
+            return self.start_replacement(nonce)
+
+        self.launch.side_effect = start
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED+CHROME_CONTINUITY_UNKNOWN")
+        self.assertNotIn("install", self.modes)
+        self.launch.assert_called_once()
+
+    def test_retirement_holds_read_only_on_same_listener_pid_with_different_creation_time(self):
+        env, _ = self.setup_legacy_health_only_config()
+        self.stale_supervisor(health="ENROLLMENT_PROFILE_LOCK_UNPROVEN", mock_browser=False)
+        marker, _, query, _, holder, observed = self.mock_owned_legacy_chrome(env)
+        config_before = self.config.read_bytes()
+        inventory = query.return_value
+        process, = inventory["processes"]
+        replacement = {**inventory, "processes": [{**process, "CreatedTicks": process["CreatedTicks"] + 1}]}
+        query.side_effect = lambda port, *, listener_only=False: (
+            replacement if listener_only and self.state != self.instance else inventory
+        )
+        holder.side_effect = acquisition._EnrollmentHold("LEGACY_MARKER_HOLDER_UNPROVEN")
+
+        receipt = self.dispatch()
+        self.assertEqual((receipt["status"], receipt["code"]), (
+            "HOLD", "SUPERVISOR_STARTED_HEALTH_OBSERVED+LEGACY_MARKER_HOLDER_UNPROVEN+CHROME_CONTINUITY_CHANGED",
+        ))
+        reserved = json.loads(self.values["UpgradePending"])
+        self.assertEqual(reserved["chrome_conflict"], "CHROME_CONTINUITY_CHANGED")
+        self.assertIsNotNone(self.values["StartPending"])
+        archive = json.loads(self.values[f"RetiredRun_{self.prior['nonce']}"])
+        self.assertEqual(json.loads(archive["run"]), self.prior)
         before = dict(self.values)
-        self.browser.side_effect = acquisition._EnrollmentHold("ENROLLMENT_PROFILE_LOCK_UNPROVEN")
-        self.assertEqual(self.dispatch()["code"], "ENROLLMENT_PROFILE_LOCK_UNPROVEN")
-        self.browser.side_effect = acquisition.AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
-        self.assertEqual(self.dispatch()["code"], "POWERSHELL_UNAVAILABLE")
-        self.stop.assert_not_called()
-        self.browser.side_effect = ["2" * 64, "3" * 64]
-        self.assertEqual(self.dispatch()["code"], "CHROME_OBSERVATION_CHANGED")
-        self.assertTrue(all(call.kwargs == {"expected_health": "CHROME_OWNED"} for call in self.browser.call_args_list))
+        self.store.reset_mock()
+        query.side_effect = None  # A later healthy observation cannot erase the conflict.
+        self.assertEqual(self.dispatch(), receipt)
         self.assertEqual(self.values, before)
+        self.store.assert_not_called()
+        self.assertEqual((self.config.read_bytes(), marker.read_bytes()), (config_before, b"opaque marker"))
+        self.assertEqual(observed, [])
+        self.stop_effect.assert_called_once_with(123, 456)
+        self.launch.assert_called_once()
+        self.spawn.assert_not_called()
+
+    def test_retirement_with_unprovable_pre_observation_does_not_claim_continuity(self):
+        env, _ = self.setup_legacy_health_only_config()
+        self.stale_supervisor(health="ENROLLMENT_PROFILE_LOCK_UNPROVEN", mock_browser=False)
+        _, _, query, _, _, _ = self.mock_owned_legacy_chrome(env)
+        inventory = query.return_value
+
+        def observe(port, *, listener_only=False):
+            self.assertEqual(port, 9444)
+            if listener_only and self.state == self.instance:
+                raise acquisition.AcquisitionBlocked("WINDOWS_PROBE_OWNER_FAILED")
+            return inventory
+
+        query.side_effect = observe
+        receipt = self.dispatch()
+        self.assertEqual((receipt["status"], receipt["code"]), (
+            "HOLD", "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED+CHROME_CONTINUITY_UNKNOWN",
+        ))
+        self.assertIsNone(self.values["UpgradePending"])
+        self.assertIsNone(self.values["StartPending"])
+        self.stop_effect.assert_called_once_with(123, 456)
+        self.launch.assert_called_once()
+        self.spawn.assert_not_called()
+
+    def test_retirement_reports_foreign_listener_before_any_stop_effect(self):
+        env, _ = self.setup_legacy_health_only_config()
+        self.stale_supervisor(health="ENROLLMENT_PROFILE_LOCK_UNPROVEN", mock_browser=False)
+        _, _, query, _, holder, _ = self.mock_owned_legacy_chrome(env)
+        process, = query.return_value["processes"]
+        query.return_value["processes"] = [{**process, "SessionId": self.owner[1] + 1}]
+        before = dict(self.values)
+
+        receipt = self.dispatch()
+        self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "CHROME_CONTINUITY_FOREIGN"))
+        self.assertEqual(self.values, before)
+        query.assert_called_once_with(9444, listener_only=True)
+        holder.assert_not_called()
         self.store.assert_not_called()
         self.stop_effect.assert_not_called()
         self.launch.assert_not_called()
 
+    def test_retirement_without_rehash_or_receipt_requires_independent_mode_proof(self):
+        self.stale_supervisor(health="PROFILE_LOCK_HOLD")
+        self.history.return_value = hostops._SUPERVISOR_LEGACY_RETIREMENT
+        self.retirement_custody.side_effect = self.runtime.RuntimeHold("SUPERVISOR_RETIREMENT_MODE_UNVERIFIED")
+        before = dict(self.values)
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_RETIREMENT_MODE_UNVERIFIED")
+        self.assertEqual(self.values, before)
+        self.stop.assert_not_called()
+        self.launch.assert_not_called()
+
+    def test_retirement_with_lost_archive_preserves_upgrade_and_starts_nothing(self):
+        self.stale_supervisor(health="PROFILE_LOCK_HOLD")
+
+        def stop_then_lose_archive(*args):
+            self.stop_stale_supervisor(*args)
+            self.values[f"RetiredRun_{self.prior['nonce']}"] = "unreadable archive"
+
+        self.stop.side_effect = stop_then_lose_archive
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_RETIREMENT_ARCHIVE_UNVERIFIED")
+        self.assertIsNotNone(self.values["UpgradePending"])
+        self.assertEqual(json.loads(self.values["Run"]), self.prior)
+        self.stop_effect.assert_called_once()
+        self.launch.assert_not_called()
+
+    def test_legacy_lock_hold_does_not_authorize_a_changed_pid_at_the_stop_checkpoint(self):
+        self.stale_supervisor(health="ENROLLMENT_PROFILE_LOCK_UNPROVEN")
         prove_task_process = hostops._supervisor_upgrade_task_process
 
-        def prove_then_change_health(*args):
-            matched = prove_task_process(*args)
-            health = json.loads(self.values["Health"])
-            self.publish_health(**dict(health, pid=124, created=999, health="CHROME_OBSERVATION_HOLD"))
+        def prove_then_change_health(*args, **kwargs):
+            matched = prove_task_process(*args, **kwargs)
+            if self.stop.called:
+                # Change identity after the task proof inside the stop checkpoint.
+                health = json.loads(self.values["Health"])
+                self.publish_health(**dict(health, pid=124, created=999))
             return matched
 
-        self.browser.side_effect = None
         with patch.object(hostops, "_supervisor_upgrade_task_process", side_effect=prove_then_change_health):
             self.assertEqual(self.dispatch()["code"], "SUPERVISOR_ACTIVE_UNVERIFIED")
+        self.stop.assert_called_once()
         self.live_process.assert_any_call(124, self.executable, self.owner)
+        self.browser.assert_not_called()
         self.store.assert_not_called()
         self.stop_effect.assert_not_called()
         self.launch.assert_not_called()
@@ -5019,8 +5170,7 @@ $out | ConvertTo-Json -Compress
     def test_protected_legacy_read_keeps_exact_chrome_failure_stage(self):
         env, value = self.setup_legacy_health_only_config()
         self.stale_supervisor(health="CHROME_OBSERVATION_HOLD", mock_browser=False)
-        approval = self.approval
-        marker, _, query, _, _, _ = self.mock_owned_legacy_chrome(env)
+        marker, _, query, _, holder, _ = self.mock_owned_legacy_chrome(env)
         self.env["AI_COMMERCE_WAKEHUB_CONFIG"] = str(self.config)
         self.probe_state = "TASK_INSTANCE_PRESENT"
         inventory = query.return_value
@@ -5034,7 +5184,8 @@ $out | ConvertTo-Json -Compress
         def check(code):
             receipt = self.dispatch_task_probe()
             self.assertEqual((receipt["status"], receipt["code"]), (
-                "OBSERVED", f"TASK_INSTANCE_PRESENT+{code}+RUN_MATCH+MUTEX_ACTIVE+HEALTH_MATCH_LIVE+UPGRADE_ABSENT",
+                "OBSERVED", self.active_probe_code("ACTIVE_LEGACY_RETIREMENT_ELIGIBLE", code,
+                                                   "GIT_HISTORY_REHASHED"),
             ))
             self.assertEqual(self.values, before)
 
@@ -5054,6 +5205,13 @@ $out | ConvertTo-Json -Compress
         query.side_effect = [foreign]
         check("BROWSER_OWNERSHIP_UNPROVEN")
         query.side_effect = None
+        for code in sorted(acquisition._LEGACY_MARKER_HOLDS):
+            with self.subTest(code=code):
+                holder.side_effect = acquisition._EnrollmentHold(code)
+                check(code)
+        holder.side_effect = OSError("PRIVATE_MARKER_DETAIL")
+        check("LEGACY_MARKER_ACCESS_UNPROVEN")
+        holder.side_effect = None
         with patch.object(acquisition, "_probe_cdp", side_effect=RuntimeError("PRIVATE_CDP")):
             check("CDP_PROTOCOL_UNAVAILABLE")
         with patch.object(acquisition, "_supervisor_9444_config", side_effect=OSError("PRIVATE_CONFIG")):
@@ -5063,19 +5221,27 @@ $out | ConvertTo-Json -Compress
         query.return_value = absent
         check("ENROLLMENT_PROFILE_LOCK_UNPROVEN")
         marker.unlink()
-        check("ACTIVE_CHROME_OWNED_REQUIRED")
+        check("CHROME_ABSENT")
         self.assertEqual(json.loads(self.config.read_bytes()), value)
         self.assert_task_probe_has_no_effects(config_inspected=True)
 
-        self.approval = approval
-        self.env["GITHUB_EVENT_NAME"] = "issue_comment"
-        query.side_effect = acquisition.AcquisitionBlocked("PROCESS_IDENTITY_UNKNOWN")
+
+    def test_foreign_browser_after_start_keeps_runtime_and_effect_fence_on_hold(self):
+        self.stale_supervisor(health="ENROLLMENT_PROFILE_LOCK_UNPROVEN")
+        self.browser.side_effect = acquisition.AcquisitionBlocked("FOREIGN_PORT_OWNER")
         receipt = self.dispatch()
-        self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "PROCESS_IDENTITY_UNKNOWN"))
+        self.assertEqual((receipt["status"], receipt["code"]),
+                         ("HOLD", "SUPERVISOR_STARTED_HEALTH_OBSERVED+FOREIGN_PORT_OWNER+CHROME_CONTINUITY_FOREIGN"))
+        before = dict(self.values)
+        self.store.reset_mock()
+        self.assertEqual(self.dispatch(), receipt)
         self.assertEqual(self.values, before)
         self.store.assert_not_called()
-        self.stop.assert_not_called()
-        self.launch.assert_not_called()
+        self.assertFalse(receipt["wake_sent"])
+        self.assertIsNotNone(self.values["StartPending"])
+        self.assertEqual(json.loads(self.values["UpgradePending"])["chrome_conflict"], "CHROME_CONTINUITY_FOREIGN")
+        self.stop_effect.assert_called_once()
+        self.launch.assert_called_once()
 
     def test_upgrade_rejects_health_outside_stale_legacy_browser_holds(self):
         self.stale_supervisor()
@@ -5097,7 +5263,7 @@ $out | ConvertTo-Json -Compress
         self.values["Run"] = json.dumps({**self.intent(self.nonce), "instance": self.instance})
         self.publish_health(mode=self.runtime._CHROME_HEALTH_ONLY, health="CHROME_OBSERVATION_HOLD")
         before = dict(self.values)
-        self.assertEqual(self.dispatch()["code"], "CHROME_OBSERVATION_HOLD")
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_REUSED_HEALTH_OBSERVED+CHROME_OBSERVATION_HOLD")
         self.assertEqual(self.values, before)
         self.history.assert_not_called()
         self.browser.assert_not_called()
@@ -5105,20 +5271,25 @@ $out | ConvertTo-Json -Compress
         self.stop.assert_not_called()
         self.launch.assert_not_called()
 
-    def test_legacy_lock_upgrade_waits_for_positive_replacement_health(self):
+    def test_legacy_lock_upgrade_commits_current_run_while_browser_holds(self):
         self.stale_supervisor(health="ENROLLMENT_PROFILE_LOCK_UNPROVEN")
 
         def start_held(nonce):
             instance = self.start_replacement(nonce)
             health = json.loads(self.values["Health"])
-            self.publish_health(**dict(health, health="ENROLLMENT_PROFILE_LOCK_UNPROVEN"))
+            self.publish_health(**dict(health, health="LEGACY_MARKER_HOLDER_UNPROVEN"))
             return instance
 
         self.launch.side_effect = start_held
-        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_START_UNKNOWN")
-        self.assertIsNotNone(self.values["UpgradePending"])
-        self.assertIsNotNone(self.values["StartPending"])
-        self.assertIsNone(self.values["Run"])
+        receipt = self.dispatch()
+        self.assertEqual((receipt["status"], receipt["code"]),
+                         ("HOLD", "SUPERVISOR_STARTED_HEALTH_OBSERVED+LEGACY_MARKER_HOLDER_UNPROVEN"
+                                  "+CHROME_CONTINUITY_UNKNOWN"))
+        self.assertIsNone(self.values["UpgradePending"])
+        self.assertIsNone(self.values["StartPending"])
+        self.assertEqual(json.loads(self.values["Run"])["nonce"], self.replacement_nonce)
+        self.assertEqual(self.dispatch()["code"],
+                         "SUPERVISOR_REUSED_HEALTH_OBSERVED+LEGACY_MARKER_HOLDER_UNPROVEN")
         health = json.loads(self.values["Health"])
         self.publish_health(**dict(health, health="CHROME_OWNED"))
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED")
@@ -5142,7 +5313,7 @@ $out | ConvertTo-Json -Compress
         self.runtime._supervisor_slot.side_effect = slot
         active = Mock(side_effect=lambda: self.dispatch()["code"])
         observe = Mock(return_value="read-only")
-        self.assertEqual(self.runtime._protected_operational_tick(active, observe), "SUPERVISOR_ACTIVE_UNVERIFIED")
+        self.assertEqual(self.runtime._protected_operational_tick(active, observe), "SUPERVISOR_OPERATIONAL_TICK_ACTIVE")
         self.store.assert_not_called()
         self.stop.assert_not_called()
 
@@ -5169,14 +5340,14 @@ $out | ConvertTo-Json -Compress
         self.stale_supervisor(health="CHROME_OBSERVATION_HOLD")
         clean = dict(self.values)
         for fault in ("missing_source", "reviewed_only", "instance", "pid", "creation", "owner", "desktop", "config",
-                      "nonce", "stale_health", "task_changed", "commandline", "enrollment", "start_pending",
-                      "upgrade_pending", "orphan_enrollment_receipt"):
+                      "nonce", "task_changed", "commandline", "enrollment", "start_pending",
+                      "upgrade_pending", "orphan_enrollment_receipt", "journal_corrupt", "delivery_unknown"):
             with self.subTest(fault=fault):
                 self.values.clear()
                 self.values.update(clean)
                 self.state = self.instance
                 self.history.return_value = {"missing_source": None, "reviewed_only": "REVIEWED_PRIOR_SHA_COMPATIBILITY"}.get(
-                    fault, hostops._SUPERVISOR_LEGACY_RETIREMENT,
+                    fault, "GIT_HISTORY_REHASHED",
                 )
                 run, health = (json.loads(self.values[key]) for key in ("Run", "Health"))
                 if fault == "instance":
@@ -5193,8 +5364,10 @@ $out | ConvertTo-Json -Compress
                     run["config_digest"] = "0" * 64
                 if fault == "nonce":
                     health["nonce"] = "0" * 32
-                if fault == "stale_health":
-                    health["observed_ns"] = 0
+                self.retirement_custody.side_effect = {
+                    "journal_corrupt": self.runtime.RuntimeHold("JOURNAL_CORRUPT"),
+                    "delivery_unknown": self.runtime.RuntimeHold("SUPERVISOR_DELIVERY_UNRESOLVED"),
+                }.get(fault)
                 self.upgrade_task_matches = fault != "task_changed"
                 self.upgrade_process_matches = fault != "commandline"
                 if fault == "enrollment":
@@ -5226,9 +5399,9 @@ $out | ConvertTo-Json -Compress
             raise OSError("PRIVATE stop reply lost")
 
         self.stop.side_effect = lose_stop
-        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_ACTIVE_UNVERIFIED")
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_STOP_UNKNOWN")
         reserved = self.values["UpgradePending"]
-        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_ACTIVE_UNVERIFIED")
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_STOP_UNKNOWN")
         self.state = "READY"
         self.active.return_value = False
         self.env["GITHUB_RUN_ATTEMPT"] = "2"
@@ -5237,7 +5410,7 @@ $out | ConvertTo-Json -Compress
         self.launch.assert_not_called()
         self.env["GITHUB_RUN_ATTEMPT"] = "1"
         self.approval["comment"]["id"] = 1002
-        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED")
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED+CHROME_CONTINUITY_UNKNOWN")
         self.stop.assert_called_once()
         self.launch.assert_called_once()
 
@@ -5250,7 +5423,7 @@ $out | ConvertTo-Json -Compress
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_START_UNKNOWN")
         self.assertEqual(self.values["StartPending"], pending)
         self.start_replacement(json.loads(pending)["nonce"])
-        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED")
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED+CHROME_CONTINUITY_UNKNOWN")
         self.assertIsNone(self.values["StartPending"])
         self.assertIsNone(self.values["UpgradePending"])
         self.stop.assert_called_once()
@@ -5273,15 +5446,11 @@ $out | ConvertTo-Json -Compress
         self.assertEqual(self.values, before)
         self.values["StartPending"] = pending
         before = dict(self.values)
-        self.browser.return_value = "3" * 64
-        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_START_UNKNOWN")
-        self.assertEqual(self.values, before)
-        self.browser.return_value = "2" * 64
         self.upgrade_process_matches = False
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_START_UNKNOWN")
         self.assertEqual(self.values, before)
         self.upgrade_process_matches = True
-        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED")
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED+CHROME_CONTINUITY_UNKNOWN")
         self.stop_effect.assert_called_once()
         self.launch.assert_called_once()
 
@@ -5297,7 +5466,10 @@ $out | ConvertTo-Json -Compress
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_START_UNKNOWN")
         self.assertEqual(json.loads(self.values["Run"])["nonce"], self.replacement_nonce)
         self.store.side_effect = self.values.__setitem__
-        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED")
+        code = "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED"
+        if interrupted_key != "UpgradePending":
+            code += "+CHROME_CONTINUITY_UNKNOWN"
+        self.assertEqual(self.dispatch()["code"], code)
         self.assertIsNone(self.values["StartPending"])
         self.assertIsNone(self.values["UpgradePending"])
         self.stop_effect.assert_called_once()
@@ -5320,7 +5492,7 @@ $out | ConvertTo-Json -Compress
             raise OSError("PRIVATE stop reply lost")
 
         self.stop.side_effect = stop_then_lose_reply
-        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED")
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED+CHROME_CONTINUITY_UNKNOWN")
         self.stop.assert_called_once()
         self.stop_effect.assert_called_once_with(123, 456)
         self.launch.assert_called_once()
@@ -5335,13 +5507,14 @@ $out | ConvertTo-Json -Compress
         self.launch.assert_called_once()
         self.approval["comment"]["id"] = 1002
         self.launch.side_effect = self.start_replacement
-        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED")
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED+CHROME_CONTINUITY_UNKNOWN")
         self.assertEqual(self.launch.call_count, 2)
         self.stop.assert_called_once()
 
     def test_upgrade_can_continue_on_a_verified_newer_main_after_observed_exit(self):
         self.stale_supervisor()
         self.history.return_value = hostops._SUPERVISOR_LEGACY_RETIREMENT
+        self.prior_startup()
         self.launch.return_value = "NOT_ATTEMPTED"
         self.launch.side_effect = None
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_START_NOT_ATTEMPTED")
@@ -5360,12 +5533,12 @@ $out | ConvertTo-Json -Compress
             reserved = json.loads(self.values["UpgradePending"])
             self.assertEqual((reserved["target_sha"], reserved["start_comment"], reserved["nonce"]),
                              (self.sha, 1002, nonce))
-            for key in ("run", "pid", "created", "comment", "chrome", "prior_source_provenance"):
+            for key in ("run", "pid", "created", "comment", "archive", "prior_source_provenance"):
                 self.assertEqual(reserved[key], prior[key])
             return self.start_replacement(nonce)
 
         self.launch.side_effect = start_newer
-        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED")
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED+CHROME_CONTINUITY_UNKNOWN")
         self.assertEqual(ancestry.call_args.args, (self.workspace, ("merge-base", "--is-ancestor", old_target, self.sha)))
         self.stop.assert_called_once()
         self.assertEqual(self.launch.call_count, 2)
@@ -5382,8 +5555,8 @@ $out | ConvertTo-Json -Compress
         self.stop.assert_called_once()
         self.launch.assert_called_once()
 
-    def test_upgrade_holds_after_stop_if_the_9444_listener_identity_changes(self):
-        self.stale_supervisor()
+    def test_operational_upgrade_holds_after_stop_if_the_9444_listener_identity_changes(self):
+        self.stale_supervisor(operational=True)
         self.browser.side_effect = ["2" * 64, "2" * 64, "3" * 64]
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_ACTIVE_UNVERIFIED")
         self.assertIsNotNone(self.values["UpgradePending"])
@@ -6235,30 +6408,31 @@ $results | ConvertTo-Json -Compress -Depth 4
             self.sha = self.env["GITHUB_SHA"] = current_sha
             self.source = current_digest
             env, _ = self.setup_legacy_health_only_config()
+            self.retirement_custody.side_effect = self.read_retirement_custody
+            self.mock(acquisition, "_clean_launch_pending", return_value=False)
             self.stale_supervisor(mock_history=False, mock_browser=False)
-            self.prior.update(source_sha=good_prior_sha, source_digest=good_mixed_digest)
+            self.prior.update(source_sha=good_prior_sha, source_digest=good_mixed_digest, config_digest="1" * 64)
             self.values["Run"] = json.dumps(self.prior)
             self.publish_health(source_sha=good_prior_sha, source_digest=good_mixed_digest,
-                                mode=self.supervisor_mode, health="CHROME_OBSERVATION_HOLD")
+                                config_digest=self.prior["config_digest"], observed_ns=0,
+                                mode=self.supervisor_mode, health="ENROLLMENT_PROFILE_LOCK_UNPROVEN")
             marker, _, _, _, holder, observed = self.mock_owned_legacy_chrome(env)
             config_bytes = self.config.read_bytes()
             startup = {key: self.prior[key] for key in (*self.runtime._ENROLLMENT_PINS, "config_digest")}
             startup.update(schema="WakeHubSupervisorStartupReceipt.v1", stage="FIRST_HEALTH",
-                           reason="PROCESS_IDENTITY_UNKNOWN", correlated=True, pid=123, observed_ns=98_000_000_000)
+                           reason="ENROLLMENT_PROFILE_LOCK_UNPROVEN", correlated=True, pid=123, observed_ns=98_000_000_000)
             self.values["StartupReceipt"] = json.dumps(startup)
 
             approval = self.approval
             self.probe_state = "TASK_INSTANCE_PRESENT"
             self.env["AI_COMMERCE_WAKEHUB_CONFIG"] = str(self.config)
-            holder.return_value = False
-            self.assertEqual(self.dispatch_task_probe()["code"],
-                             "TASK_INSTANCE_PRESENT+ENROLLMENT_PROFILE_LOCK_UNPROVEN+RUN_MATCH+MUTEX_ACTIVE"
-                             "+HEALTH_MATCH_LIVE+UPGRADE_ABSENT")
-            holder.return_value = True
-            self.assertEqual(self.dispatch_task_probe()["code"],
-                             "TASK_INSTANCE_PRESENT+ACTIVE_LEGACY_RETIREMENT_ELIGIBLE+RUN_MATCH+MUTEX_ACTIVE"
-                             "+HEALTH_MATCH_LIVE+UPGRADE_ABSENT")
-            self.assertEqual(observed, [self.instance] * 2)
+            holder.side_effect = acquisition._EnrollmentHold("LEGACY_MARKER_HOLDER_UNPROVEN")
+            self.assertEqual(self.dispatch_task_probe()["code"], self.active_probe_code(
+                "ACTIVE_LEGACY_RETIREMENT_ELIGIBLE", "LEGACY_MARKER_HOLDER_UNPROVEN",
+                hostops._SUPERVISOR_LEGACY_RETIREMENT, config="ACTIVE_CONFIG_DIGEST_MISMATCH",
+                health="HEALTH_MATCH_STALE",
+            ))
+            self.assertEqual(observed, [])
             self.store.assert_not_called()
             self.approval = approval
             self.env["GITHUB_EVENT_NAME"] = "issue_comment"
@@ -6270,9 +6444,6 @@ $results | ConvertTo-Json -Compress -Depth 4
                 self.values[key] = json.dumps(row)
                 self.assertEqual(self.dispatch()["code"], "SUPERVISOR_ACTIVE_UNVERIFIED")
                 self.values[key] = previous
-            holder.return_value = False
-            self.assertEqual(self.dispatch()["status"], "HOLD")
-            holder.return_value = True
             self.stop.assert_not_called()
             self.launch.assert_not_called()
             self.store.assert_not_called()
@@ -6292,13 +6463,16 @@ $results | ConvertTo-Json -Compress -Depth 4
                 self.assertEqual(json.loads(reservation["run"])["source_digest"], good_mixed_digest)
                 return self.start_replacement(nonce)
 
-            prior_guid = self.state
-            observed.clear()
             self.launch.side_effect = start
             receipt = self.dispatch()
             self.assertEqual((receipt["status"], receipt["code"]),
-                             ("OBSERVED", "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED"))
-            self.assertEqual(observed, [prior_guid] * 4 + ["READY"] * 2 + [self.state] * 2)
+                             ("HOLD", "SUPERVISOR_STARTED_HEALTH_OBSERVED+LEGACY_MARKER_HOLDER_UNPROVEN"
+                                      "+CHROME_CONTINUITY_SAME"))
+            self.assertEqual(observed, [])
+            archive = json.loads(self.values[f"RetiredRun_{self.prior['nonce']}"])
+            self.assertEqual(json.loads(archive["run"]), self.prior)
+            self.assertEqual(json.loads(archive["startup"]), startup)
+            self.assertEqual(json.loads(archive["health"])["observed_ns"], 0)
             self.assertEqual(json.loads(self.values["Run"]),
                              {**self.intent(self.replacement_nonce), "instance": self.state})
             health = json.loads(self.values["Health"])
@@ -6306,7 +6480,11 @@ $results | ConvertTo-Json -Compress -Depth 4
                              (current_sha, current_digest, "CHROME_OWNED"))
             self.assertIsNone(self.values["UpgradePending"])
             self.assertEqual((self.config.read_bytes(), marker.read_bytes()), (config_bytes, b"opaque marker"))
-            self.assertEqual(self.dispatch(), receipt)
+            self.assertEqual(self.dispatch()["code"],
+                             "SUPERVISOR_REUSED_HEALTH_OBSERVED+LEGACY_MARKER_HOLDER_UNPROVEN")
+            holder.side_effect = None
+            self.assertEqual(self.dispatch()["code"], "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED")
+            self.assertEqual(observed, [self.state] * 2)
             self.stop_effect.assert_called_once_with(123, 456)
             self.launch.assert_called_once()
             self.spawn.assert_not_called()
@@ -6401,13 +6579,15 @@ $results | ConvertTo-Json -Compress -Depth 4
         self.assertEqual(self.modes[:3], ["inspect_recovery", "inspect_recovery", "start"])
         self.launch.assert_called_once()
 
-        # Subsequent deploy sees live Run with CHROME_OBSERVATION_HOLD -> HOLD (no relaunch),
-        # then once Chrome becomes cleanly OFF (CHROME_ABSENT) -> OBSERVED.
+        # Deploy reports reuse alongside the browser HOLD. Fresh owned Chrome
+        # clears the browser HOLD while the same supervisor keeps running.
         self.approval = event("write", hostops._SUPERVISOR_DEPLOY, {})
         still_hold = self.dispatch()
-        self.assertEqual((still_hold["status"], still_hold["code"]), ("HOLD", "CHROME_OBSERVATION_HOLD"))
+        self.assertEqual((still_hold["status"], still_hold["code"]),
+                         ("HOLD", "SUPERVISOR_REUSED_HEALTH_OBSERVED+CHROME_OBSERVATION_HOLD"))
         self.launch.assert_called_once()
-        self.publish_health(nonce=run_record["nonce"], mode=self.runtime._CHROME_HEALTH_ONLY, health="CHROME_ABSENT")
+        self.publish_health(nonce=run_record["nonce"], mode=self.runtime._CHROME_HEALTH_ONLY, health="CHROME_OWNED")
+        self.mock(hostops, "_supervisor_upgrade_chrome_pin", return_value="2" * 64)
         now_observed = self.dispatch()
         self.assertEqual((now_observed["status"], now_observed["code"]), ("OBSERVED", "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED"))
         self.launch.assert_called_once()
