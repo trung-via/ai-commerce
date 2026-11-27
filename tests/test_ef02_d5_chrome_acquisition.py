@@ -5,7 +5,9 @@ import json
 import re
 import os
 import shutil
+import socket
 import stat
+import struct
 import subprocess
 import tempfile
 from types import SimpleNamespace
@@ -13,6 +15,107 @@ from unittest.mock import Mock
 
 import pytest
 from ai_commerce.remote import chrome_acquisition as ca
+
+
+def test_windows_tcp_table_keeps_both_families_and_filters_only_port():
+    def tcp4(address, port, pid):
+        return struct.pack("<I4sIIII", 2, socket.inet_aton(address), socket.htons(port), 0, 0, pid)
+
+    tcp6 = struct.pack("<16sII16sIIII", socket.inet_pton(socket.AF_INET6, "::"), 0,
+                       socket.htons(9444), bytes(16), 0, 0, 2, 999)
+    rows4 = struct.pack("<I", 2) + tcp4("127.0.0.1", 9444, 123) + tcp4("0.0.0.0", 9333, 456)
+    rows6 = struct.pack("<I", 1) + tcp6
+    assert ca._tcp_listener_rows(rows4, socket.AF_INET, 9444) == [
+        {"LocalAddress": "127.0.0.1", "LocalPort": 9444, "OwningProcess": 123},
+    ]
+    assert ca._tcp_listener_rows(rows6, socket.AF_INET6, 9444) == [
+        {"LocalAddress": "::", "LocalPort": 9444, "OwningProcess": 999},
+    ]
+    assert ca._tcp_listener_rows(bytes(4), socket.AF_INET, 9444) == []
+    with pytest.raises(ca.AcquisitionBlocked, match="^WINDOWS_PROBE_INVALID$"):
+        ca._tcp_listener_rows(rows6[:-1], socket.AF_INET6, 9444)
+
+
+def test_windows_inventory_retains_process_rows_and_checks_tcp_stability(monkeypatch):
+    listener = {"LocalAddress": "127.0.0.1", "LocalPort": 9444, "OwningProcess": 123}
+    processes = [{
+        "ProcessId": pid, "ParentProcessId": 123 if pid > 123 else 1, "SessionId": 7,
+        "CommandLine": "chrome.exe --remote-debugging-port=9444" if pid == 123 else "chrome.exe --type=renderer",
+        "ExecutablePath": r"C:\example\chrome.exe", "CreationDate": "2026-11-26T01:00:00Z",
+    } for pid in range(123, 223)]
+    query = Mock(return_value=[listener])
+    monkeypatch.setattr(ca, "_windows_tcp_listeners", query)
+    monkeypatch.setattr(ca, "_powershell", lambda: Path("pwsh.exe"))
+    run = Mock(return_value=SimpleNamespace(returncode=0, stdout=json.dumps({"processes": processes}).encode()))
+    monkeypatch.setattr(ca.subprocess, "run", run)
+
+    def read_owners(rows):
+        for row in rows:
+            row["OwnerSid"] = "S-1-5-21-101-202-303-1001"
+
+    read = Mock(side_effect=read_owners)
+    monkeypatch.setattr(ca, "_windows_process_owners", read)
+    result = ca._query_windows(9444)
+    assert result["listeners"] == [listener]
+    assert result["processes"] == [
+        {**row, "OwnerSid": "S-1-5-21-101-202-303-1001"} for row in processes
+    ]
+    read.assert_called_once()
+    run.assert_called_once()
+    script = run.call_args.args[0][-1]
+    assert script.startswith(ca._POWERSHELL_TASK_READ_PREAMBLE)
+    assert "Invoke-CimMethod" not in script and "Get-NetTCPConnection" not in script
+    assert "-OperationTimeoutSec 3" in script and run.call_args.kwargs["timeout"] == 8
+
+    query.side_effect = [[listener], [listener, {**listener, "LocalAddress": "::"}]]
+    with pytest.raises(ca.AcquisitionBlocked, match="^CHROME_OBSERVATION_CHANGED$"):
+        ca._query_windows(9444)
+
+
+@pytest.mark.parametrize("fault,code", [
+    ("tcp", "WINDOWS_PROBE_TCP_FAILED"),
+    ("timeout", "WINDOWS_PROBE_TIMEOUT"),
+    ("launch", "WINDOWS_PROBE_UNAVAILABLE"),
+    ("nonzero", "WINDOWS_PROBE_UNAVAILABLE"),
+    ("cim", "WINDOWS_PROBE_CIM_FAILED"),
+    ("serialize", "WINDOWS_PROBE_INVALID"),
+    ("encoding", "WINDOWS_PROBE_INVALID"),
+    ("shape", "WINDOWS_PROBE_INVALID"),
+    ("command", "PROCESS_IDENTITY_UNKNOWN"),
+    ("creation", "PROCESS_IDENTITY_UNKNOWN"),
+    ("owner", "WINDOWS_PROBE_OWNER_FAILED"),
+])
+def test_windows_inventory_failure_cannot_return_absence(monkeypatch, fault, code):
+    row = {
+        "ProcessId": 123, "ParentProcessId": 1, "SessionId": 7, "ExecutablePath": "chrome.exe",
+        "CommandLine": None if fault == "command" else "chrome.exe",
+        "CreationDate": None if fault == "creation" else "2026-11-26T01:00:00Z",
+    }
+    monkeypatch.setattr(ca, "_powershell", lambda: Path("pwsh.exe"))
+    tcp = Mock(return_value=[])
+    run = Mock(return_value=SimpleNamespace(
+        returncode={"nonzero": 1, "cim": 20, "serialize": 21}.get(fault, 0),
+        stdout={"encoding": b"\xff", "shape": b'{"processes":null}'}.get(
+            fault, json.dumps({"processes": [row]}).encode()),
+    ))
+    owners = Mock()
+    monkeypatch.setattr(ca, "_windows_tcp_listeners", tcp)
+    monkeypatch.setattr(ca.subprocess, "run", run)
+    monkeypatch.setattr(ca, "_windows_process_owners", owners)
+    if fault == "tcp":
+        tcp.side_effect = ca.AcquisitionBlocked(code)
+    elif fault == "timeout":
+        run.side_effect = subprocess.TimeoutExpired("private command", 8)
+    elif fault == "launch":
+        run.side_effect = OSError("private launch details")
+    elif fault == "owner":
+        owners.side_effect = ca.AcquisitionBlocked(code)
+    with pytest.raises(ca.AcquisitionBlocked, match=f"^{code}$"):
+        ca._query_windows(9444)
+    if fault == "tcp":
+        run.assert_not_called()
+    if fault != "owner":
+        owners.assert_not_called()
 
 
 @pytest.mark.parametrize("fault", [None, "absent", "foreign", "reparse", "readback"])
@@ -667,7 +770,7 @@ def test_repair_preflight_diagnostic_contract_has_exact_source_owned_code_catalo
     literal_enum = helper.split("$allowed = @(", 1)[1].split("\n    )", 1)[0]
     allowed = set(re.findall(r"'([A-Z0-9_]{3,90})'", literal_enum))
     defined = set(re.findall(r'AcquisitionBlocked\("([A-Z0-9_]+)"\)', acquisition))
-    assert allowed == defined and len(allowed) >= 25
+    assert allowed == defined - ca._ATTENDED_CLI_INVENTORY_HOLDS and len(allowed) >= 25
     assert "CHROME_ACQUISITION_BLOCKED: ([A-Z0-9_]{1,90})$" in helper
     assert "$seen.Count -ne 1" in helper
     assert "Write-Output $value" not in helper
@@ -677,6 +780,18 @@ def test_repair_preflight_diagnostic_contract_has_exact_source_owned_code_catalo
     assert "Out-File" not in helper
     assert "D5_WAKE_SENT=False" in script
     assert "[IO.File]::Replace(" in script
+
+
+@pytest.mark.parametrize("code", [*sorted(ca._WINDOWS_PROBE_FAILURE_CODES), "CHROME_OBSERVATION_CHANGED"])
+def test_attended_probe_reports_legacy_code_for_inventory_holds(monkeypatch, capsys, code):
+    monkeypatch.setenv("LOCALAPPDATA", "local")
+    monkeypatch.setattr(ca, "load_environment", Mock())
+    monkeypatch.setattr(ca, "run", Mock(side_effect=ca.AcquisitionBlocked(code)))
+
+    assert ca.main(["probe", "--config", "chrome.json", "--checkout", "."]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "CHROME_ACQUISITION_BLOCKED: WINDOWS_PROBE_UNAVAILABLE\n"
 
 
 def test_repair_preflight_diagnostic_decoder_native_powershell(tmp_path):

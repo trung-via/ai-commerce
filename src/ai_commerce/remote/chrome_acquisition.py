@@ -18,7 +18,9 @@ from os.path import normpath
 from pathlib import Path
 import re
 from secrets import token_hex
+import socket
 import stat
+from struct import Struct
 import subprocess
 import sys
 import time
@@ -29,22 +31,11 @@ from urllib.request import Request, ProxyHandler, HTTPRedirectHandler, build_ope
 
 _PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _-]{0,63}\Z")
 _MARKERS = ("SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile")
-_PROBE_SCRIPT = r"""
-[Console]::OutputEncoding=[Text.UTF8Encoding]::new()
-$ErrorActionPreference = 'Stop'
-$portNumber = [int]$env:AI_COMMERCE_ACQ_PROBE_PORT
-$listeners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop |
-    Where-Object { $_.LocalPort -eq $portNumber } |
-    Select-Object LocalAddress, LocalPort, OwningProcess)
-$processes = @(Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction Stop |
-    ForEach-Object {
-        $owner = Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid -ErrorAction Stop
-        [pscustomobject]@{ ProcessId=$_.ProcessId; ParentProcessId=$_.ParentProcessId; ExecutablePath=$_.ExecutablePath;
-            CommandLine=$_.CommandLine; SessionId=$_.SessionId; OwnerSid=$owner.Sid;
-            CreationDate=$_.CreationDate.ToUniversalTime().ToString('o') }
-    })
-@{listeners=$listeners; processes=$processes} | ConvertTo-Json -Depth 5 -Compress
-"""
+_WINDOWS_PROBE_FAILURE_CODES = frozenset({
+    "WINDOWS_PROBE_TCP_FAILED", "WINDOWS_PROBE_CIM_FAILED", "WINDOWS_PROBE_OWNER_FAILED",
+    "WINDOWS_PROBE_TIMEOUT",
+})
+_ATTENDED_CLI_INVENTORY_HOLDS = _WINDOWS_PROBE_FAILURE_CODES | {"CHROME_OBSERVATION_CHANGED"}
 
 
 class AcquisitionBlocked(ValueError):
@@ -530,7 +521,24 @@ def _powershell(*, owner_action: Callable[[Path], Path] | None = None) -> Path:
 _POWERSHELL_TASK_READ_PREAMBLE = r"""
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new()
-$env:PSModulePath = Join-Path $PSHOME 'Modules'
+$env:PSModulePath = [IO.Path]::Combine($PSHOME, 'Modules')
+"""
+
+_PROBE_SCRIPT = _POWERSHELL_TASK_READ_PREAMBLE + r"""
+try {
+    $rows = @(Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -OperationTimeoutSec 3 `
+        -Property ProcessId, ParentProcessId, ExecutablePath, CommandLine, SessionId, CreationDate)
+} catch { exit 20 }
+try {
+    $processes = @(foreach ($row in $rows) {
+        [pscustomobject]@{
+            ProcessId = $row.ProcessId; ParentProcessId = $row.ParentProcessId; ExecutablePath = $row.ExecutablePath
+            CommandLine = $row.CommandLine; SessionId = $row.SessionId
+            CreationDate = if ($null -ne $row.CreationDate) { $row.CreationDate.ToUniversalTime().ToString('o') }
+        }
+    })
+    ConvertTo-Json -InputObject @{processes = $processes} -Depth 3 -Compress
+} catch { exit 21 }
 """
 
 
@@ -618,26 +626,165 @@ def _probe_cdp(env: _ChromeTarget) -> None:
         raise AcquisitionBlocked("CDP_PROTOCOL_UNAVAILABLE") from None
 
 
+# MIB_TCP{,6}ROW_OWNER_PID, with remote fields skipped.
+_TCP4_ROW = Struct("<I4sI8xI")
+_TCP6_ROW = Struct("<16sII24xII")
+_TCP_COUNT = Struct("<I")
+
+
+def _tcp_listener_rows(buffer, family: int, port: int) -> list[dict]:
+    row = _TCP4_ROW if family == socket.AF_INET else _TCP6_ROW
+    if len(buffer) < _TCP_COUNT.size:
+        raise AcquisitionBlocked("WINDOWS_PROBE_INVALID")
+    count, = _TCP_COUNT.unpack_from(buffer)
+    size = _TCP_COUNT.size + count * row.size
+    if size > len(buffer):
+        raise AcquisitionBlocked("WINDOWS_PROBE_INVALID")
+    listeners = []
+    for fields in row.iter_unpack(memoryview(buffer)[_TCP_COUNT.size:size]):
+        if family == socket.AF_INET:
+            state, address, network_port, pid = fields
+            scope = 0
+        else:
+            address, scope, network_port, state, pid = fields
+        if state != 2:  # MIB_TCP_STATE_LISTEN
+            raise AcquisitionBlocked("WINDOWS_PROBE_INVALID")
+        if socket.ntohs(network_port & 0xffff) == port:
+            local_address = socket.inet_ntop(family, address)
+            if scope:
+                local_address += f"%{scope}"
+            listeners.append({"LocalAddress": local_address, "LocalPort": port, "OwningProcess": pid})
+    return listeners
+
+
+def _windows_tcp_listeners(port: int) -> list[dict]:
+    import ctypes as c
+    from ctypes import wintypes as w
+
+    try:
+        table = c.WinDLL("iphlpapi", winmode=0x800).GetExtendedTcpTable
+        table.argtypes = (c.c_void_p, c.POINTER(w.ULONG), w.BOOL, w.ULONG, c.c_int, w.ULONG)
+        table.restype = w.DWORD
+        listeners = []
+        for family in (socket.AF_INET, socket.AF_INET6):
+            size = w.ULONG()
+            buffer = None
+            for _ in range(3):  # Size discovery and bounded reallocation under TCP churn.
+                status = table(buffer, c.byref(size), False, family, 3, 0)  # TCP_TABLE_OWNER_PID_LISTENER
+                if status == 0 and buffer is not None and _TCP_COUNT.size <= size.value <= len(buffer):
+                    listeners.extend(_tcp_listener_rows(memoryview(buffer)[:size.value], family, port))
+                    break
+                if status != 122 or not _TCP_COUNT.size <= size.value <= 1024 * 1024:
+                    raise AcquisitionBlocked("WINDOWS_PROBE_TCP_FAILED")
+                buffer = c.create_string_buffer(size.value)
+            else:
+                raise AcquisitionBlocked("WINDOWS_PROBE_TCP_FAILED")
+        return sorted(listeners, key=lambda row: (row["LocalAddress"], row["OwningProcess"]))
+    except (AttributeError, OSError):
+        raise AcquisitionBlocked("WINDOWS_PROBE_TCP_FAILED") from None
+
+
+def _windows_process_owners(processes: list[dict]) -> None:
+    """Read local tokens on pinned process handles, without per-process CIM calls."""
+    if not processes:
+        return
+    import ctypes as c
+    from ctypes import wintypes as w
+
+    try:
+        kernel = c.WinDLL("kernel32", winmode=0x800)
+        adv = c.WinDLL("advapi32", winmode=0x800)
+        for dll, name, restype, args in (
+            (kernel, "OpenProcess", w.HANDLE, (w.DWORD, w.BOOL, w.DWORD)),
+            (kernel, "CloseHandle", w.BOOL, (w.HANDLE,)),
+            (kernel, "GetProcessTimes", w.BOOL, (w.HANDLE, *([c.POINTER(w.FILETIME)] * 4))),
+            (kernel, "WaitForSingleObject", w.DWORD, (w.HANDLE, w.DWORD)),
+            (kernel, "LocalFree", c.c_void_p, (c.c_void_p,)),
+            (adv, "OpenProcessToken", w.BOOL, (w.HANDLE, w.DWORD, c.POINTER(w.HANDLE))),
+            (adv, "GetTokenInformation", w.BOOL, (w.HANDLE, c.c_int, c.c_void_p, w.DWORD, c.POINTER(w.DWORD))),
+            (adv, "ConvertSidToStringSidW", w.BOOL, (c.c_void_p, c.POINTER(w.LPWSTR))),
+        ):
+            function = getattr(dll, name)
+            function.restype, function.argtypes = restype, args
+        for row in processes:
+            process = kernel.OpenProcess(0x101000, False, row["ProcessId"])
+            if not process:
+                raise AcquisitionBlocked("WINDOWS_PROBE_OWNER_FAILED")
+            token = w.HANDLE()
+            sid = w.LPWSTR()
+            try:
+                times = [w.FILETIME() for _ in range(4)]
+                if not kernel.GetProcessTimes(process, *(c.byref(item) for item in times)):
+                    raise AcquisitionBlocked("WINDOWS_PROBE_OWNER_FAILED")
+                ticks = times[0].dwHighDateTime << 32 | times[0].dwLowDateTime
+                # CIM timestamps have microsecond precision.
+                if ticks // 10 != _creation_ticks(row["CreationDate"]) // 10:
+                    raise AcquisitionBlocked("CHROME_OBSERVATION_CHANGED")
+                user = (c.c_void_p * 16)()  # TOKEN_USER header and maximum SID.
+                needed = w.DWORD()
+                if (not adv.OpenProcessToken(process, 8, c.byref(token))
+                        or not adv.GetTokenInformation(token, 1, user, c.sizeof(user), c.byref(needed))
+                        or not adv.ConvertSidToStringSidW(user[0], c.byref(sid)) or not sid.value):
+                    raise AcquisitionBlocked("WINDOWS_PROBE_OWNER_FAILED")
+                if kernel.WaitForSingleObject(process, 0) != 258:  # WAIT_TIMEOUT: still live.
+                    raise AcquisitionBlocked("CHROME_OBSERVATION_CHANGED")
+                row["OwnerSid"] = sid.value
+            finally:
+                if sid:
+                    kernel.LocalFree(sid)
+                if token:
+                    kernel.CloseHandle(token)
+                kernel.CloseHandle(process)
+    except (AttributeError, OSError):
+        raise AcquisitionBlocked("WINDOWS_PROBE_OWNER_FAILED") from None
+
+
 def _query_windows(port: int, *, owner_action: Callable[[Path], Path] | None = None) -> dict:
-    """Bounded, read-only Windows process and TCP inventory; never logs raw data."""
+    """Bounded, read-only Windows process and TCP inventory with no raw diagnostics."""
     powershell = _powershell(owner_action=owner_action) if owner_action else _powershell()
-    child_env = _child_environment()
-    child_env["AI_COMMERCE_ACQ_PROBE_PORT"] = str(port)
+    listeners = _windows_tcp_listeners(port)
     try:
         result = subprocess.run([str(powershell), "-NoProfile", "-NonInteractive", "-Command",
                                  _PROBE_SCRIPT], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                timeout=8, check=False, env=child_env,
+                                timeout=8, check=False, env=_child_environment(),
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        if result.returncode or len(result.stdout) > 262144:
-            raise AcquisitionBlocked("WINDOWS_PROBE_UNAVAILABLE")
-        value = json.loads(result.stdout.decode("utf-8-sig"))
-        if not isinstance(value, dict) or set(value) != {"listeners", "processes"}:
-            raise AcquisitionBlocked("WINDOWS_PROBE_INVALID")
-        return value
-    except AcquisitionBlocked:
-        raise
-    except (OSError, subprocess.TimeoutExpired, UnicodeError, ValueError):
+    except subprocess.TimeoutExpired:
+        raise AcquisitionBlocked("WINDOWS_PROBE_TIMEOUT") from None
+    except OSError:
         raise AcquisitionBlocked("WINDOWS_PROBE_UNAVAILABLE") from None
+    if result.returncode:
+        raise AcquisitionBlocked({20: "WINDOWS_PROBE_CIM_FAILED", 21: "WINDOWS_PROBE_INVALID"}.get(
+            result.returncode, "WINDOWS_PROBE_UNAVAILABLE"))
+    if len(result.stdout) > 262144:
+        raise AcquisitionBlocked("WINDOWS_PROBE_INVALID")
+    try:
+        value = json.loads(result.stdout.decode("utf-8-sig"))
+    except (ValueError, RecursionError):
+        raise AcquisitionBlocked("WINDOWS_PROBE_INVALID") from None
+    if (type(value) is not dict or value.keys() != {"processes"}
+            or type(value["processes"]) is not list or len(value["processes"]) > 256):
+        raise AcquisitionBlocked("WINDOWS_PROBE_INVALID")
+    processes = _rows(value["processes"])
+    pids = set()
+    for row in processes:
+        pid = row.get("ProcessId")
+        if (type(pid) is not int or not 0 < pid < 2**32 or pid in pids
+                or type(row.get("ParentProcessId")) is not int or not 0 <= row["ParentProcessId"] < 2**32
+                or type(row.get("SessionId")) is not int or not 0 <= row["SessionId"] < 2**32
+                or not isinstance(row.get("ExecutablePath"), str) or not row["ExecutablePath"]
+                or not isinstance(row.get("CommandLine"), str) or not 1 <= len(row["CommandLine"]) <= 32768
+                or not isinstance(row.get("CreationDate"), str)):
+            raise AcquisitionBlocked("PROCESS_IDENTITY_UNKNOWN")
+        try:
+            if _creation_ticks(row["CreationDate"]) <= 0:
+                raise AcquisitionBlocked("PROCESS_IDENTITY_UNKNOWN")
+        except _EnrollmentHold:
+            raise AcquisitionBlocked("PROCESS_IDENTITY_UNKNOWN") from None
+        pids.add(pid)
+    _windows_process_owners(processes)
+    if _windows_tcp_listeners(port) != listeners:
+        raise AcquisitionBlocked("CHROME_OBSERVATION_CHANGED")
+    return {"listeners": listeners, "processes": processes}
 
 
 def _rows(value) -> list[dict]:
@@ -5295,7 +5442,11 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, sort_keys=True))
         return 0
     except AcquisitionBlocked as exc:
-        print("CHROME_ACQUISITION_BLOCKED: " + str(exc), file=sys.stderr)
+        code = str(exc)
+        # The attended PowerShell repair decoder uses the legacy probe catalog.
+        if code in _ATTENDED_CLI_INVENTORY_HOLDS:
+            code = "WINDOWS_PROBE_UNAVAILABLE"
+        print("CHROME_ACQUISITION_BLOCKED: " + code, file=sys.stderr)
         return 2
 
 
