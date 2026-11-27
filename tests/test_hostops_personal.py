@@ -3420,6 +3420,7 @@ class PersonalCdp9444ConfigRegistryTests(unittest.TestCase):
         for status, code in (("OBSERVED", "TASK_READY"),
                              ("OBSERVED", "TASK_INSTANCE_PRESENT"),
                              ("OBSERVED", "TASK_INSTANCE_PRESENT+CHROME_OBSERVATION_HOLD+RUN_MATCH+MUTEX_ACTIVE+HEALTH_MATCH_LIVE+UPGRADE_ABSENT"),
+                             ("OBSERVED", "TASK_INSTANCE_PRESENT+ACTIVE_SOURCE_BATCH_TIMEOUT+RUN_MATCH+MUTEX_ACTIVE+HEALTH_MATCH_LIVE+UPGRADE_ABSENT"),
                              ("HOLD", "TASK_MISSING"),
                              ("HOLD", "TASK_DACL_REPR_MISMATCH"),
                              ("HOLD", "TASK_PRIOR_BOOTSTRAP_READY"),
@@ -3904,6 +3905,59 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         ))
         self.assertNotIn("StartPending", self.values)
         self.assertEqual(set(self.modes), {"probe", "inspect"})
+        self.assert_task_probe_has_no_effects(config_inspected=True)
+
+    def test_task_probe_reports_source_failures_before_browser_proof(self):
+        self.probe_state = "TASK_INSTANCE_PRESENT"
+        self.state = self.instance
+        browser = self.mock(hostops, "_supervisor_upgrade_chrome_pin")
+        task_run = hostops.subprocess.run
+        git_run = Mock()
+        self.mock(hostops.subprocess, "run", side_effect=lambda argv, **kwargs: (
+            git_run(argv, **kwargs) if argv[0] == "git" else task_run(argv, **kwargs)
+        ))
+
+        def check(stage):
+            before = dict(self.values)
+            receipt = self.dispatch_task_probe()
+            self.assertEqual((receipt["status"], receipt["code"]), (
+                "OBSERVED", f"TASK_INSTANCE_PRESENT+{stage}+RUN_MATCH+MUTEX_ACTIVE+HEALTH_MATCH_LIVE+UPGRADE_ABSENT",
+            ))
+            self.assertEqual(self.values, before)
+
+        wrong_digest = "1" * 64
+        intent = {**self.intent(self.nonce), "instance": self.instance, "source_digest": wrong_digest}
+        self.values["Run"] = json.dumps(intent)
+        self.publish_health(source_digest=wrong_digest, health="CHROME_OWNED")
+        check("ACTIVE_SOURCE_CURRENT_DIGEST_MISMATCH")
+        git_run.assert_not_called()
+
+        prior = "2" * 40
+        self.values["Run"] = json.dumps({**intent, "source_sha": prior})
+        self.publish_health(source_sha=prior, source_digest=wrong_digest, health="ENROLLMENT_PROFILE_LOCK_UNPROVEN",
+                            mode=self.runtime._CHROME_HEALTH_ONLY)
+        oid = b"3" * 40
+
+        def output(stdout):
+            return subprocess.CompletedProcess([], 0, stdout=stdout)
+
+        prior_reads = [output(prior.encode() + b"\n"), output(b""),
+                       output(b"100644 blob " + oid + b"\tsrc/ai_commerce/wakehub_runtime/runner.py\0")]
+        for batch, stage in (
+            (subprocess.TimeoutExpired("PRIVATE", 15), "ACTIVE_SOURCE_BATCH_TIMEOUT"),
+            (FileNotFoundError("PRIVATE"), "ACTIVE_SOURCE_BATCH_UNAVAILABLE"),
+            (output(oid + b" missing\n"), "ACTIVE_SOURCE_BATCH_OBJECT_MISSING"),
+            (output(oid + b" blob 10\nshort"), "ACTIVE_SOURCE_BATCH_TRUNCATED"),
+            (output(oid + b" blob not-a-size\n"), "ACTIVE_SOURCE_BATCH_INVALID"),
+        ):
+            with self.subTest(stage=stage):
+                git_run.side_effect = [*prior_reads, batch]
+                check(stage)
+
+        browser.assert_not_called()
+        self.assertFalse(hostops._is_valid_supervisor_task_probe_code(
+            "TASK_INSTANCE_PRESENT+ACTIVE_SOURCE_BATCH_PRIVATE+RUN_MATCH+MUTEX_ACTIVE+HEALTH_MATCH_LIVE+UPGRADE_ABSENT",
+        ))
         self.assert_task_probe_has_no_effects(config_inspected=True)
 
     def test_task_probe_reports_pending_intent_states_and_preflight_holds(self):
@@ -5949,7 +6003,7 @@ $results | ConvertTo-Json -Compress -Depth 4
             )
             self.assertEqual(
                 hostops._verify_prior_supervisor_source(repo, good_prior_sha, good_lf_digest, current_sha, current_digest,
-                                                        require_rehashed=True),
+                                                        require_rehashed=True, report_failure=True),
                 "GIT_HISTORY_REHASHED",
             )
             self.assertEqual(
@@ -5972,9 +6026,21 @@ $results | ConvertTo-Json -Compress -Depth 4
                 hostops._verify_prior_supervisor_source(repo, unrelated_sha, good_lf_digest, current_sha, current_digest,
                                                         require_rehashed=True),
             )
-            self.assertIsNone(
-                hostops._verify_prior_supervisor_source(repo, "0" * 40, good_lf_digest, current_sha, current_digest),
-            )
+            self.assertIsNone(hostops._verify_prior_supervisor_source(
+                repo, good_prior_sha, good_lf_digest, current_sha, current_digest, require_tick=True,
+            ))
+            for prior, digest, tick, stage in (
+                (good_prior_sha, good_mixed_digest, False, "ACTIVE_SOURCE_DIGEST_MISMATCH"),
+                (bad_prior_sha, bad_prior_digest, False, "ACTIVE_SOURCE_LEGACY_GUARD_MISSING"),
+                (unrelated_sha, good_lf_digest, False, "ACTIVE_SOURCE_ANCESTRY_FAILED"),
+                ("0" * 40, good_lf_digest, False, "ACTIVE_SOURCE_PRIOR_OBJECT_FAILED"),
+                (good_prior_sha, good_lf_digest, True, "ACTIVE_SOURCE_TICK_FENCE_MISSING"),
+            ):
+                with self.subTest(stage=stage):
+                    self.assertEqual(hostops._verify_prior_supervisor_source(
+                        repo, prior, digest, current_sha, current_digest,
+                        require_rehashed=True, require_tick=tick, report_failure=True,
+                    ), stage)
             self.assertIsNone(
                 hostops._verify_prior_supervisor_source(
                     repo, "a74e90f3799938e9c564d6c0fcc5e3bd3583a7b8", good_mixed_digest, current_sha, current_digest,
