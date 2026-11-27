@@ -3197,7 +3197,17 @@ def test_health_uses_existing_9444_without_route_or_journal(observe_only, monkey
     assert canonical.parent.exists() is wrapper
 
     if fault == "locked_profile":
-        (s.i["environment"].user_data_dir / "Default" / r.chrome_acquisition._MARKERS[0]).touch()
+        marker = s.i["environment"].user_data_dir / "Default" / r.chrome_acquisition._MARKERS[0]
+        marker.touch()
+
+        def conflicting_holder(native, path):
+            assert native.identity[0] == s.i["process"]["ProcessId"]
+            assert path == marker
+            return False
+
+        # The listener PID is synthetic. Supply a native conflict result for this marker.
+        monkeypatch.setattr(r.chrome_acquisition._NativeEnrollment, "_bind", lambda _: None)
+        monkeypatch.setattr(r.chrome_acquisition._NativeEnrollment, "observe_marker", conflicting_holder)
     elif fault == "foreign_port":
         s.i["inventory"]["listeners"][0]["LocalPort"] = 9333
     session, sid = s.owner()[1:]

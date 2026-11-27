@@ -31,6 +31,10 @@ from urllib.request import Request, ProxyHandler, HTTPRedirectHandler, build_ope
 
 _PROFILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _-]{0,63}\Z")
 _MARKERS = ("SingletonLock", "SingletonCookie", "SingletonSocket", "lockfile")
+_LEGACY_MARKER_HOLDS = frozenset({
+    "LEGACY_MARKER_ACCESS_UNPROVEN", "LEGACY_MARKER_ACL_UNPROVEN",
+    "LEGACY_MARKER_PROCESS_UNPROVEN", "LEGACY_MARKER_HOLDER_UNPROVEN",
+})
 _WINDOWS_PROBE_FAILURE_CODES = frozenset({
     "WINDOWS_PROBE_TCP_FAILED", "WINDOWS_PROBE_CIM_FAILED", "WINDOWS_PROBE_OWNER_FAILED",
     "WINDOWS_PROBE_TIMEOUT",
@@ -1379,7 +1383,8 @@ class _NativeEnrollment:
         access = 0x120089 | (0x116 if write else 0)  # read/control/synchronize; optional write
         share = 3 if readback else 1
         if marker_observation:
-            # Open only metadata, allow the live writer, and pin the name against replacement.
+            # Metadata access can coexist with an exclusive data handle. It
+            # does not prevent deletion, so the observer must recheck the name.
             access, share = 0x120080, 3  # READ_CONTROL | SYNCHRONIZE | FILE_READ_ATTRIBUTES
         options = 0x20 | 0x200000 | (1 if directory else 0x40)
         if repair_acl:
@@ -1421,7 +1426,7 @@ class _NativeEnrollment:
         self._info(handle, True)
         for index, name in enumerate(path.parts[1:]):
             last = index == len(path.parts) - 2
-            options = {"marker_observation": True} if last and marker_observation else {}
+            options = {"marker_observation": True} if marker_observation else {}
             handle = self._relative(handle, name, directory=directory if last else True, **options)
         if private:
             self._acl(handle)
@@ -1544,7 +1549,8 @@ class _NativeEnrollment:
         return self._marker_holder_matches(path)
 
     def observe_marker(self, path):
-        """Check for a conflicting holder after the live browser has been identified."""
+        """Rule out competing data holders for an already identified live listener."""
+        failure = "LEGACY_MARKER_PROCESS_UNPROVEN"
         try:
             self.pinned = []
             self.process = self._keep(self.k.OpenProcess(0x101000, False, self.identity[0]))
@@ -1553,12 +1559,51 @@ class _NativeEnrollment:
             # Protected HostOps can read under the owner token outside the desktop
             # session. The target must still have the exact interactive token.
             self._process(require_interactive_caller=False)
-            self._pin_path(path, directory=False, private=True, marker_observation=True)
-            return self._marker_holder_matches(path, require_interactive_caller=False, allow_unheld=True)
+            failure = "LEGACY_MARKER_ACCESS_UNPROVEN"
+            handle = self._pin_path(path, directory=False, marker_observation=True)
+            identity = self._info(handle, False)[:3]
+            failure = "LEGACY_MARKER_ACL_UNPROVEN"
+            self._acl(handle)
+            failure = "LEGACY_MARKER_HOLDER_UNPROVEN"
+            holders = self._marker_process_ids(handle)
+            failure = "LEGACY_MARKER_ACCESS_UNPROVEN"
+            latest = self._pin_path(path, directory=False, marker_observation=True)
+            if self._info(latest, False)[:3] != identity:
+                self._blocked()
+            failure = "LEGACY_MARKER_ACL_UNPROVEN"
+            self._acl(latest)
+            failure = "LEGACY_MARKER_PROCESS_UNPROVEN"
+            self._process(require_interactive_caller=False)
+            # The observer may appear because of its metadata handles. A child
+            # PID alone does not establish that the child holds this for Chrome.
+            return not holders.difference((os.getpid(), self.identity[0]))
+        except (_EnrollmentHold, OSError, AttributeError):
+            raise _EnrollmentHold(failure) from None
         finally:
             self.__exit__()
 
-    def _marker_holder_matches(self, path, *, require_interactive_caller=True, allow_unheld=False):
+    def _marker_process_ids(self, handle):
+        # FileProcessIdsUsingFileInformation queries the exact open file
+        # without a registry-backed Restart Manager session or a second path lookup.
+        c, w = self.c, self.w
+
+        class HolderList(c.Structure):
+            _fields_ = [("count", w.ULONG), ("pids", c.c_size_t * 64)]
+
+        query = self.n.NtQueryInformationFile
+        query.restype = c.c_long
+        query.argtypes = [w.HANDLE, c.POINTER(self.IoStatus), c.c_void_p, w.ULONG, c.c_int]
+        io, rows = self.IoStatus(), HolderList()
+        status = query(handle, c.byref(io), c.byref(rows), c.sizeof(rows), 47)
+        if (status != 0 or rows.count > len(rows.pids)
+                or io.Information != HolderList.pids.offset + rows.count * c.sizeof(c.c_size_t)):
+            self._blocked()
+        pids = set(rows.pids[:rows.count])
+        if len(pids) != rows.count or any(not 0 < pid <= 0xFFFFFFFF for pid in pids):
+            self._blocked()
+        return pids
+
+    def _marker_holder_matches(self, path):
         c, w = self.c, self.w
         session, key = w.DWORD(), c.create_unicode_buffer(33)
         if self.rm.RmStartSession(c.byref(session), 0, key):
@@ -1571,15 +1616,10 @@ class _NativeEnrollment:
             rows = (self.RmInfo * 2)()
             if self.rm.RmGetList(session, c.byref(needed), c.byref(count), rows, c.byref(reasons)):
                 return False
-            if count.value == 0 and needed.value == 0 and allow_unheld:
-                # Marker presence alone is compatible with an already owned live
-                # listener. Keep exact holder proof for enrollment.
-                self._process(require_interactive_caller=require_interactive_caller)
-                return True
             if count.value != 1:
                 return False
             proc = rows[0].process
-            self._process(require_interactive_caller=require_interactive_caller)
+            self._process()
             return (proc.pid == self.identity[0] and rows[0].session == self.session
                     and (proc.start.dwHighDateTime << 32 | proc.start.dwLowDateTime) == self.process_ticks)
         finally:
@@ -2435,14 +2475,16 @@ def _observe_legacy_profile_markers(env, local, session, sid, state, identity):
             except FileNotFoundError:
                 continue
             except OSError:
-                raise _EnrollmentHold(hold) from None
+                raise _EnrollmentHold("LEGACY_MARKER_ACCESS_UNPROVEN" if state == "OWNED" else hold) from None
             if state == "OWNED":
                 try:
                     native = _NativeEnrollment(env, local, session, sid, identity[1][0])
                     if native.observe_marker(marker) is True:
                         continue
-                except (_EnrollmentHold, OSError):
-                    pass
+                except (_EnrollmentHold, OSError) as exc:
+                    if isinstance(exc, _EnrollmentHold) and str(exc) in _LEGACY_MARKER_HOLDS:
+                        raise
+                    raise _EnrollmentHold("LEGACY_MARKER_ACCESS_UNPROVEN") from None
             raise _EnrollmentHold(hold)
 
 

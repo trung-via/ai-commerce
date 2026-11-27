@@ -916,7 +916,7 @@ class NativeChrome9444:
                 chrome_acquisition._require_operator_control(env)
                 failure = "CHROME_EXECUTABLE_UNTRUSTED"
                 chrome_acquisition._verify_google_chrome(env)
-                failure = "PROFILE_LOCK_HOLD"
+                failure = "LEGACY_MARKER_ACCESS_UNPROVEN" if state == "OWNED" else "PROFILE_LOCK_HOLD"
                 chrome_acquisition._observe_legacy_profile_markers(env, local, session, sid, state, identity)
                 if state == "OWNED":
                     failure = "CDP_PROTOCOL_UNAVAILABLE"
@@ -4161,7 +4161,7 @@ _SUPERVISOR_DESKTOP_HOLDS = frozenset({
 _SUPERVISOR_CHROME_HOLDS = frozenset({
     "CDP_PROTOCOL_UNAVAILABLE", "PROFILE_LOCK_HOLD", "ENROLLMENT_PROFILE_LOCK_UNPROVEN",
     "PROFILE_ALREADY_ACTIVE_NO_CDP", "WINDOWS_PROBE_INVALID", "CHROME_OBSERVATION_HOLD",
-})
+}) | chrome_acquisition._LEGACY_MARKER_HOLDS
 _LEGACY_BROWSER_OBSERVATION_HOLDS = frozenset({
     "BROWSER_OWNERSHIP_UNPROVEN", "CDP_NOT_LOOPBACK_OWNED", "FOREIGN_PORT_OWNER",
     "PROCESS_IDENTITY_UNKNOWN", "WINDOWS_PROBE_UNAVAILABLE", "POWERSHELL_UNAVAILABLE",
@@ -4204,7 +4204,7 @@ _STARTUP_STAGE_REASONS = {
         "JOURNAL_OWNER_DRIFT", "JOURNAL_BUSY", "JOURNAL_CORRUPT", "JOURNAL_INVALID",
         "JOURNAL_SCHEMA_INCOMPATIBLE", "REGISTRATION_DRIFT",
         "HEALTH_PUBLISH_FAILED", "FIRST_HEALTH_HOLD", "HEALTH_PUBLISHED",
-    }) | chrome_acquisition._WINDOWS_PROBE_FAILURE_CODES,
+    }) | chrome_acquisition._WINDOWS_PROBE_FAILURE_CODES | chrome_acquisition._LEGACY_MARKER_HOLDS,
 }
 
 

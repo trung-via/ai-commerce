@@ -1,6 +1,6 @@
 """D5 Chrome Acquisition: synthetic and read-only checks; never launch Chrome."""
 from contextlib import nullcontext
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import json
 import re
 import os
@@ -1576,7 +1576,7 @@ def test_wh01b_native_create_uses_relative_no_reparse_protected_create_new(monke
     assert calls == [(99, 321, 0x1040, len("config.json") * 2, (1, 2, 0x200060))]
 
 
-def test_legacy_health_marker_opens_only_metadata_and_pins_against_replacement(monkeypatch):
+def test_legacy_health_marker_traverses_with_metadata_access(monkeypatch):
     tx = offline_native(monkeypatch)
     calls = []
 
@@ -1588,9 +1588,14 @@ def test_legacy_health_marker_opens_only_metadata_and_pins_against_replacement(m
 
     tx.n.NtCreateFile.handler = open_existing
     tx._info = lambda *args: (1, 0, 2, 0, 0)
-    handle = tx._relative(99, "lockfile", directory=False, marker_observation=True)
+    tx.k.GetDriveTypeW.handler = lambda _: 3
+    tx.k.CreateFileW.handler = lambda *args: 99
+    tx.pinned = []
+    path = PureWindowsPath("C:/fixture/lockfile")
+    handle = tx._pin_path(path, directory=False, marker_observation=True)
     assert handle.value == 101 and tx.effect_possible is False
-    assert calls == [(0x120080, None, 0x1040, (3, 1, 0x200060))]
+    assert calls == [(0x120080, None, 0x1040, (3, 1, 0x200021)),
+                     (0x120080, None, 0x1040, (3, 1, 0x200060))]
 
 
 @pytest.mark.parametrize("kind", ["reparse", "hardlink", "wrong_type", "non_disk", "unavailable"])
@@ -1643,10 +1648,9 @@ def test_wh01b_native_private_acl_requires_exact_protected_owner(monkeypatch, ki
 
 
 @pytest.mark.parametrize("kind", [
-    "valid", "foreign_pid", "pid_reuse", "session", "shared", "none", "incomplete", "unavailable",
+    "valid", "foreign_pid", "pid_reuse", "session", "shared", "none", "incomplete", "unavailable", "start_failed",
 ])
-@pytest.mark.parametrize("observe_only", [False, True])
-def test_wh01b_native_marker_restart_manager_is_exact_process_proof(monkeypatch, kind, observe_only):
+def test_wh01b_native_marker_restart_manager_is_exact_process_proof(monkeypatch, kind):
     tx = offline_native(monkeypatch)
     tx.identity = (123, None, None, 1, _OPERATOR_SID, "2026-11-14T01:00:00Z")
     tx.process_ticks = ca._creation_ticks(tx.identity[5])
@@ -1656,7 +1660,7 @@ def test_wh01b_native_marker_restart_manager_is_exact_process_proof(monkeypatch,
     tx.k.OpenProcess.handler = lambda *args: 33
     def start(session, flags, key):
         session._obj.value = 7
-        return 0
+        return 29 if kind == "start_failed" else 0
     def listing(session, needed, count, rows, reasons):
         count._obj.value = 0 if kind in ("none", "incomplete", "unavailable") else 2 if kind == "shared" else 1
         needed._obj.value = 1 if kind == "incomplete" else count._obj.value
@@ -1670,12 +1674,76 @@ def test_wh01b_native_marker_restart_manager_is_exact_process_proof(monkeypatch,
     tx.rm.RmRegisterResources.handler = lambda *args: 0
     tx.rm.RmGetList.handler = listing
     path = Path("synthetic-marker")
-    prove = tx.observe_marker if observe_only else tx.prove_marker
-    assert prove(path) is (kind == "valid" or (observe_only and kind == "none"))
-    options = {"marker_observation": True} if observe_only else {}
-    assert pinned == [(path, {"directory": False, "private": True, **options})]
-    rechecked = kind in ("valid", "foreign_pid", "pid_reuse", "session") or (observe_only and kind == "none")
-    assert checked == [not observe_only] * (int(observe_only) + int(rechecked))
+    assert tx.prove_marker(path) is (kind == "valid")
+    assert pinned == [(path, {"directory": False, "private": True})]
+    assert checked == ([True] if kind in ("valid", "foreign_pid", "pid_reuse", "session") else [])
+    assert not tx.handles and tx.effect_possible is False
+
+
+@pytest.mark.parametrize(("kind", "hold", "safe"), [
+    ("browser", None, True),
+    ("unheld", None, True),
+    ("self", None, True),
+    ("shared_browser", None, True),
+    ("competing", None, False),
+    ("unverified_child", None, False),
+    ("query_failed", "LEGACY_MARKER_HOLDER_UNPROVEN", None),
+    ("truncated", "LEGACY_MARKER_HOLDER_UNPROVEN", None),
+    ("access", "LEGACY_MARKER_ACCESS_UNPROVEN", None),
+    ("acl", "LEGACY_MARKER_ACL_UNPROVEN", None),
+    ("replaced", "LEGACY_MARKER_ACCESS_UNPROVEN", None),
+    ("process_changed", "LEGACY_MARKER_PROCESS_UNPROVEN", None),
+])
+def test_legacy_live_marker_checks_bounded_native_holders_when_restart_manager_is_unavailable(
+        monkeypatch, kind, hold, safe):
+    tx = offline_native(monkeypatch)
+    tx.identity = (123, None, None, 1, _OPERATOR_SID, "2026-11-14T01:00:00Z")
+    tx.k.OpenProcess.handler = lambda *args: 33
+    tx.rm.RmStartSession.handler = lambda *args: pytest.fail("legacy health called Restart Manager")
+    monkeypatch.setattr(ca.os, "getpid", lambda: 800)
+    pins, acls, process_checks = [], [], []
+
+    def pin(path, **options):
+        assert options == {"directory": False, "marker_observation": True}
+        if kind == "access":
+            tx._blocked()
+        pins.append(path)
+        return 100 + len(pins)
+
+    def acl(handle):
+        acls.append(handle)
+        if kind == "acl":
+            tx._blocked()
+
+    def process(*, require_interactive_caller):
+        assert not require_interactive_caller
+        process_checks.append(tx.process)
+        if len(process_checks) == 2 and kind == "process_changed":
+            tx._blocked()
+
+    def query(handle, io, rows, size, info_class):
+        assert (handle, info_class) == (101, 47)
+        assert size == tx.c.sizeof(rows._obj)
+        pids = {"unheld": (), "self": (800,), "shared_browser": (800, 123),
+                "competing": (123, 456), "unverified_child": (456,)}.get(kind, (123,))
+        rows._obj.count = len(pids)
+        rows._obj.pids[:len(pids)] = pids
+        io._obj.Information = (type(rows._obj).pids.offset if kind == "truncated"
+                               else type(rows._obj).pids.offset + len(pids) * tx.c.sizeof(tx.c.c_size_t))
+        return 0xC0000004 if kind == "query_failed" else 0
+
+    tx._pin_path = pin
+    tx._acl = acl
+    tx._process = process
+    tx._info = lambda handle, _: (1, 0, handle if kind == "replaced" else 3, 0, 0)
+    tx.n.NtQueryInformationFile.handler = query
+    path = Path("synthetic-marker")
+    if hold is None:
+        assert tx.observe_marker(path) is safe
+        assert pins == [path, path] and acls == [101, 102] and process_checks == [33, 33]
+    else:
+        with pytest.raises(ca._EnrollmentHold, match=f"^{hold}$"):
+            tx.observe_marker(path)
     assert not tx.handles and tx.effect_possible is False
 
 
@@ -2664,6 +2732,16 @@ def test_protected_legacy_health_tick_allows_root_and_parent_acl_only_for_health
             assert marker_proofs == [(inventory[1][0], marker)] * 2
             assert cdp_probes == [d5_env] * 2
             assert marker.is_file()
+
+            with monkeypatch.context() as changed:
+                def fail_holder_query(*_):
+                    raise ca._EnrollmentHold("LEGACY_MARKER_HOLDER_UNPROVEN")
+                changed.setattr(ca._NativeEnrollment, "observe_marker", fail_holder_query)
+                published.clear()
+                cdp_probes.clear()
+                result = runner.run_supervisor(path, repo, max_ticks=1, observe_only=True, _deployment=deployment)
+                assert result.code == "LEGACY_MARKER_HOLDER_UNPROVEN"
+                assert published == [result.code] and cdp_probes == []
 
             with monkeypatch.context() as changed:
                 def fail_cdp(_):

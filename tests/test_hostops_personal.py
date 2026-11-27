@@ -4989,6 +4989,8 @@ $out | ConvertTo-Json -Compress
         before = dict(self.values)
         self.browser.side_effect = acquisition._EnrollmentHold("ENROLLMENT_PROFILE_LOCK_UNPROVEN")
         self.assertEqual(self.dispatch()["code"], "ENROLLMENT_PROFILE_LOCK_UNPROVEN")
+        self.browser.side_effect = acquisition._EnrollmentHold("LEGACY_MARKER_HOLDER_UNPROVEN")
+        self.assertEqual(self.dispatch()["code"], "LEGACY_MARKER_HOLDER_UNPROVEN")
         self.browser.side_effect = acquisition.AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
         self.assertEqual(self.dispatch()["code"], "POWERSHELL_UNAVAILABLE")
         self.stop.assert_not_called()
@@ -5020,7 +5022,7 @@ $out | ConvertTo-Json -Compress
         env, value = self.setup_legacy_health_only_config()
         self.stale_supervisor(health="CHROME_OBSERVATION_HOLD", mock_browser=False)
         approval = self.approval
-        marker, _, query, _, _, _ = self.mock_owned_legacy_chrome(env)
+        marker, _, query, _, holder, _ = self.mock_owned_legacy_chrome(env)
         self.env["AI_COMMERCE_WAKEHUB_CONFIG"] = str(self.config)
         self.probe_state = "TASK_INSTANCE_PRESENT"
         inventory = query.return_value
@@ -5054,6 +5056,13 @@ $out | ConvertTo-Json -Compress
         query.side_effect = [foreign]
         check("BROWSER_OWNERSHIP_UNPROVEN")
         query.side_effect = None
+        for code in sorted(acquisition._LEGACY_MARKER_HOLDS):
+            with self.subTest(code=code):
+                holder.side_effect = acquisition._EnrollmentHold(code)
+                check(code)
+        holder.side_effect = OSError("PRIVATE_MARKER_DETAIL")
+        check("LEGACY_MARKER_ACCESS_UNPROVEN")
+        holder.side_effect = None
         with patch.object(acquisition, "_probe_cdp", side_effect=RuntimeError("PRIVATE_CDP")):
             check("CDP_PROTOCOL_UNAVAILABLE")
         with patch.object(acquisition, "_supervisor_9444_config", side_effect=OSError("PRIVATE_CONFIG")):
@@ -5111,7 +5120,7 @@ $out | ConvertTo-Json -Compress
         def start_held(nonce):
             instance = self.start_replacement(nonce)
             health = json.loads(self.values["Health"])
-            self.publish_health(**dict(health, health="ENROLLMENT_PROFILE_LOCK_UNPROVEN"))
+            self.publish_health(**dict(health, health="LEGACY_MARKER_HOLDER_UNPROVEN"))
             return instance
 
         self.launch.side_effect = start_held
