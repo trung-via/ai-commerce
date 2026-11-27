@@ -1022,7 +1022,7 @@ _SUPERVISOR_TASK_BASE_CODES = _SUPERVISOR_TASK_MISMATCH_CODES | _SUPERVISOR_TASK
     "TASK_BUSY", "TASK_PRIOR_BOOTSTRAP_READY", "TASK_PRIOR_BOOTSTRAP_BUSY",
 }
 _SUPERVISOR_TASK_PROBE_CODES = _SUPERVISOR_TASK_BASE_CODES | {
-    "PENDING_INTENT_CHANGED",
+    "PENDING_INTENT_CHANGED", "TASK_PROBE_TIMEOUT",
     *(f"PENDING_INTENT_PRESENT_{code}" for code in _SUPERVISOR_TASK_BASE_CODES),
     *(f"PENDING_INTENT_UNKNOWN_{code}" for code in _SUPERVISOR_TASK_BASE_CODES),
 }
@@ -1057,6 +1057,20 @@ _SUPERVISOR_PENDING_HEALTH_CODES = frozenset({
 _SUPERVISOR_PENDING_RUN_CODES = frozenset({
     "RUN_ABSENT", "RUN_MATCH", "RUN_PRIOR", "RUN_UNCORRELATED", "RUN_MALFORMED", "RUN_UNREADABLE",
 })
+_SUPERVISOR_UPGRADE_PROBE_CODES = frozenset({
+    "UPGRADE_ABSENT", "UPGRADE_UNREADABLE", "UPGRADE_MALFORMED", "UPGRADE_MATCH_RUN", "UPGRADE_OTHER_RUN",
+})
+_SUPERVISOR_ACTIVE_PROBE_STAGES = (
+    _SUPERVISOR_PENDING_RUN_CODES | _SUPERVISOR_PENDING_HEALTH_CODES | _SUPERVISOR_UPGRADE_PROBE_CODES
+    | _SUPERVISOR_CHROME_HOLDS | _SUPERVISOR_DESKTOP_HOLDS | {
+        "ACTIVE_TASK_UNVERIFIED", "ACTIVE_TASK_INSTANCE_MISMATCH", "ACTIVE_RUN_OWNER_DRIFT",
+        "ACTIVE_RUN_SESSION_DRIFT", "ACTIVE_CONFIG_UNVERIFIED", "ACTIVE_CONFIG_PATH_MISMATCH",
+        "ACTIVE_CONFIG_DIGEST_MISMATCH", "ACTIVE_RUN_SOURCE_UNVERIFIED", "ACTIVE_HEALTH_CHANGED",
+        "ACTIVE_HEALTH_MODE_UNVERIFIED", "ACTIVE_ENROLLMENT_UNVERIFIED", "ACTIVE_CHROME_UNVERIFIED",
+        "ACTIVE_TASK_PROCESS_UNVERIFIED", "ACTIVE_TASK_PROBE_TIMEOUT", "ACTIVE_TASK_PROCESS_TIMEOUT",
+        "ACTIVE_READ_STATE_CHANGED", "ACTIVE_READ_CHECKS_COMPLETE",
+    }
+)
 _SUPERVISOR_PENDING_HISTORY_CODES = frozenset({
     "HIST_NA", "HIST_NEVER_RAN", "HIST_RUNNING", "HIST_QUEUED",
     "HIST_EXIT_0", "HIST_EXIT_1", "HIST_EXIT_2", "HIST_EXIT_OTHER",
@@ -2156,6 +2170,11 @@ def _is_valid_supervisor_task_probe_code(code):
     if code in _SUPERVISOR_TASK_PROBE_CODES:
         return True
     parts = code.split("+")
+    if len(parts) == 6:
+        task, stage, run, mutex, health, upgrade = parts
+        return (task in _SUPERVISOR_TASK_BASE_CODES and stage in _SUPERVISOR_ACTIVE_PROBE_STAGES
+                and run in _SUPERVISOR_PENDING_RUN_CODES and mutex in _SUPERVISOR_PENDING_MUTEX_CODES
+                and health in _SUPERVISOR_PENDING_HEALTH_CODES and upgrade in _SUPERVISOR_UPGRADE_PROBE_CODES)
     if len(parts) not in (9, 10):
         return False
     prefix, verdict, task_code, pending_shape, mutex_state, health_state, run_state, history_code, log_code = parts[:9]
@@ -2461,6 +2480,142 @@ def _probe_protected_supervisor_config(event):
     return _probe_protected_supervisor_read(event, _SUPERVISOR_CONFIG_PROBE, inspect)
 
 
+def _probe_supervisor_active_run(runtime, acquisition, root, owner, executable, arguments, identity, task_code):
+    """Report the first failed read-side check and the current record correlations."""
+    sha, source, desktop = identity
+    unreadable = object()
+
+    def read(name):
+        try:
+            return runtime._supervisor_deployment_value(name)
+        except Exception:
+            return unreadable
+
+    raw_run, raw_upgrade = read("Run"), read("UpgradePending")
+    run = _parse_supervisor_intent(raw_run, require_instance=True)
+    owner_drift = None
+    if raw_run is unreadable:
+        run_state = "RUN_UNREADABLE"
+    elif raw_run is None:
+        run_state = "RUN_ABSENT"
+    elif run is None:
+        run_state = "RUN_MALFORMED"
+    else:
+        run_state = "RUN_UNCORRELATED"
+        if run["sid"] != owner[2]:
+            owner_drift = "ACTIVE_RUN_OWNER_DRIFT"
+        elif (run["session"], run["desktop"]) != (owner[1], desktop):
+            owner_drift = "ACTIVE_RUN_SESSION_DRIFT"
+
+    if raw_upgrade is unreadable:
+        upgrade_state = "UPGRADE_UNREADABLE"
+    elif raw_upgrade is None:
+        upgrade_state = "UPGRADE_ABSENT"
+    else:
+        try:
+            upgrade = _parse_supervisor_upgrade(runtime, raw_upgrade)
+            upgrade_state = "UPGRADE_MATCH_RUN" if _parse_supervisor_intent(
+                upgrade["run"], require_instance=True,
+            ) == run else "UPGRADE_OTHER_RUN"
+        except (Denied, ValueError, TypeError, RecursionError):
+            upgrade_state = "UPGRADE_MALFORMED"
+
+    mutex_state = _probe_supervisor_mutex(runtime)
+    health_state = _probe_supervisor_health_state(
+        runtime, run if owner_drift is None else None, executable, owner,
+        mutex_active=(mutex_state == "MUTEX_ACTIVE"),
+    )
+
+    def first_stage():
+        nonlocal run_state
+        if upgrade_state in {"UPGRADE_UNREADABLE", "UPGRADE_MALFORMED"}:
+            return upgrade_state
+        if task_code != "TASK_INSTANCE_PRESENT":
+            if task_code == "TASK_READY" and raw_upgrade is not None:
+                return upgrade_state
+            return "ACTIVE_TASK_UNVERIFIED"
+        if run is None:
+            return run_state
+        try:
+            instance = _supervisor_task(acquisition, executable, arguments, root, owner)
+        except subprocess.TimeoutExpired:
+            return "ACTIVE_TASK_PROBE_TIMEOUT"
+        except Exception:
+            return "ACTIVE_TASK_UNVERIFIED"
+        if not _SUPERVISOR_INSTANCE.fullmatch(instance):
+            return "ACTIVE_READ_STATE_CHANGED"
+        if instance != run["instance"]:
+            return "ACTIVE_TASK_INSTANCE_MISMATCH"
+        run_state = "RUN_MATCH"
+        if owner_drift is not None:
+            return owner_drift
+        try:
+            config, config_pin = runtime._resolve_runtime_config(root, owner=owner, observe_only=True, protected=True)
+        except Exception:
+            return "ACTIVE_CONFIG_UNVERIFIED"
+        if run["config"] != str(config):
+            return "ACTIVE_CONFIG_PATH_MISMATCH"
+        if run["config_digest"] != config_pin:
+            return "ACTIVE_CONFIG_DIGEST_MISMATCH"
+        if raw_upgrade is not None:
+            return upgrade_state
+        if health_state != "HEALTH_MATCH_LIVE":
+            return health_state
+        pins = {key: run[key] for key in (*runtime._ENROLLMENT_PINS, "config_digest")}
+        try:
+            health = _read_supervisor_health(runtime, pins, executable, owner)
+        except Exception:
+            return "HEALTH_UNREADABLE"
+        if health is None:
+            return "ACTIVE_HEALTH_CHANGED"
+        if health["health"] not in runtime._OBSERVED_CHROME_HEALTH:
+            return health["health"]
+        if run["source_sha"] == sha:
+            if run["source_digest"] != source:
+                return "ACTIVE_RUN_SOURCE_UNVERIFIED"
+            return "ACTIVE_READ_CHECKS_COMPLETE"
+        mode = health.get("mode")
+        if mode not in (runtime._CHROME_HEALTH_ONLY, runtime._OPERATIONAL_TICK_V1):
+            return "ACTIVE_HEALTH_MODE_UNVERIFIED"
+        if _verify_prior_supervisor_source(
+            root, run["source_sha"], run["source_digest"], sha, source,
+            require_rehashed=True, require_tick=(mode == runtime._OPERATIONAL_TICK_V1),
+        ) != "GIT_HISTORY_REHASHED":
+            return "ACTIVE_RUN_SOURCE_UNVERIFIED"
+        try:
+            if _supervisor_upgrade_enrollment_pending(runtime, run, health["pid"]):
+                return "ACTIVE_ENROLLMENT_UNVERIFIED"
+        except Exception:
+            return "ACTIVE_ENROLLMENT_UNVERIFIED"
+        try:
+            _supervisor_upgrade_chrome_pin(runtime, acquisition, root, owner, config, config_pin, mode)
+        except Exception:
+            return "ACTIVE_CHROME_UNVERIFIED"
+        try:
+            if not _supervisor_upgrade_task_process(acquisition, executable, arguments, root, owner, run, health["pid"]):
+                return "ACTIVE_TASK_PROCESS_UNVERIFIED"
+        except subprocess.TimeoutExpired:
+            return "ACTIVE_TASK_PROCESS_TIMEOUT"
+        except Exception:
+            return "ACTIVE_TASK_PROCESS_UNVERIFIED"
+        try:
+            latest = _read_supervisor_health(runtime, pins, executable, owner)
+        except Exception:
+            return "HEALTH_UNREADABLE"
+        if latest is None or any(latest.get(key) != health.get(key) for key in ("pid", "created", "mode", "health")):
+            return "ACTIVE_HEALTH_CHANGED"
+        return "ACTIVE_READ_CHECKS_COMPLETE"
+
+    stage = first_stage()
+    if (read("Run"), read("UpgradePending")) != (raw_run, raw_upgrade):
+        stage = "ACTIVE_READ_STATE_CHANGED"
+    elif (task_code != "TASK_INSTANCE_PRESENT" and raw_run is None and raw_upgrade is None
+          and health_state == "HEALTH_ABSENT" and mutex_state == "MUTEX_INACTIVE"):
+        # Keep the scalar result when no exact instance or deployment evidence is present.
+        return task_code
+    return "+".join((task_code, stage, run_state, mutex_state, health_state, upgrade_state))
+
+
 def _probe_protected_supervisor_task(event):
     def inspect(result, runtime, acquisition, root, owner, executable, arguments, recheck_identity, identity):
         sha, source, desktop = identity
@@ -2478,9 +2633,17 @@ def _probe_protected_supervisor_task(event):
         _, prior_arguments = _supervisor_prior_registration(acquisition, root)
         pending_before = read_pending()
         if pending_before[0] != "PRESENT":
-            task_code = _supervisor_task_probe(
-                acquisition, executable, arguments, root, owner, prior_arguments=prior_arguments,
-            )
+            try:
+                task_code = _supervisor_task_probe(
+                    acquisition, executable, arguments, root, owner, prior_arguments=prior_arguments,
+                )
+            except subprocess.TimeoutExpired:
+                result["code"] = "TASK_PROBE_TIMEOUT"
+                return
+            code = task_code
+            if pending_before[0] == "ABSENT":
+                code = _probe_supervisor_active_run(runtime, acquisition, root, owner, executable, arguments,
+                                                    identity, task_code)
             recheck_identity()
             result["code"] = "SUPERVISOR_RUNTIME_UNAVAILABLE"
             if (_supervisor_expected_registration(acquisition, root) != (executable, arguments)
@@ -2491,8 +2654,7 @@ def _probe_protected_supervisor_task(event):
                 result["code"] = "PENDING_INTENT_CHANGED"
                 return
             if pending_before[0] == "ABSENT":
-                code = task_code
-                status = "OBSERVED" if code in _SUPERVISOR_TASK_PROBE_OBSERVED else "HOLD"
+                status = "OBSERVED" if task_code in _SUPERVISOR_TASK_PROBE_OBSERVED else "HOLD"
             else:
                 code = "PENDING_INTENT_UNKNOWN_" + task_code
                 status = "HOLD"
@@ -2591,6 +2753,24 @@ def _parse_supervisor_upgrade(runtime, raw):
             or _parse_supervisor_intent(value["run"], require_instance=True) is None):
         deny("SUPERVISOR_ACTIVE_UNVERIFIED")
     return value
+
+
+def _supervisor_upgrade_enrollment_pending(runtime, prior, pid):
+    raw = runtime._supervisor_deployment_value(runtime._ENROLLMENT_INTENT)
+    if raw is None:
+        return False
+    intent = runtime._parse_enrollment_intent(raw, prior)
+    receipt_raw = runtime._supervisor_deployment_value(runtime._ENROLLMENT_RECEIPT)
+    if intent is None:
+        # A terminal receipt from a retired nonce remains available to its original caller.
+        previous = json.loads(raw, object_pairs_hook=_object_unique)
+        intent = runtime._parse_enrollment_intent(raw, previous)
+        row = json.loads(receipt_raw, object_pairs_hook=_object_unique) if receipt_raw else {}
+        pid = row.get("pid")
+        if type(pid) is not int or not 0 < pid < 2**32:
+            return True
+    receipt = runtime._enrollment_receipt(receipt_raw, intent, pid)
+    return receipt is None or receipt["code"] == runtime._ENROLLMENT_UNKNOWN
 
 
 def _confirmed_supervisor_health(runtime, expected, executable, owner, task, recheck, intent, instance):
@@ -2705,22 +2885,7 @@ def _deploy_protected_supervisor(event):
                 deny(failure)
 
         def enrollment_pending(prior, pid):
-            raw = runtime._supervisor_deployment_value(runtime._ENROLLMENT_INTENT)
-            if raw is None:
-                return False
-            intent = runtime._parse_enrollment_intent(raw, prior)
-            receipt_raw = runtime._supervisor_deployment_value(runtime._ENROLLMENT_RECEIPT)
-            if intent is None:
-                # A terminal receipt from a retired nonce remains available to
-                # its original caller. The current runtime cannot act on it.
-                previous = json.loads(raw, object_pairs_hook=_object_unique)
-                intent = runtime._parse_enrollment_intent(raw, previous)
-                row = json.loads(receipt_raw, object_pairs_hook=_object_unique) if receipt_raw else {}
-                pid = row.get("pid")
-                if type(pid) is not int or not 0 < pid < 2**32:
-                    return True
-            receipt = runtime._enrollment_receipt(receipt_raw, intent, pid)
-            return receipt is None or receipt["code"] == runtime._ENROLLMENT_UNKNOWN
+            return _supervisor_upgrade_enrollment_pending(runtime, prior, pid)
 
         def reserve_stop(raw_run):
             nonlocal failure, upgrade

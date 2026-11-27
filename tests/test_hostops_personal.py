@@ -3419,6 +3419,7 @@ class PersonalCdp9444ConfigRegistryTests(unittest.TestCase):
         task_probe_request = encode({"schema": hostops.SCHEMA, "operation": task_probe, "parameters": {}})
         for status, code in (("OBSERVED", "TASK_READY"),
                              ("OBSERVED", "TASK_INSTANCE_PRESENT"),
+                             ("OBSERVED", "TASK_INSTANCE_PRESENT+CHROME_OBSERVATION_HOLD+RUN_MATCH+MUTEX_ACTIVE+HEALTH_MATCH_LIVE+UPGRADE_ABSENT"),
                              ("HOLD", "TASK_MISSING"),
                              ("HOLD", "TASK_DACL_REPR_MISMATCH"),
                              ("HOLD", "TASK_PRIOR_BOOTSTRAP_READY"),
@@ -3784,11 +3785,12 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.approval = event("read", "wakehub_supervisor_task_probe", {})
         return self.dispatch(mode="read")
 
-    def assert_task_probe_has_no_effects(self, *, pending_inspected=False):
-        if not pending_inspected:
+    def assert_task_probe_has_no_effects(self, *, pending_inspected=False, config_inspected=False):
+        if not pending_inspected and not config_inspected:
             self.runtime._supervisor_active.assert_not_called()
         self.runtime._supervisor_slot.assert_not_called()
-        self.config_read.assert_not_called()
+        if not config_inspected:
+            self.config_read.assert_not_called()
         self.user_config.assert_not_called()
         self.store.assert_not_called()
         self.spawn.assert_not_called()
@@ -3839,9 +3841,10 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.assertEqual(self.owner_session.call_args_list, [call()] * 2)
 
         self.probe_state = "TASK_INSTANCE_PRESENT"
+        receipt = self.dispatch_task_probe()
         self.assertEqual(
-            (self.dispatch_task_probe()["status"], self.dispatch_task_probe()["code"]),
-            ("OBSERVED", "TASK_INSTANCE_PRESENT"),
+            (receipt["status"], receipt["code"]),
+            ("OBSERVED", "TASK_INSTANCE_PRESENT+RUN_ABSENT+RUN_ABSENT+MUTEX_INACTIVE+HEALTH_ABSENT+UPGRADE_ABSENT"),
         )
         for code in sorted(hostops._SUPERVISOR_TASK_MISMATCH_CODES | {"TASK_BUSY"}):
             with self.subTest(code=code):
@@ -3853,7 +3856,7 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
                 self.probe_state = raw
                 observed = self.dispatch_task_probe()
                 self.assertEqual((observed["status"], observed["code"]), ("HOLD", "SUPERVISOR_RUNTIME_UNAVAILABLE"))
-        self.assert_task_probe_has_no_effects()
+        self.assert_task_probe_has_no_effects(pending_inspected=True)
         self.assertEqual(set(self.modes), {"probe"})
 
         # Verify deploy passes the exact same owner, executable, arguments and root.
@@ -3862,6 +3865,46 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.state = "CONFLICT"
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_TASK_CONFLICT")
         self.assertEqual(self.captured_task_envs[-1], probe_env)
+
+    def test_task_probe_reports_active_upgrade_stage_without_start_pending(self):
+        self.probe_state = "TASK_INSTANCE_PRESENT"
+        self.state = self.instance
+        prior = {**self.intent(self.nonce), "source_sha": "1" * 40, "source_digest": "2" * 64,
+                 "instance": self.instance}
+        self.values["Run"] = json.dumps(prior)
+        self.publish_health(source_sha=prior["source_sha"], source_digest=prior["source_digest"],
+                            health="CHROME_OBSERVATION_HOLD", mode=self.runtime._CHROME_HEALTH_ONLY)
+
+        receipt = self.dispatch_task_probe()
+        self.assertEqual((receipt["status"], receipt["code"]), (
+            "OBSERVED", "TASK_INSTANCE_PRESENT+CHROME_OBSERVATION_HOLD+RUN_MATCH+MUTEX_ACTIVE"
+            "+HEALTH_MATCH_LIVE+UPGRADE_ABSENT",
+        ))
+
+        self.state = "8c7770e8-3c62-4163-9c9f-d75621d3ca53"
+        self.assertEqual(self.dispatch_task_probe()["code"],
+                         "TASK_INSTANCE_PRESENT+ACTIVE_TASK_INSTANCE_MISMATCH+RUN_UNCORRELATED+MUTEX_ACTIVE"
+                         "+HEALTH_MATCH_LIVE+UPGRADE_ABSENT")
+        self.config_read.assert_called_once()
+
+        self.state = self.instance
+        self.values["UpgradePending"] = json.dumps({
+            "issue": 17, "comment": 1, "start_comment": 1, "run": self.values["Run"],
+            "pid": 123, "created": 456, "target": "a" * 64, "chrome": "b" * 64,
+        })
+        self.assertEqual(self.dispatch_task_probe()["code"],
+                         "TASK_INSTANCE_PRESENT+UPGRADE_MATCH_RUN+RUN_MATCH+MUTEX_ACTIVE"
+                         "+HEALTH_MATCH_LIVE+UPGRADE_MATCH_RUN")
+
+        self.probe_state = "TASK_BUSY"
+        receipt = self.dispatch_task_probe()
+        self.assertEqual((receipt["status"], receipt["code"]), (
+            "HOLD", "TASK_BUSY+ACTIVE_TASK_UNVERIFIED+RUN_UNCORRELATED+MUTEX_ACTIVE"
+            "+HEALTH_MATCH_LIVE+UPGRADE_MATCH_RUN",
+        ))
+        self.assertNotIn("StartPending", self.values)
+        self.assertEqual(set(self.modes), {"probe", "inspect"})
+        self.assert_task_probe_has_no_effects(config_inspected=True)
 
     def test_task_probe_reports_pending_intent_states_and_preflight_holds(self):
         self.values["StartPending"] = json.dumps(self.intent(self.nonce))
@@ -3895,8 +3938,10 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
             self.probe_state = "TASK_MISSING"
             receipt = self.dispatch_task_probe()
             self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "PENDING_INTENT_UNKNOWN_TASK_MISSING"))
-        with patch.object(self.runtime, "_supervisor_deployment_value",
-                          side_effect=[None, json.dumps(self.intent(self.nonce))]):
+        pending_reads = iter((None, json.dumps(self.intent(self.nonce))))
+        with patch.object(self.runtime, "_supervisor_deployment_value", side_effect=(
+            lambda name: next(pending_reads) if name == "StartPending" else self.values.get(name)
+        )):
             self.probe_state = "TASK_READY"
             receipt = self.dispatch_task_probe()
             self.assertEqual((receipt["status"], receipt["code"]), ("HOLD", "PENDING_INTENT_CHANGED"))
