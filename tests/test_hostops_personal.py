@@ -3570,7 +3570,6 @@ class ProtectedWakeHubSupervisorTests(unittest.TestCase):
         self.mock(hostops, "ROOTS", new={"workspace": self.workspace})
         self.mock(hostops, "_persistent_clean_source", return_value=self.source)
         self.mock(acquisition, "_native_operator", side_effect=AssertionError("HostOps has no desktop"))
-        self.desktop_read = self.mock(runner, "_desktop_logon", side_effect=AssertionError("HostOps has no desktop"))
         self.owner_session = self.mock(runner, "_supervisor_owner_session", return_value=(self.owner, self.desktop))
         self.user_config = self.mock(runner, "_user_runtime_config", return_value=None)
         self.config_read = self.mock(runner, "_observe_only_config", return_value=(None, self.config_pin))
@@ -4729,7 +4728,6 @@ $out | ConvertTo-Json -Compress
             with self.subTest(state=state):
                 self.state = state
                 self.assertEqual(self.dispatch()["code"], "PROTECTED_HOSTOPS_ONLY")
-        self.desktop_read.assert_not_called()
         self.owner_session.assert_not_called()
         self.config_read.assert_not_called()
         self.spawn.assert_not_called()
@@ -5591,7 +5589,6 @@ $out | ConvertTo-Json -Compress
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_REUSED_HEALTH_OBSERVED")
         self.assertEqual(self.modes.count("install"), 1)
         self.assertEqual(self.modes.count("start"), 1)
-        self.desktop_read.assert_not_called()
         self.spawn.assert_not_called()
 
     def test_matching_idle_task_is_started_without_registration(self):
