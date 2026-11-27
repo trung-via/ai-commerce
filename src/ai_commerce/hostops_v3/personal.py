@@ -3038,7 +3038,7 @@ def _supervisor_upgrade_chrome_pin(runtime, acquisition, root, owner, config, co
         origin = journal.enrolled_origin(chrome.runtime.registration, owner[2], for_upgrade=True)
         after = journal.path.stat()
         identity = (after.st_dev, after.st_ino)
-        if ((origin is None and not chrome.runtime.direct)
+        if ((origin is None and not chrome.runtime.exact_routes)
                 or not after.st_ino or identity != (before.st_dev, before.st_ino)):
             deny("SUPERVISOR_ACTIVE_UNVERIFIED")
         listeners, processes = provenance[4]

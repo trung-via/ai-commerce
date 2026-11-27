@@ -5611,6 +5611,254 @@ class SimulatedWakeHubCrash(BaseException):
 
 
 @pytest.fixture
+def job_routes(flat05, monkeypatch):
+    f = flat05
+    f.consent.pop("chat_target")
+    f.consent["job_routes"] = True
+    f.save()
+    f.select("github-issue-created")
+    issue = f.issue.target
+    source = r.JobSource(issue.identity.repository, issue.identity.repository_id, issue.identity.object_id)
+    f.sources.repo["owner"] = {"id": issue.creation.creator_id, "type": "User"}
+    issue_url = f.sources.root_url + f"/issues/{issue.creation.issue_number}"
+    responses = f.sources.responses
+    comments_url = issue_url + "/comments?per_page=20&page=1"
+    responses[comments_url] = []
+    account = f.ui.account_id
+    proofs = {}
+
+    def append(comment_id, previous=None, *, creator=None, scope=source, target=issue):
+        intent = r.new_job_route_intent(scope, previous=previous)
+        url = f.sources.root_url + f"/issues/{target.creation.issue_number}"
+        comment = {
+            "id": comment_id, "url": f.sources.root_url + f"/issues/comments/{comment_id}",
+            "issue_url": url, "body": intent.body(),
+            "created_at": target.creation.created_at, "updated_at": target.creation.created_at,
+            "user": {"id": creator or target.creation.creator_id, "type": "User"},
+        }
+        responses.setdefault(url + "/comments?per_page=20&page=1", []).append(comment)
+        responses[comment["url"]] = dict(comment)
+        return intent
+
+    def prove(intent, url, *, account_id=account):
+        proofs[intent.correlation] = r.JobRouteWitness(intent.correlation, account_id, url,
+                                                       "turn-" + intent.correlation[:16])
+
+    def resolve(self, intent, comment_id, account_id):
+        return proofs.get(intent.correlation)
+
+    monkeypatch.setattr(r.JobOriginAuthority, "resolve", resolve)
+    return SimpleNamespace(f=f, source=source, append=append, prove=prove, comments=responses[comments_url],
+                           account=account, url=f.exact.url, responses=responses,
+                           event_id="github-issue-created-v1:" + issue.identity.key)
+
+
+@pytest.mark.parametrize("flat05", ["direct"], indirect=True)
+def test_job_route_admission_waits_for_origin_and_then_uses_only_latest(job_routes):
+    j = job_routes
+    f = j.f
+    assert f.s.run().code == "JOB_ROUTE_INTENT_REQUIRED"
+    assert f.rows()[j.event_id]["status"] == "PENDING"
+    a = j.append(30)
+    assert f.s.run().code == "JOB_ROUTE_PROOF_PENDING"
+    b = j.append(31, 30)
+    j.prove(a, j.url)
+    assert f.s.run().code == "JOB_ROUTE_PROOF_PENDING"
+    assert f.ui.clicks == 0
+    destination = "https://chatgpt.com/c/22222222-2222-4222-8222-222222222222"
+    j.prove(b, destination)
+    f.exact.url = destination
+    result = f.s.run()
+    assert result.code == r._UI_TURN_OBSERVED
+    assert f.rows()[j.event_id]["evidence"]["job_route"] == {"source": asdict(j.source), "comment_id": 31}
+    assert f.ui.clicks == 1
+    c = j.append(32, 31)
+    j.prove(c, j.url)
+    f.exact.url = j.url
+    assert f.s.run().code == "BRAIN_RECEIPT_UNAVAILABLE"
+    assert f.ui.clicks == 1 and len(f.rows()) == 1
+    with sqlite3.connect(f.s.path) as db:
+        raw, = db.execute("SELECT history FROM job_routes WHERE job_key = ?", (j.source.key,)).fetchone()
+    history = json.loads(raw)
+    assert [item["comment_id"] for item in history] == [30, 31, 32]
+    assert history[0]["witness"]["chat_url"] == j.url
+
+
+@pytest.mark.parametrize("flat05", ["direct"], indirect=True)
+@pytest.mark.parametrize("phase", ["check", "click"])
+def test_job_route_restart_rebinds_only_before_possible_effect(job_routes, phase):
+    j = job_routes
+    f = j.f
+    a = j.append(30)
+    j.prove(a, j.url)
+    f.ui.fail_at = phase
+    with pytest.raises(SimulatedWakeHubCrash):
+        f.s.run()
+    b = j.append(31, 30)
+    destination = "https://chatgpt.com/c/22222222-2222-4222-8222-222222222222"
+    j.prove(b, destination)
+    f.ui.fail_at = None
+    if phase == "check":
+        f.exact.url = destination
+        expected = (r._UI_TURN_OBSERVED, 31)
+    else:
+        expected = (r._UI_TURN_RECONCILED, 30)
+    result = f.s.run()
+    assert (result.code, f.rows()[j.event_id]["evidence"]["job_route"]["comment_id"]) == expected
+    assert f.ui.clicks == 1 and len(f.rows()) == 1
+
+
+@pytest.mark.parametrize("flat05", ["direct"], indirect=True)
+def test_job_route_rejects_wrong_account_foreign_comment_and_stale_cas(job_routes):
+    j = job_routes
+    f = j.f
+    a = j.append(30, creator=987)
+    j.prove(a, j.url)
+    assert f.s.run().code == "JOB_ROUTE_INTENT_REQUIRED"
+    a = j.append(31)
+    j.prove(a, j.url, account_id="unrelated-account")
+    assert f.s.run().code == "JOB_ROUTE_PROOF_INVALID"
+    j.prove(a, j.url)
+    b = j.append(32, 31)
+    stale = j.append(33, 31)
+    j.prove(stale, j.url)
+    assert f.s.run().code == "JOB_ROUTE_PROOF_PENDING"
+    assert f.ui.clicks == 0
+    j.prove(b, j.url)
+    assert f.s.run().code == r._UI_TURN_OBSERVED
+    assert f.rows()[j.event_id]["evidence"]["job_route"]["comment_id"] == 32
+
+
+@pytest.mark.parametrize("flat05", ["direct"], indirect=True)
+def test_job_route_unproven_transfer_leaves_other_job_eligible(job_routes):
+    j = job_routes
+    f = j.f
+    a = j.append(30)
+    j.prove(a, j.url)
+    j.append(31, 30)
+    other = f.sources.add(1318).target
+    source = replace(j.source, issue_id=other.identity.object_id)
+    grant = f.consent["grants"][0]
+    f.consent["grants"].append(dict(grant, source_key=other.identity.key))
+    f.save()
+    second = j.append(40, target=other, scope=source)
+    j.prove(second, j.url)
+    f.s.run(2)
+    second_id = "github-issue-created-v1:" + other.identity.key
+    assert f.rows()[j.event_id]["status"] == "PENDING"
+    assert f.rows()[second_id]["evidence"]["job_route"]["comment_id"] == 40
+    assert f.ui.clicks == 1
+
+
+@pytest.mark.parametrize("flat05", ["direct"], indirect=True)
+def test_job_route_comment_readback_and_native_capability_are_required(job_routes, monkeypatch):
+    j = job_routes
+    f = j.f
+    a = j.append(30)
+    exact_url = j.comments[-1]["url"]
+    j.prove(a, j.url)
+    exact = j.responses[exact_url]
+    j.responses[exact_url] = HTTPError(exact_url, 403, "Forbidden", {}, None)
+    assert f.s.run().code == "GITHUB_READ_REJECTED"
+    j.responses[exact_url] = exact
+    j.responses[exact_url]["body"] = "Different readback"
+    assert f.s.run().code == "JOB_ROUTE_COMMENT_UNPROVEN"
+    j.responses[exact_url] = dict(j.comments[-1])
+
+    def ambiguous(self, intent, comment_id, account_id):
+        return [r.JobRouteWitness(a.correlation, account_id, j.url, ref) for ref in ("first", "second")]
+
+    monkeypatch.setattr(r.JobOriginAuthority, "resolve", ambiguous)
+    assert f.s.run().code == "JOB_ROUTE_PROOF_INVALID"
+
+    def unavailable(self, intent, comment_id, account_id):
+        raise r.DependencyHold("JOB_ORIGIN_CAPABILITY_UNAVAILABLE")
+
+    monkeypatch.setattr(r.JobOriginAuthority, "resolve", unavailable)
+    assert f.s.run().code == "JOB_ORIGIN_CAPABILITY_UNAVAILABLE"
+    with sqlite3.connect(f.s.path) as db:
+        raw, = db.execute("SELECT history FROM job_routes").fetchone()
+        assert json.loads(raw)[0]["witness"] is None
+    assert f.rows()[j.event_id]["status"] == "PENDING" and f.ui.clicks == 0
+    del f.consent["job_routes"]
+    f.consent["chat_target"] = j.url
+    f.save()
+    assert f.s.run().code == "JOB_ROUTE_MODE_REQUIRED"
+    assert f.ui.clicks == 0
+
+
+@pytest.mark.parametrize("flat05", ["direct"], indirect=True)
+def test_job_route_owner_lock_fences_a_competing_transfer(job_routes):
+    j = job_routes
+    f = j.f
+    a = j.append(30)
+    j.prove(a, j.url)
+    journal = r.Journal(f.s.path, f.i["root"])
+
+    def competing_writer():
+        with pytest.raises(r.RuntimeHold, match="^JOURNAL_BUSY$"):
+            with journal.locked(f.i["registration"]):
+                pytest.fail("Competing transaction entered the owner lock")
+        with sqlite3.connect(f.s.path) as db:
+            row = db.execute("SELECT record FROM events").fetchone()
+            assert json.loads(row[0])["evidence"]["job_route"]["comment_id"] == 30
+
+    f.ui.on_stage["click"] = competing_writer
+    assert f.s.run().code == r._UI_TURN_OBSERVED
+    assert f.ui.clicks == 1
+
+
+@pytest.mark.parametrize("flat05", ["direct"], indirect=True)
+def test_job_route_sqlite_competing_write_keeps_last_committed_revision(job_routes):
+    j = job_routes
+    f = j.f
+    a = j.append(30)
+    assert f.s.run().code == "JOB_ROUTE_PROOF_PENDING"
+    b = j.append(31, 30)
+    journal = r.Journal(f.s.path, f.i["root"])
+    with journal.locked(f.i["registration"]) as (txn, data):
+        saved = data["job_routes"][j.source.key]
+        data["job_routes"][j.source.key] = r._job_route_chain(j.source, [(30, a), (31, b)], saved)
+        with sqlite3.connect(f.s.path, timeout=0, isolation_level=None) as competitor:
+            competitor.execute("BEGIN IMMEDIATE")
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                txn.write(data)
+            competitor.rollback()
+    with journal.locked(f.i["registration"]) as (_, data):
+        assert [row["comment_id"] for row in data["job_routes"][j.source.key]] == [30]
+    assert f.s.run().code == "JOB_ROUTE_PROOF_PENDING"
+    with journal.locked(f.i["registration"]) as (_, data):
+        assert [row["comment_id"] for row in data["job_routes"][j.source.key]] == [30, 31]
+
+
+def test_job_route_source_identity_includes_repository_global_issue_and_action():
+    first = r.JobSource(r.REPOSITORY, 1, 500, "batch", "action-a", "attempt-1")
+    assert first.key != replace(first, repository="example/ai-commerce", repository_id=2).key
+    assert first.key != replace(first, issue_id=501).key
+    assert first.key != replace(first, action_id="action-b").key
+    assert first.key == replace(first, attempt_id="attempt-2").key
+    assert first != replace(first, attempt_id="attempt-2")
+
+
+def test_job_route_late_proof_cannot_erase_newer_pending_intent():
+    source = r.JobSource(r.REPOSITORY, 1, 500)
+    a = r.new_job_route_intent(source)
+    b = r.new_job_route_intent(source, previous=30)
+    c = r.new_job_route_intent(source, previous=31)
+    existing = r._job_route_chain(source, [(30, a), (31, b)], [])
+    existing[-1]["witness"] = {"fixture": "arrived after C was submitted"}
+    copied = replace(a, previous=32)
+    latest = r._job_route_chain(source, [(30, a), (31, b), (32, c), (33, copied)], existing)
+    assert latest[1]["witness"] == existing[1]["witness"]
+    assert (latest[-1]["comment_id"], latest[-1]["witness"]) == (32, None)
+
+
+def test_job_route_approved_agy_skill_matches_verified_candidate_bytes():
+    assert hashlib.sha256(r._APPROVED_AGY_SKILL).hexdigest() == (
+        "75d81676028387a7f70dccaab0e922e88b93dfd63f815e020f739281435591ee")
+
+
+@pytest.fixture
 def flat05(request, flat04, r3a_ingress, monkeypatch):
     variant = getattr(request, "param", None)
     f = request.getfixturevalue("shared_root_chat") if variant is True else flat04
@@ -6211,6 +6459,52 @@ def standing_ef02(flat05):
 
     f.standing = SimpleNamespace(add=add, pages=pages)
     return f
+
+
+@pytest.mark.parametrize("flat05", ["direct"], indirect=True)
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_job_route_standing_ef02_links_the_exact_issue_action_and_run(standing_ef02, monkeypatch, cancelled):
+    f = standing_ef02
+    f.consent.pop("chat_target")
+    f.consent["job_routes"] = True
+    f.save()
+    job = f.standing.add(71, f.i["registration"].source_sha)
+    scope = f.consent["standing_ef02"]
+    root = f.sources.root_url
+    issue_url = f"{root}/issues/{job.issue['number']}"
+    issue = dict(job.issue, id=7001, url=issue_url, repository_url=root,
+                 created_at=job.run["created_at"])
+    f.sources.responses[issue_url] = issue
+    if cancelled:
+        job.run["conclusion"] = "cancelled"
+    f.sources.responses[f"{root}/actions/runs/71"] = job.run
+    action, = job.event["actions"]
+    source = r.JobSource(r.REPOSITORY, scope["repository_id"], issue["id"],
+                         job.event["batch_id"], action["action_id"], action["attempt_id"])
+    intent = r.new_job_route_intent(source)
+    comment = {"id": 88, "url": f"{root}/issues/comments/88", "issue_url": issue_url,
+               "body": intent.body(), "created_at": issue["created_at"], "updated_at": issue["created_at"],
+               "user": issue["user"]}
+    f.sources.responses[f"{issue_url}/comments?per_page=20&page=1"] = [comment]
+    f.sources.responses[comment["url"]] = comment
+
+    def resolve(self, actual, comment_id, account_id):
+        assert (actual, comment_id, account_id) == (intent, 88, scope["account_id"])
+        return r.JobRouteWitness(actual.correlation, account_id, f.exact.url, "fixture-origin")
+
+    monkeypatch.setattr(r.JobOriginAuthority, "resolve", resolve)
+    result = f.s.run()
+    row = f.rows()[job.event["event_id"]]
+    if cancelled:
+        assert result.code == "JOB_SOURCE_RECORD_ONLY" and row["status"] == "PENDING"
+        assert f.ui.clicks == 0
+    else:
+        assert result.code == r._UI_TURN_OBSERVED
+        assert row["evidence"]["job_route"] == {"source": asdict(source), "comment_id": 88}
+        assert f.ui.clicks == 1
+    with sqlite3.connect(f.s.path) as db:
+        identity, = db.execute("SELECT identity FROM source_identities").fetchone()
+    assert json.loads(identity)["object_id"] == 71
 
 
 def test_standing_ef02_reopens_cursor_and_delivers_later_source_without_a_run_file(standing_ef02):
