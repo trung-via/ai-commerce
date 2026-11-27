@@ -517,7 +517,7 @@ def _protected_clean_workflow_sha(*, write=False, allow_blank_workflow_sha=False
     return sha
 
 
-def _persistent_clean_source(acquisition, sha, *, pin_runtime=False):
+def _persistent_clean_source(acquisition, sha, *, pin_runtime=False, runtime_commitment=None):
     """Verify public checkout custody via Git pin, clean tree, bytes and non-reparse paths.
 
     Unlike private Chrome profile/handoff state, the public repository checkout
@@ -578,6 +578,7 @@ def _persistent_clean_source(acquisition, sha, *, pin_runtime=False):
     src_root = root / "src"
     egg_info = src_root / "ai_commerce.egg-info"
     runtime_files = []
+    eol_tags = {}
     try:
         for folder, dirs, files in os.walk(src_root, onerror=walk_error):
             parent = Path(folder)
@@ -606,7 +607,10 @@ def _persistent_clean_source(acquisition, sha, *, pin_runtime=False):
                 if not _clean_source_bytes_match(path, raw, pinned.read_bytes()):
                     deny("SOURCE_BYTES_MISMATCH")
                 if pin_runtime and path.suffix == ".py" and src_root / "ai_commerce" in path.parents:
-                    runtime_files.append([path.relative_to(src_root).as_posix(), hashlib.sha256(raw).hexdigest()])
+                    relative = path.relative_to(src_root).as_posix()
+                    runtime_files.append([relative, hashlib.sha256(raw).hexdigest()])
+                    if runtime_commitment is not None:
+                        eol_tags[relative] = _supervisor_eol_tag(raw)
                 tracked.remove(path)
     except Denied:
         raise
@@ -615,8 +619,34 @@ def _persistent_clean_source(acquisition, sha, *, pin_runtime=False):
     if tracked:
         deny("SOURCE_UNTRACKED_FILE")
     if pin_runtime:
+        if runtime_commitment is not None:
+            packed = sum(tag << (2 * index) for index, (_, tag) in enumerate(sorted(eol_tags.items())))
+            layout = packed.to_bytes((len(eol_tags) + 3) // 4, "little")
+            runtime_commitment["source_eols"] = base64.urlsafe_b64encode(layout).decode("ascii").rstrip("=")
         return hashlib.sha256(json.dumps(sorted(runtime_files), separators=(",", ":")).encode("ascii")).hexdigest()
     return source
+
+
+def _supervisor_eol_tag(raw):
+    """Encode retain-blob, uniform LF, or uniform CRLF in two bits per path."""
+    normalized = _normalize_crlf_text(raw)
+    if normalized is None or b"\n" not in normalized:
+        return 0
+    if raw == normalized:
+        return 1
+    return 2 if raw == normalized.replace(b"\n", b"\r\n") else 0
+
+
+def _decode_supervisor_eols(value):
+    if type(value) is not str or re.fullmatch(r"[A-Za-z0-9_-]{2,1366}", value) is None:
+        return None
+    try:
+        packed = base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
+    except ValueError:
+        return None
+    if base64.urlsafe_b64encode(packed).decode("ascii").rstrip("=") != value:
+        return None
+    return packed
 
 
 _CLEAN_RUNTIME_PENDING_PREFIXES = (
@@ -1076,7 +1106,8 @@ _SUPERVISOR_ACTIVE_PROBE_STAGES = (
         "ACTIVE_CONFIG_DIGEST_MISMATCH", "ACTIVE_RUN_SOURCE_UNVERIFIED", "ACTIVE_HEALTH_CHANGED",
         "ACTIVE_HEALTH_MODE_UNVERIFIED", "ACTIVE_ENROLLMENT_UNVERIFIED", "ACTIVE_CHROME_UNVERIFIED",
         "ACTIVE_TASK_PROCESS_UNVERIFIED", "ACTIVE_TASK_PROBE_TIMEOUT", "ACTIVE_TASK_PROCESS_TIMEOUT",
-        "ACTIVE_READ_STATE_CHANGED", "ACTIVE_READ_CHECKS_COMPLETE",
+        "ACTIVE_READ_STATE_CHANGED", "ACTIVE_READ_CHECKS_COMPLETE", "ACTIVE_STARTUP_UNVERIFIED",
+        "ACTIVE_LEGACY_RETIREMENT_ELIGIBLE",
     }
 )
 _SUPERVISOR_PENDING_HISTORY_CODES = frozenset({
@@ -1946,9 +1977,8 @@ def _parse_supervisor_intent(raw, *, require_instance=False):
     if type(value) is not dict:
         return None
     if require_instance:
-        if value.keys() != base | {"instance"}:
-            return None
-    elif not base <= value.keys() <= base | {"instance"}:
+        base.add("instance")
+    if not base <= value.keys() <= base | {"instance", "source_eols"}:
         return None
     if (type(value["source_sha"]) is not str or re.fullmatch(r"[a-f0-9]{40}", value["source_sha"]) is None
             or any(type(value[key]) is not str or re.fullmatch(r"[a-f0-9]{64}", value[key]) is None
@@ -1958,6 +1988,8 @@ def _parse_supervisor_intent(raw, *, require_instance=False):
             or type(value["config"]) is not str or not 0 < len(value["config"]) <= 2048
             or any(ch in value["config"] for ch in "\x00\r\n")
             or type(value["nonce"]) is not str or re.fullmatch(r"[a-f0-9]{32}", value["nonce"]) is None):
+        return None
+    if "source_eols" in value and _decode_supervisor_eols(value["source_eols"]) is None:
         return None
     if "instance" in value and (type(value["instance"]) is not str
                                 or _SUPERVISOR_INSTANCE.fullmatch(value["instance"]) is None):
@@ -2057,13 +2089,14 @@ def _probe_supervisor_run_state(runtime, intent):
         return "RUN_UNCORRELATED"
     if (parsed["nonce"] == intent["nonce"]
             and ("instance" not in intent or parsed["instance"] == intent["instance"])
+            and parsed.get("source_eols") == intent.get("source_eols")
             and all(parsed[key] == intent[key]
                     for key in ("source_sha", "source_digest", "config_digest", "desktop", "session", "sid", "config"))):
         return "RUN_MATCH"
     return "RUN_PRIOR"
 
 
-def _probe_supervisor_startup_receipt(runtime, intent):
+def _probe_supervisor_startup_receipt(runtime, intent, *, pid=None):
     """Read and correlate the bounded private StartupReceipt without leaking raw data.
 
     Only receipts with verified matching nonce/source/config/desktop/session pins
@@ -2108,7 +2141,7 @@ def _probe_supervisor_startup_receipt(runtime, intent):
         return "STARTUP_MALFORMED"
     if intent is None:
         return "STARTUP_UNCORRELATED"
-    if any(value[k] != intent[k] for k in pin_keys):
+    if any(value[k] != intent[k] for k in pin_keys) or (pid is not None and value["pid"] != pid):
         return "STARTUP_FOREIGN"
     return f"STARTUP_MATCH_{stage}_{reason}"
 
@@ -2253,11 +2286,11 @@ def _read_supervisor_health(runtime, expected, executable, owner):
     return None
 
 
-def _supervisor_source(runtime, acquisition, sha):
+def _supervisor_source(runtime, acquisition, sha, *, runtime_commitment=None):
     workflow_runtime = Path(os.environ["GITHUB_WORKSPACE"]) / "src/ai_commerce/wakehub_runtime/runner.py"
     if Path(runtime.__file__).absolute() != workflow_runtime:
         deny("SOURCE_CUSTODY_UNVERIFIED")
-    return _persistent_clean_source(acquisition, sha, pin_runtime=True)
+    return _persistent_clean_source(acquisition, sha, pin_runtime=True, runtime_commitment=runtime_commitment)
 
 
 def _supervisor_interpreter(acquisition, root):
@@ -2292,7 +2325,7 @@ def _supervisor_prior_registration(acquisition, root):
 def _git_bytes(root, args, *, stdin_bytes=None):
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), *args], input=stdin_bytes, capture_output=True,
+            ["git", "--no-replace-objects", "-C", str(root), *args], input=stdin_bytes, capture_output=True,
             timeout=15, check=False, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
         )
     except subprocess.TimeoutExpired:
@@ -2319,38 +2352,51 @@ _SUPERVISOR_PRIOR_SOURCE_PROVENANCES = frozenset({
     "GIT_HISTORY_REHASHED",
     "REVIEWED_PRIOR_SHA_COMPATIBILITY",
 })
+_SUPERVISOR_LEGACY_RETIREMENT = "LEGACY_RETIREMENT_GUARDS_VERIFIED"
+
+
+def _prior_legacy_retirement_guards(runner_bytes):
+    # These are the reviewed protected dispatch and native observation paths.
+    # Runtimes with an enrollment mailbox must also share the deploy fence.
+    runner = runner_bytes.replace(b"\r\n", b"\n")
+
+    def function(name):
+        return runner.partition(b"\ndef " + name + b"(")[2].split(b"\n\n\n", 1)[0]
+
+    launch = function(b"run_supervisor")
+    observe = function(b"_observe_only_supervisor")
+    if (b"observe_only = not isinstance(chrome, _SupervisorChrome)" not in launch
+            or b"if observe_only:\n        return _observe_only_supervisor(" not in launch
+            or b"legacy_health_only=True" not in function(b"_observe_only_config")
+            or b"_deployment_health(deployment, health_only=True)" not in observe
+            or b"state, provenance, pending = sender.lifecycle_snapshot()" not in observe
+            or b"result = _registered_result(observe)" not in observe):
+        return False
+    if b"_receive_enrollment" not in runner:
+        return True
+    return b"\n        with _supervisor_slot(_SUPERVISOR_DEPLOY_MUTEX):\n" in function(b"_receive_enrollment")
 
 
 def _verify_prior_supervisor_source(root, prior_sha, prior_digest, current_sha, current_digest, *,
-                                    require_rehashed=False, require_tick=False, report_failure=False):
-    """Return closed prior-source provenance for legacy health-only recovery, or None.
-
-    - Exact match to current verified checkout SHA requires exact runtime digest
-      equality (CURRENT_SOURCE_EXACT).
-    - Exact reviewed immutable prior SHA (a74e90f3...) returns
-      REVIEWED_PRIOR_SHA_COMPATIBILITY without requiring the old Git object
-      graph or reconstructing the prior Python worktree.
-    - All other prior SHAs require full Git ancestry proof, exact raw or CRLF
-      worktree Python manifest match, and legacy health-only guards in runner.py
-      (GIT_HISTORY_REHASHED).
-    A live upgrade requires GIT_HISTORY_REHASHED, including for reviewed SHAs.
-    Operational upgrades also require the shared tick protocol in prior source.
-    The bounded READ can request a fixed stage code in place of None on failure.
-    """
+                                    require_rehashed=False, require_tick=False, report_failure=False,
+                                    source_eols=None, allow_legacy_retirement=False):
+    """Verify Git provenance. Legacy retirement still needs independent live custody."""
     def unverified(code):
         return code if report_failure else None
 
-    require_rehashed = require_rehashed or require_tick
+    require_rehashed = require_rehashed or require_tick or allow_legacy_retirement
+    packed = _decode_supervisor_eols(source_eols) if source_eols is not None else None
     if (type(prior_sha) is not str or re.fullmatch(r"[a-f0-9]{40}", prior_sha) is None
             or type(prior_digest) is not str or re.fullmatch(r"[a-f0-9]{64}", prior_digest) is None
             or type(current_sha) is not str or re.fullmatch(r"[a-f0-9]{40}", current_sha) is None
-            or type(current_digest) is not str or re.fullmatch(r"[a-f0-9]{64}", current_digest) is None):
+            or type(current_digest) is not str or re.fullmatch(r"[a-f0-9]{64}", current_digest) is None
+            or (source_eols is not None and packed is None)):
         return unverified("ACTIVE_SOURCE_PINS_INVALID")
     if prior_sha == current_sha:
         if prior_digest != current_digest:
             return unverified("ACTIVE_SOURCE_CURRENT_DIGEST_MISMATCH")
         return None if require_rehashed else "CURRENT_SOURCE_EXACT"
-    if not require_rehashed and prior_sha in _SUPERVISOR_REVIEWED_PRIOR_HEALTH_ONLY_SHAS:
+    if not require_rehashed and packed is None and prior_sha in _SUPERVISOR_REVIEWED_PRIOR_HEALTH_ONLY_SHAS:
         return "REVIEWED_PRIOR_SHA_COMPATIBILITY"
     phase = "PRIOR_OBJECT"
     try:
@@ -2369,30 +2415,37 @@ def _verify_prior_supervisor_source(root, prior_sha, prior_digest, current_sha, 
             if not rel_str.startswith("src/ai_commerce/") or not rel_str.endswith(".py"):
                 continue
             parts = meta.split()
-            if len(parts) != 3 or parts[1] != b"blob":
-                continue
-            if require_rehashed and parts[0] not in (b"100644", b"100755"):
+            if (len(parts) != 3 or parts[1] != b"blob" or re.fullmatch(rb"[a-f0-9]{40}", parts[2]) is None
+                    or (require_rehashed and parts[0] not in (b"100644", b"100755"))):
                 return unverified("ACTIVE_SOURCE_TREE_INVALID")
             names.append(rel_str[len("src/"):])
             blob_shas.append(parts[2].decode("ascii"))
-        if not names or len(names) > 4096:
+        if not names or len(names) > 4096 or len(set(names)) != len(names):
             return unverified("ACTIVE_SOURCE_TREE_INVALID")
+        eol_bits = 0
+        if packed is not None:
+            eol_bits = int.from_bytes(packed, "little")
+            if len(packed) != (len(names) + 3) // 4 or eol_bits >> (2 * len(names)):
+                return unverified("ACTIVE_SOURCE_PINS_INVALID")
+        eol_indexes = {name: index for index, name in enumerate(sorted(names))}
         phase = "BATCH"
         batch = _git_bytes(root, ("cat-file", "--batch"), stdin_bytes=("\n".join(blob_shas) + "\n").encode("ascii"))
         pos = 0
         raw_manifest = []
         crlf_manifest = []
         runner_bytes = None
-        for name in names:
+        for name, oid in zip(names, blob_shas):
             nl = batch.find(b"\n", pos)
             if nl < 0:
                 return unverified("ACTIVE_SOURCE_BATCH_TRUNCATED")
             header = batch[pos:nl].decode("ascii").split()
             if len(header) == 2 and header[1] == "missing":
                 return unverified("ACTIVE_SOURCE_BATCH_OBJECT_MISSING")
-            if len(header) != 3 or header[1] != "blob":
+            if len(header) != 3 or header[:2] != [oid, "blob"]:
                 return unverified("ACTIVE_SOURCE_BATCH_INVALID")
             size = int(header[2])
+            if size < 0:
+                return unverified("ACTIVE_SOURCE_BATCH_INVALID")
             pos = nl + 1
             if pos + size >= len(batch):
                 return unverified("ACTIVE_SOURCE_BATCH_TRUNCATED")
@@ -2402,32 +2455,67 @@ def _verify_prior_supervisor_source(root, prior_sha, prior_digest, current_sha, 
             pos += size + 1
             if name == "ai_commerce/wakehub_runtime/runner.py":
                 runner_bytes = blob
+            if packed is None:
+                crlf_blob = blob.replace(b"\n", b"\r\n") if b"\r" not in blob else blob
+                crlf_manifest.append([name, hashlib.sha256(crlf_blob).hexdigest()])
+            else:
+                tag = (eol_bits >> (2 * eol_indexes[name])) & 3
+                if tag:
+                    normalized = _normalize_crlf_text(blob)
+                    if tag == 3 or normalized is None or b"\n" not in normalized:
+                        return unverified("ACTIVE_SOURCE_PINS_INVALID")
+                    blob = normalized if tag == 1 else normalized.replace(b"\n", b"\r\n")
             raw_manifest.append([name, hashlib.sha256(blob).hexdigest()])
-            crlf_blob = blob.replace(b"\n", b"\r\n") if b"\r" not in blob else blob
-            crlf_manifest.append([name, hashlib.sha256(crlf_blob).hexdigest()])
         if pos != len(batch):
             return unverified("ACTIVE_SOURCE_BATCH_INVALID")
         if runner_bytes is None:
             return unverified("ACTIVE_SOURCE_RUNNER_MISSING")
         raw_digest = hashlib.sha256(json.dumps(sorted(raw_manifest), separators=(",", ":")).encode("ascii")).hexdigest()
         crlf_digest = hashlib.sha256(json.dumps(sorted(crlf_manifest), separators=(",", ":")).encode("ascii")).hexdigest()
-        if prior_digest not in (raw_digest, crlf_digest):
+        rehashed = prior_digest == raw_digest or (packed is None and prior_digest == crlf_digest)
+        retire_legacy = allow_legacy_retirement and not require_tick and packed is None
+        if not rehashed and not retire_legacy:
             return unverified("ACTIVE_SOURCE_DIGEST_MISMATCH")
         # Confirm the prior commit itself enforced legacy health-only mode for legacy 9444 configs.
         if (b"legacy_health_only=True" not in runner_bytes
                 or b"observe_only = not isinstance(chrome, _SupervisorChrome)" not in runner_bytes
-                or (require_rehashed and b"_deployment_health(deployment, health_only=True)" not in runner_bytes)):
+                or (require_rehashed and b"_deployment_health(deployment, health_only=True)" not in runner_bytes)
+                or (not rehashed and not _prior_legacy_retirement_guards(runner_bytes))):
             return unverified("ACTIVE_SOURCE_LEGACY_GUARD_MISSING")
         if require_tick and (b'_OPERATIONAL_TICK_V1 = "OPERATIONAL_TICK_V1"' not in runner_bytes
                              or b"_protected_operational_tick(run," not in runner_bytes
                              or b"stack.enter_context(_supervisor_slot(_SUPERVISOR_TICK_MUTEX))" not in runner_bytes):
             return unverified("ACTIVE_SOURCE_TICK_FENCE_MISSING")
-        return "GIT_HISTORY_REHASHED"
+        return "GIT_HISTORY_REHASHED" if rehashed else _SUPERVISOR_LEGACY_RETIREMENT
     except Denied as exc:
         outcome = {"GIT_READ_UNAVAILABLE": "UNAVAILABLE", "GIT_READ_TIMEOUT": "TIMEOUT"}.get(str(exc), "FAILED")
         return unverified(f"ACTIVE_SOURCE_{phase}_{outcome}")
     except (OSError, ValueError):
         return unverified(f"ACTIVE_SOURCE_{phase}_INVALID")
+
+
+def _supervisor_upgrade_source(runtime, root, prior, sha, source, mode, *, allow_legacy=True, report_failure=False):
+    options = {"require_rehashed": True}
+    if mode == runtime._OPERATIONAL_TICK_V1:
+        options["require_tick"] = True
+    elif mode == runtime._CHROME_HEALTH_ONLY and allow_legacy:
+        options["allow_legacy_retirement"] = True
+    if "source_eols" in prior:
+        options["source_eols"] = prior["source_eols"]
+    if report_failure:
+        options["report_failure"] = True
+    return _verify_prior_supervisor_source(root, prior["source_sha"], prior["source_digest"], sha, source, **options)
+
+
+def _legacy_retirement_startup_matches(runtime, prior, pid):
+    # Receipt writes were best effort. A present receipt must corroborate this
+    # launch, with its initial health allowed to differ from the current one.
+    startup = _probe_supervisor_startup_receipt(runtime, prior, pid=pid)
+    prefix = "STARTUP_MATCH_FIRST_HEALTH_"
+    return startup == "STARTUP_ABSENT" or (
+        startup.startswith(prefix) and startup.removeprefix(prefix) in (
+            {"HEALTH_PUBLISHED"} | _SUPERVISOR_DESKTOP_HOLDS | _SUPERVISOR_CHROME_HOLDS
+            | runtime._LEGACY_BROWSER_OBSERVATION_HOLDS))
 
 
 def _probe_protected_supervisor_read(event, operation, inspect):
@@ -2609,19 +2697,19 @@ def _probe_supervisor_active_run(runtime, acquisition, root, owner, executable, 
         mode = health.get("mode")
         if mode not in (runtime._CHROME_HEALTH_ONLY, runtime._OPERATIONAL_TICK_V1):
             return "ACTIVE_HEALTH_MODE_UNVERIFIED"
-        prior_source = _verify_prior_supervisor_source(
-            root, run["source_sha"], run["source_digest"], sha, source,
-            require_rehashed=True, require_tick=(mode == runtime._OPERATIONAL_TICK_V1), report_failure=True,
-        )
-        if prior_source != "GIT_HISTORY_REHASHED":
+        prior_source = _supervisor_upgrade_source(runtime, root, run, sha, source, mode, report_failure=True)
+        legacy_retirement = mode == runtime._CHROME_HEALTH_ONLY and prior_source == _SUPERVISOR_LEGACY_RETIREMENT
+        if prior_source != "GIT_HISTORY_REHASHED" and not legacy_retirement:
             return prior_source if prior_source in _SUPERVISOR_SOURCE_PROBE_STAGES else "ACTIVE_RUN_SOURCE_UNVERIFIED"
+        if legacy_retirement and not _legacy_retirement_startup_matches(runtime, run, health["pid"]):
+            return "ACTIVE_STARTUP_UNVERIFIED"
         try:
             if _supervisor_upgrade_enrollment_pending(runtime, run, health["pid"]):
                 return "ACTIVE_ENROLLMENT_UNVERIFIED"
         except Exception:
             return "ACTIVE_ENROLLMENT_UNVERIFIED"
         try:
-            options = {"expected_health": "CHROME_OWNED"} if lock_migration else {}
+            options = {"expected_health": "CHROME_OWNED"} if lock_migration or legacy_retirement else {}
             _supervisor_upgrade_chrome_pin(runtime, acquisition, root, owner, config, config_pin, mode, **options)
         except Exception as exc:
             if lock_migration:
@@ -2640,7 +2728,7 @@ def _probe_supervisor_active_run(runtime, acquisition, root, owner, executable, 
             return "HEALTH_UNREADABLE"
         if latest is None or any(latest.get(key) != health.get(key) for key in ("pid", "created", "mode", "health")):
             return "ACTIVE_HEALTH_CHANGED"
-        return "ACTIVE_READ_CHECKS_COMPLETE"
+        return "ACTIVE_LEGACY_RETIREMENT_ELIGIBLE" if legacy_retirement else "ACTIVE_READ_CHECKS_COMPLETE"
 
     stage = first_stage()
     if (read("Run"), read("UpgradePending")) != (raw_run, raw_upgrade):
@@ -2788,7 +2876,7 @@ def _parse_supervisor_upgrade(runtime, raw):
     value = json.loads(raw, object_pairs_hook=_object_unique)
     base = {"issue", "comment", "start_comment", "run", "pid", "created", "target", "chrome"}
     if (type(value) is not dict
-            or not base <= value.keys() <= base | {"target_sha", "mode", "nonce"}
+            or not base <= value.keys() <= base | {"target_sha", "mode", "nonce", "prior_source_provenance"}
             or any(type(value[key]) is not int or value[key] <= 0
                    for key in ("issue", "comment", "start_comment", "pid", "created"))
             or any(value[key] > 2**53 - 1 for key in ("issue", "comment", "start_comment"))
@@ -2801,17 +2889,22 @@ def _parse_supervisor_upgrade(runtime, raw):
             or ("mode" in value and value["mode"] not in (runtime._CHROME_HEALTH_ONLY, runtime._OPERATIONAL_TICK_V1))
             or ("nonce" in value and (type(value["nonce"]) is not str
                                       or not re.fullmatch(r"[a-f0-9]{32}", value["nonce"])))
-            or _parse_supervisor_intent(value["run"], require_instance=True) is None):
+            or ("prior_source_provenance" in value and (
+                value["prior_source_provenance"] != _SUPERVISOR_LEGACY_RETIREMENT
+                or value.get("mode") != runtime._CHROME_HEALTH_ONLY or "target_sha" not in value))):
+        deny("SUPERVISOR_ACTIVE_UNVERIFIED")
+    prior = _parse_supervisor_intent(value["run"], require_instance=True)
+    if prior is None or ("prior_source_provenance" in value and "source_eols" in prior):
         deny("SUPERVISOR_ACTIVE_UNVERIFIED")
     return value
 
 
 def _supervisor_upgrade_enrollment_pending(runtime, prior, pid):
     raw = runtime._supervisor_deployment_value(runtime._ENROLLMENT_INTENT)
-    if raw is None:
-        return False
-    intent = runtime._parse_enrollment_intent(raw, prior)
     receipt_raw = runtime._supervisor_deployment_value(runtime._ENROLLMENT_RECEIPT)
+    if raw is None:
+        return receipt_raw is not None
+    intent = runtime._parse_enrollment_intent(raw, prior)
     if intent is None:
         # A terminal receipt from a retired nonce remains available to its original caller.
         previous = json.loads(raw, object_pairs_hook=_object_unique)
@@ -2836,6 +2929,13 @@ def _confirmed_supervisor_health(runtime, expected, executable, owner, task, rec
             and task() == instance):
         return latest
     return None
+
+
+def _supervisor_start_pins(runtime, pins, commitment):
+    start_pins = {**pins, **commitment}
+    if len(json.dumps({**start_pins, "nonce": "0" * 32, "instance": "0" * 36})) > runtime._SUPERVISOR_INTENT_LIMIT:
+        deny("SOURCE_CUSTODY_UNVERIFIED")
+    return start_pins
 
 
 def _complete_supervisor_start(runtime, intent, instance, pending, *, upgrade=None):
@@ -2881,7 +2981,8 @@ def _deploy_protected_supervisor(event):
         upgrade = None
         prior = None
         failure = "SOURCE_CUSTODY_UNVERIFIED"
-        source = _supervisor_source(runtime, acquisition, sha)
+        commitment = {}
+        source = _supervisor_source(runtime, acquisition, sha, runtime_commitment=commitment)
         rerun = os.environ["GITHUB_RUN_ATTEMPT"] != "1"
         if (rerun and runtime._supervisor_deployment_value("StartPending") is None
                 and runtime._supervisor_deployment_value("Run") is None
@@ -2955,15 +3056,17 @@ def _deploy_protected_supervisor(event):
                 # Older operational runtimes have no shared tick fence.
                 deny(failure)
             operational = mode == runtime._OPERATIONAL_TICK_V1
-            history_check = {"require_tick": True} if operational else {}
-            if _verify_prior_supervisor_source(root, prior["source_sha"], prior["source_digest"], sha, source,
-                                               require_rehashed=True, **history_check) != "GIT_HISTORY_REHASHED":
+            provenance = _supervisor_upgrade_source(runtime, root, prior, sha, source, mode)
+            legacy_retirement = not operational and provenance == _SUPERVISOR_LEGACY_RETIREMENT
+            if provenance != "GIT_HISTORY_REHASHED" and not legacy_retirement:
                 deny(failure)
             pid, created = health["pid"], health["created"]
+            if legacy_retirement and not _legacy_retirement_startup_matches(runtime, prior, pid):
+                deny(failure)
 
             def observe_browser():
                 nonlocal failure
-                if not lock_migration:
+                if not lock_migration and not legacy_retirement:
                     return chrome_pin(mode)
                 try:
                     return chrome_pin(mode, expected_health="CHROME_OWNED")
@@ -2978,10 +3081,11 @@ def _deploy_protected_supervisor(event):
                 if (runtime._supervisor_deployment_value("Run") != raw_run
                         or runtime._supervisor_deployment_value("StartPending") is not None
                         or runtime._supervisor_deployment_value(upgrade_key) is not None
-                        or enrollment_pending(prior, pid)):
+                        or enrollment_pending(prior, pid)
+                        or (legacy_retirement and not _legacy_retirement_startup_matches(runtime, prior, pid))):
                     deny(failure)
                 if observe_browser() != browser:
-                    if lock_migration:
+                    if lock_migration or legacy_retirement:
                         failure = "CHROME_OBSERVATION_HOLD"
                     deny(failure)
                 if not _supervisor_upgrade_task_process(acquisition, executable, arguments, root, owner, prior, pid):
@@ -2993,6 +3097,8 @@ def _deploy_protected_supervisor(event):
                 upgrade = {"issue": issue_number, "comment": approval, "start_comment": approval,
                            "run": raw_run, "pid": pid, "created": created, "mode": mode,
                            "target": target, "target_sha": sha, "chrome": browser}
+                if legacy_retirement:
+                    upgrade["prior_source_provenance"] = provenance
                 remember_upgrade()
 
             with ExitStack() as fence:
@@ -3041,17 +3147,24 @@ def _deploy_protected_supervisor(event):
                     or runtime._supervisor_deployment_value("StartPending") is not None
                     or not upgrade_idle() or enrollment_pending(prior, upgrade["pid"])):
                 deny(failure)
-            if upgrade["target"] != target or upgrade.get("target_sha", sha) != sha:
+            legacy_retirement = upgrade.get("prior_source_provenance") == _SUPERVISOR_LEGACY_RETIREMENT
+            retarget = upgrade["target"] != target or upgrade.get("target_sha", sha) != sha
+            if retarget:
                 # A committed start remains bound to its original target. With
                 # no launch reservation, only a proven descendant may take over.
                 previous_target = upgrade.get("target_sha")
                 if previous_target is None or previous_target == sha:
                     deny(failure)
                 _git_bytes(root, ("merge-base", "--is-ancestor", previous_target, sha))
-                if _verify_prior_supervisor_source(root, prior["source_sha"], prior["source_digest"], sha, source,
-                                                   require_rehashed=True) != "GIT_HISTORY_REHASHED" or not upgrade_idle():
+            if retarget or (legacy_retirement and not reserved_here):
+                provenance = _supervisor_upgrade_source(
+                    runtime, root, prior, sha, source, upgrade_mode(), allow_legacy=legacy_retirement,
+                )
+                if (not upgrade_idle() or (provenance != "GIT_HISTORY_REHASHED"
+                        and not (legacy_retirement and provenance == _SUPERVISOR_LEGACY_RETIREMENT))):
                     deny(failure)
-            if chrome_pin(upgrade_mode()) != upgrade["chrome"]:
+            options = {"expected_health": "CHROME_OWNED"} if legacy_retirement else {}
+            if chrome_pin(upgrade_mode(), **options) != upgrade["chrome"]:
                 deny(failure)
             run = runtime._supervisor_deployment_value("Run")
             stale_health = runtime._supervisor_deployment_value("Health")
@@ -3131,6 +3244,9 @@ def _deploy_protected_supervisor(event):
             expected = {"source_sha": sha, "source_digest": source, "config_digest": config_pin,
                         "desktop": desktop, "session": owner[1]}
             intent_pins = {**expected, "sid": owner[2], "config": str(config)}
+            failure = "SOURCE_CUSTODY_UNVERIFIED"
+            start_pins = _supervisor_start_pins(runtime, intent_pins, commitment)
+            failure = "SUPERVISOR_RUNTIME_UNAVAILABLE"
             target = hashlib.sha256(json.dumps(intent_pins, sort_keys=True).encode("utf-8")).hexdigest()
             raw_upgrade = runtime._supervisor_deployment_value(upgrade_key)
             if pending is not None:
@@ -3194,7 +3310,7 @@ def _deploy_protected_supervisor(event):
                     nonce = secrets.token_hex(16)
                 upgrade["nonce"] = nonce
                 remember_upgrade()
-            intent = {**intent_pins, "nonce": nonce}
+            intent = {**start_pins, "nonce": nonce}
             pending = json.dumps(intent)
             if runtime._supervisor_deployment_value("StartupReceipt") is not None:
                 runtime._store_supervisor_deployment_value("StartupReceipt", None)
@@ -3387,7 +3503,8 @@ def _recover_protected_supervisor_health_only(event):
         from ai_commerce.wakehub_runtime import runner as runtime
 
         failure = "SOURCE_CUSTODY_UNVERIFIED"
-        source = _supervisor_source(runtime, acquisition, sha)
+        commitment = {}
+        source = _supervisor_source(runtime, acquisition, sha, runtime_commitment=commitment)
         root = ROOTS["workspace"]
 
         def read_owner():
@@ -3481,12 +3598,18 @@ def _recover_protected_supervisor_health_only(event):
 
             if prior_intent["config"] != str(config) or prior_intent["config_digest"] != config_pin:
                 return receipt("RECOVERY_PRIOR_HEALTH_ONLY_UNPROVEN")
+            history_options = ({"source_eols": prior_intent["source_eols"]} if "source_eols" in prior_intent else {})
             prior_source_provenance = _verify_prior_supervisor_source(
-                root, prior_intent["source_sha"], prior_intent["source_digest"], sha, source,
+                root, prior_intent["source_sha"], prior_intent["source_digest"], sha, source, **history_options,
             )
             if prior_source_provenance not in _SUPERVISOR_PRIOR_SOURCE_PROVENANCES:
                 return receipt("RECOVERY_PRIOR_SOURCE_UNPROVEN")
             prior_digest_rehashed = prior_source_provenance != "REVIEWED_PRIOR_SHA_COMPATIBILITY"
+            expected = {"source_sha": sha, "source_digest": source, "config_digest": config_pin,
+                        "desktop": desktop, "session": owner[1]}
+            failure = "SOURCE_CUSTODY_UNVERIFIED"
+            intent_pins = _supervisor_start_pins(runtime, {**expected, "sid": owner[2], "config": str(config)}, commitment)
+            failure = "RECOVERY_EVIDENCE_UNAVAILABLE"
 
             def check_quiescent():
                 mutex_state = _probe_supervisor_mutex(runtime)
@@ -3608,9 +3731,6 @@ def _recover_protected_supervisor_health_only(event):
             if quiescent_hold is not None:
                 return receipt(quiescent_hold)
 
-            expected = {"source_sha": sha, "source_digest": source, "config_digest": config_pin,
-                        "desktop": desktop, "session": owner[1]}
-            intent_pins = {**expected, "sid": owner[2], "config": str(config)}
             failure = "SUPERVISOR_START_UNKNOWN"
             new_nonce = secrets.token_hex(16)
             while new_nonce == prior_intent["nonce"]:
