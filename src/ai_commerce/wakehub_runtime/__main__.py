@@ -1,13 +1,15 @@
 """WakeHub interactive-session entrypoints."""
 import argparse
 from dataclasses import asdict
+import getpass
 import json
 from pathlib import Path
 import sys
+import warnings
 
 from .runner import (
     Result, RuntimeHold, _CODE_ROOT, _resolve_runtime_config, diagnostic, register_local_chat,
-    run_native_source_only, run_read_only, run_supervisor,
+    run_native_source_only, run_read_only, run_supervisor, setup_direct_chat,
 )
 
 
@@ -55,6 +57,12 @@ def main(argv: list[str] | None = None) -> int:
                             help="Read Chrome health from the owner session using an existing runtime config "
                                  "or the private Chrome health config created by protected deployment. "
                                  "Stops on config drift and disables source admission, preload, demand start and Send.")
+    setup = sub.add_parser(
+        "setup-direct", help="Configure direct AGY delivery from the private Windows owner terminal.",
+        description="Approve the exact ChatGPT URL or conversation ID once. Reuse the existing Chrome 9444 "
+                    "config, journal, source consent and AGY binding where available. Missing source consent "
+                    "uses the grants, standing_issue or standing_ef02 fields described in supervise --help. "
+                    "After setup, approve deploy_wakehub_supervisor through protected HostOps to use the existing task.")
     run = sub.add_parser("run", help="Verify one registered event and read-only readiness; exits HOLD.")
     mode = run.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true",
@@ -97,6 +105,20 @@ def main(argv: list[str] | None = None) -> int:
                                   "or Windows User setting AI_COMMERCE_WAKEHUB_CONFIG, then the WakeHub directories "
                                   "under the owner's LOCALAPPDATA/AI-Commerce.")
     args = parser.parse_args(argv)
+    if args.command == "setup-direct":
+        def private_input(label: str) -> str:
+            if sys.stdin is None or not sys.stdin.isatty():
+                raise RuntimeHold("WINDOWS_INTERACTIVE_REQUIRED")
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", getpass.GetPassWarning)
+                try:
+                    return getpass.getpass(label).strip()
+                except getpass.GetPassWarning:
+                    raise RuntimeHold("WINDOWS_INTERACTIVE_REQUIRED") from None
+
+        result = setup_direct_chat(_CODE_ROOT, private_input)
+        print(json.dumps(result.to_dict(), sort_keys=True))
+        return 0 if result.status == "ACK" else 2
     root = args.repository_root or _CODE_ROOT
     config = args.config
     if args.command == "run" and args.journal is not None and not (args.diagnostic or args.dry_run):
