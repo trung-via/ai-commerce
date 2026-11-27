@@ -1010,6 +1010,16 @@ _SUPERVISOR_CHROME_HOLDS = frozenset({
     "CDP_PROTOCOL_UNAVAILABLE", "PROFILE_LOCK_HOLD", "ENROLLMENT_PROFILE_LOCK_UNPROVEN",
     "PROFILE_ALREADY_ACTIVE_NO_CDP", "WINDOWS_PROBE_INVALID", "CHROME_OBSERVATION_HOLD",
 })
+_SUPERVISOR_CHROME_PROBE_HOLDS = _SUPERVISOR_CHROME_HOLDS | _SUPERVISOR_DESKTOP_HOLDS | {
+    "ACTIVE_CONFIG_UNVERIFIED", "LOCAL_CONFIG_CHANGED", "LOCAL_CONFIG_AMBIGUOUS", "LOCAL_CONFIG_INVALID",
+    "LOCAL_CONFIG_REQUIRED",
+    "CONFIG_UNTRUSTED", "CHROME_ENROLLMENT_DRIFT", "OPERATOR_OWNERSHIP_UNPROVEN",
+    "WINDOWS_OWNER_CONTEXT_UNVERIFIED", "ENROLLMENT_IDENTITY_UNPROVEN",
+    "CHROME_OWNER_UNPROVEN", "CDP_OWNER_MISMATCH", "CDP_NOT_LOOPBACK_OWNED", "FOREIGN_PORT_OWNER",
+    "BROWSER_OWNERSHIP_UNPROVEN", "PROCESS_IDENTITY_UNKNOWN", "CHROME_EXECUTABLE_UNTRUSTED",
+    "WINDOWS_PROBE_UNAVAILABLE", "POWERSHELL_UNAVAILABLE", "CHROME_OBSERVATION_CHANGED",
+    "ACTIVE_CHROME_OWNED_REQUIRED",
+}
 _SUPERVISOR_HOLDS = frozenset({
     "PROTECTED_HOSTOPS_ONLY", "SOURCE_CUSTODY_UNVERIFIED", "WINDOWS_OWNER_CONTEXT_UNVERIFIED",
     "LOCAL_CONFIG_REQUIRED", "LOCAL_CONFIG_INVALID", "LOCAL_CONFIG_OBSERVE_ONLY_REQUIRED",
@@ -1100,9 +1110,9 @@ _SUPERVISOR_SOURCE_PROBE_STAGES = frozenset({
 })
 _SUPERVISOR_ACTIVE_PROBE_STAGES = (
     _SUPERVISOR_PENDING_RUN_CODES | _SUPERVISOR_PENDING_HEALTH_CODES | _SUPERVISOR_UPGRADE_PROBE_CODES
-    | _SUPERVISOR_CHROME_HOLDS | _SUPERVISOR_DESKTOP_HOLDS | _SUPERVISOR_SOURCE_PROBE_STAGES | {
+    | _SUPERVISOR_CHROME_PROBE_HOLDS | _SUPERVISOR_SOURCE_PROBE_STAGES | {
         "ACTIVE_TASK_UNVERIFIED", "ACTIVE_TASK_INSTANCE_MISMATCH", "ACTIVE_RUN_OWNER_DRIFT",
-        "ACTIVE_RUN_SESSION_DRIFT", "ACTIVE_CONFIG_UNVERIFIED", "ACTIVE_CONFIG_PATH_MISMATCH",
+        "ACTIVE_RUN_SESSION_DRIFT", "ACTIVE_CONFIG_PATH_MISMATCH",
         "ACTIVE_CONFIG_DIGEST_MISMATCH", "ACTIVE_RUN_SOURCE_UNVERIFIED", "ACTIVE_HEALTH_CHANGED",
         "ACTIVE_HEALTH_MODE_UNVERIFIED", "ACTIVE_ENROLLMENT_UNVERIFIED", "ACTIVE_CHROME_UNVERIFIED",
         "ACTIVE_TASK_PROCESS_UNVERIFIED", "ACTIVE_TASK_PROBE_TIMEOUT", "ACTIVE_TASK_PROCESS_TIMEOUT",
@@ -2240,7 +2250,7 @@ def _supervisor_receipt(code, issue_number, sha=None, *, operation=_SUPERVISOR_D
         allowed = observed | _SUPERVISOR_RECOVERY_HOLDS
     else:
         observed = _SUPERVISOR_OBSERVED
-        allowed = observed | _SUPERVISOR_HOLDS
+        allowed = observed | _SUPERVISOR_HOLDS | _SUPERVISOR_CHROME_PROBE_HOLDS
     if type(code) is not str or code not in allowed:
         code = "SUPERVISOR_RUNTIME_UNAVAILABLE"
     if type(sha) is not str or re.fullmatch(r"[a-f0-9]{40}", sha) is None:
@@ -2712,8 +2722,8 @@ def _probe_supervisor_active_run(runtime, acquisition, root, owner, executable, 
             options = {"expected_health": "CHROME_OWNED"} if lock_migration or legacy_retirement else {}
             _supervisor_upgrade_chrome_pin(runtime, acquisition, root, owner, config, config_pin, mode, **options)
         except Exception as exc:
-            if lock_migration:
-                return _supervisor_upgrade_chrome_hold(exc)
+            if mode == runtime._CHROME_HEALTH_ONLY:
+                return _supervisor_upgrade_chrome_hold(runtime, acquisition, exc)
             return "ACTIVE_CHROME_UNVERIFIED"
         try:
             if not _supervisor_upgrade_task_process(acquisition, executable, arguments, root, owner, run, health["pid"]):
@@ -2833,15 +2843,25 @@ def _supervisor_upgrade_from_lock_hold(runtime, health):
             and health["health"] == "ENROLLMENT_PROFILE_LOCK_UNPROVEN")
 
 
-def _supervisor_upgrade_chrome_hold(error):
-    code = str(error)
-    return code if code in _SUPERVISOR_CHROME_HOLDS else "CHROME_OBSERVATION_HOLD"
+def _supervisor_upgrade_chrome_hold(runtime, acquisition, error, *, fallback="CHROME_OWNER_UNPROVEN"):
+    if isinstance(error, (Denied, runtime.RuntimeHold, acquisition.AcquisitionBlocked,
+                          acquisition._EnrollmentHold, acquisition._Lifecycle9444Hold)) and len(error.args) == 1:
+        code = error.args[0]
+        if type(code) is str and code in _SUPERVISOR_CHROME_PROBE_HOLDS:
+            return code
+    return fallback
 
 
 def _supervisor_upgrade_chrome_pin(runtime, acquisition, root, owner, config, config_pin, mode, *, expected_health=None):
-    chrome, pin = runtime._observe_only_config(config, root, owner, lambda: False, protected=True)
+    def read_config():
+        try:
+            return runtime._observe_only_config(config, root, owner, lambda: False, protected=True)
+        except Exception as exc:
+            deny(_supervisor_upgrade_chrome_hold(runtime, acquisition, exc, fallback="ACTIVE_CONFIG_UNVERIFIED"))
+
+    chrome, pin = read_config()
     if pin != config_pin:
-        deny("SUPERVISOR_ACTIVE_UNVERIFIED")
+        deny("LOCAL_CONFIG_CHANGED")
     if mode == runtime._OPERATIONAL_TICK_V1 and isinstance(chrome, runtime._SupervisorChrome):
         with acquisition._prefer_installed_powershell():
             state, provenance, pending = chrome.sender.lifecycle_snapshot(hostops=True)
@@ -2859,12 +2879,15 @@ def _supervisor_upgrade_chrome_pin(runtime, acquisition, root, owner, config, co
         return runtime.digest([state, browser_identity, provenance[5], origin, list(identity)])
     if (mode != runtime._CHROME_HEALTH_ONLY or not isinstance(chrome, runtime.NativeChrome9444)
             or not chrome.legacy_health_only):
-        deny("SUPERVISOR_ACTIVE_UNVERIFIED")
+        deny("CHROME_ENROLLMENT_DRIFT")
     state, provenance, pending = chrome.lifecycle_snapshot(hostops=True)
-    if (pending or provenance[:3] != owner or state not in ("OWNED", "ABSENT")
-            or (expected_health is not None and expected_health != f"CHROME_{state}")):
-        deny("CHROME_OBSERVATION_HOLD")
-    _, latest_pin = runtime._observe_only_config(config, root, owner, lambda: False, protected=True)
+    if provenance[:3] != owner:
+        deny("WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+    if pending or state not in ("OWNED", "ABSENT"):
+        deny("CHROME_OWNER_UNPROVEN")
+    if expected_health is not None and expected_health != f"CHROME_{state}":
+        deny("ACTIVE_CHROME_OWNED_REQUIRED" if expected_health == "CHROME_OWNED" else "CHROME_OBSERVATION_CHANGED")
+    _, latest_pin = read_config()
     if latest_pin != pin:
         deny("LOCAL_CONFIG_CHANGED")
     identity = provenance[4]
@@ -3071,7 +3094,7 @@ def _deploy_protected_supervisor(event):
                 try:
                     return chrome_pin(mode, expected_health="CHROME_OWNED")
                 except Exception as exc:
-                    failure = _supervisor_upgrade_chrome_hold(exc)
+                    failure = _supervisor_upgrade_chrome_hold(runtime, acquisition, exc)
                     raise
 
             def checkpoint():
@@ -3086,7 +3109,7 @@ def _deploy_protected_supervisor(event):
                     deny(failure)
                 if observe_browser() != browser:
                     if lock_migration or legacy_retirement:
-                        failure = "CHROME_OBSERVATION_HOLD"
+                        failure = "CHROME_OBSERVATION_CHANGED"
                     deny(failure)
                 if not _supervisor_upgrade_task_process(acquisition, executable, arguments, root, owner, prior, pid):
                     deny(failure)

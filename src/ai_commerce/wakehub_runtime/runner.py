@@ -888,44 +888,66 @@ class NativeChrome9444:
         self.adopted_config = adopted_config
         self.adapter = None if legacy_health_only else LocalChromeDoorbellAdapter(allow_submit=False)
 
-    def _owner_snapshot(self, *, require_launch_identity: bool = False, hostops: bool = False) -> tuple:
-        env = self.environment
-        _require(type(env) is chrome_acquisition.ChromeEnvironment
-                 and env.port == 9444 and env.endpoint == "http://127.0.0.1:9444",
-                 "CDP_OWNER_MISMATCH")
+    def _owner_context(self, *, hostops: bool) -> tuple:
         if hostops:
             _require(self.supervised, "CHROME_OWNER_UNPROVEN")
-            (local, session, sid), desktop = _supervisor_owner_session()
-        else:
-            operator = chrome_acquisition._enrollment_operator
-            local, session, sid = operator(attended=False, protocol_only=True) if self.supervised else operator()
-            desktop = _supervised_desktop(session, sid) if self.supervised else None
-        if self.legacy_health_only:
-            _require(not require_launch_identity, "CHROME_OWNER_UNPROVEN")
+            return _supervisor_owner_session()
+        operator = chrome_acquisition._enrollment_operator
+        owner = operator(attended=False, protocol_only=True) if self.supervised else operator()
+        return owner, _supervised_desktop(owner[1], owner[2]) if self.supervised else None
+
+    def _legacy_health_snapshot(self, env, *, hostops: bool) -> tuple:
+        failure = "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
+        native_probe = False
+        try:
+            (local, session, sid), desktop = self._owner_context(hostops=hostops)
+            failure = "LOCAL_CONFIG_INVALID"
             selected = chrome_acquisition._supervisor_9444_config(local, self.repository_root, sid)
             _require(selected is not None and selected[0] == env, "CHROME_ENROLLMENT_DRIFT")
-            try:
-                with chrome_acquisition._prefer_installed_powershell():
-                    inventory = chrome_acquisition._query_windows(9444)
-                    state, identity = chrome_acquisition._legacy_health_inventory(
-                        env, inventory, session=session, sid=sid)
-                    chrome_acquisition._require_operator_control(env)
-                    chrome_acquisition._verify_google_chrome(env)
-                    chrome_acquisition._observe_legacy_profile_markers(env, local, session, sid, state, identity)
-                    if state == "OWNED":
-                        chrome_acquisition._probe_cdp(env)
-                    _require(state in ("ABSENT", "OWNED"), "CHROME_OWNER_UNPROVEN")
-            except (chrome_acquisition.AcquisitionBlocked, chrome_acquisition._EnrollmentHold,
-                    chrome_acquisition._Lifecycle9444Hold, RuntimeHold, HandoffBlocked):
-                raise
-            except Exception:
-                raise RuntimeHold("CHROME_OBSERVATION_HOLD") from None
+            native_probe = True
+            failure = "WINDOWS_PROBE_UNAVAILABLE"
+            with chrome_acquisition._prefer_installed_powershell():
+                inventory = chrome_acquisition._query_windows(9444)
+                failure = "PROCESS_IDENTITY_UNKNOWN"
+                state, identity = chrome_acquisition._legacy_health_inventory(
+                    env, inventory, session=session, sid=sid)
+                _require(state in ("ABSENT", "OWNED"), "CHROME_OWNER_UNPROVEN")
+                failure = "OPERATOR_OWNERSHIP_UNPROVEN"
+                chrome_acquisition._require_operator_control(env)
+                failure = "CHROME_EXECUTABLE_UNTRUSTED"
+                chrome_acquisition._verify_google_chrome(env)
+                failure = "PROFILE_LOCK_HOLD"
+                chrome_acquisition._observe_legacy_profile_markers(env, local, session, sid, state, identity)
+                if state == "OWNED":
+                    failure = "CDP_PROTOCOL_UNAVAILABLE"
+                    chrome_acquisition._probe_cdp(env)
+            native_probe = False
+            failure = "WINDOWS_OWNER_CONTEXT_UNVERIFIED"
             if hostops:
                 _require(_supervisor_owner_session() == ((local, session, sid), desktop),
                          "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
             else:
                 _require(_supervised_desktop(session, sid) == desktop, "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
             return state, (local, session, sid, env, identity, desktop)
+        except (chrome_acquisition.AcquisitionBlocked, chrome_acquisition._EnrollmentHold,
+                chrome_acquisition._Lifecycle9444Hold, RuntimeHold, HandoffBlocked) as exc:
+            if not hostops or _safe_code(exc, "") in _STARTUP_STAGE_REASONS["FIRST_HEALTH"] | {"CONFIG_UNTRUSTED"}:
+                raise
+            raise RuntimeHold(failure) from None
+        except Exception:
+            if hostops or native_probe:
+                raise RuntimeHold(failure if hostops else "CHROME_OBSERVATION_HOLD") from None
+            raise
+
+    def _owner_snapshot(self, *, require_launch_identity: bool = False, hostops: bool = False) -> tuple:
+        env = self.environment
+        _require(type(env) is chrome_acquisition.ChromeEnvironment
+                 and env.port == 9444 and env.endpoint == "http://127.0.0.1:9444",
+                 "CDP_OWNER_MISMATCH")
+        if self.legacy_health_only:
+            _require(not require_launch_identity, "CHROME_OWNER_UNPROVEN")
+            return self._legacy_health_snapshot(env, hostops=hostops)
+        (local, session, sid), desktop = self._owner_context(hostops=hostops)
         if self.adopted_config is None:
             current = chrome_acquisition._read_9444_config(env.config_path, local, self.repository_root, sid)
             _require(current == env, "CHROME_ENROLLMENT_DRIFT")
