@@ -1527,7 +1527,9 @@ def test_wh01b_native_private_acl_requires_exact_protected_owner(monkeypatch, ki
             tx._acl(99, exact=True)
 
 
-@pytest.mark.parametrize("kind", ["valid", "foreign_pid", "pid_reuse", "session", "shared", "none", "unavailable"])
+@pytest.mark.parametrize("kind", [
+    "valid", "foreign_pid", "pid_reuse", "session", "shared", "none", "incomplete", "unavailable",
+])
 @pytest.mark.parametrize("observe_only", [False, True])
 def test_wh01b_native_marker_restart_manager_is_exact_process_proof(monkeypatch, kind, observe_only):
     tx = offline_native(monkeypatch)
@@ -1541,7 +1543,8 @@ def test_wh01b_native_marker_restart_manager_is_exact_process_proof(monkeypatch,
         session._obj.value = 7
         return 0
     def listing(session, needed, count, rows, reasons):
-        count._obj.value = 0 if kind == "none" else 2 if kind == "shared" else 1
+        count._obj.value = 0 if kind in ("none", "incomplete", "unavailable") else 2 if kind == "shared" else 1
+        needed._obj.value = 1 if kind == "incomplete" else count._obj.value
         rows[0].process.pid = 456 if kind == "foreign_pid" else 123
         ticks = ca._creation_ticks(tx.identity[5]) + (1 if kind == "pid_reuse" else 0)
         rows[0].process.start.dwHighDateTime = ticks >> 32
@@ -1553,10 +1556,11 @@ def test_wh01b_native_marker_restart_manager_is_exact_process_proof(monkeypatch,
     tx.rm.RmGetList.handler = listing
     path = Path("synthetic-marker")
     prove = tx.observe_marker if observe_only else tx.prove_marker
-    assert prove(path) is (kind == "valid")
+    assert prove(path) is (kind == "valid" or (observe_only and kind == "none"))
     options = {"marker_observation": True} if observe_only else {}
     assert pinned == [(path, {"directory": False, "private": True, **options})]
-    assert all(value is not observe_only for value in checked)
+    rechecked = kind in ("valid", "foreign_pid", "pid_reuse", "session") or (observe_only and kind == "none")
+    assert checked == [not observe_only] * (int(observe_only) + int(rechecked))
     assert not tx.handles and tx.effect_possible is False
 
 
@@ -2519,14 +2523,14 @@ def test_protected_legacy_health_tick_allows_root_and_parent_acl_only_for_health
     assert ca.assess_logon_9444(repo)["code"] == "CONFIG_UNTRUSTED"
 
     marker_proofs = []
-    holder_verified = False
+    no_conflicting_holder = False
 
     def observe_marker(tx, marker):
         marker_proofs.append((tx.identity, marker))
-        return holder_verified
+        return no_conflicting_holder
 
     monkeypatch.setattr(ca._NativeEnrollment, "observe_marker", observe_marker, raising=False)
-    # A root marker keeps its HOLD unless the configured live Chrome is proven to hold it.
+    # Both a conflicting holder and ABSENT with a marker must HOLD.
     marker = nested_profile / ca._MARKERS[0]
     marker.touch()
     try:
@@ -2535,7 +2539,7 @@ def test_protected_legacy_health_tick_allows_root_and_parent_acl_only_for_health
         assert published == ["ENROLLMENT_PROFILE_LOCK_UNPROVEN"]
         assert len(marker_proofs) == int(running)
         if running:
-            holder_verified = True
+            no_conflicting_holder = True
             marker_proofs.clear()
             published.clear()
             cdp_probes.clear()
@@ -2545,6 +2549,22 @@ def test_protected_legacy_health_tick_allows_root_and_parent_acl_only_for_health
             assert marker_proofs == [(inventory[1][0], marker)] * 2
             assert cdp_probes == [d5_env] * 2
             assert marker.is_file()
+
+            with monkeypatch.context() as changed:
+                def fail_cdp(_):
+                    raise ca.AcquisitionBlocked("CDP_PROTOCOL_UNAVAILABLE")
+                changed.setattr(ca, "_probe_cdp", fail_cdp)
+                published.clear()
+                result = runner.run_supervisor(path, repo, max_ticks=1, observe_only=True, _deployment=deployment)
+                assert result.code == "CDP_PROTOCOL_UNAVAILABLE" and published == ["CDP_PROTOCOL_UNAVAILABLE"]
+                assert marker.is_file()
+
+                def unexpected_cdp(_):
+                    raise RuntimeError("private native detail")
+                changed.setattr(runner, "_supervisor_owner_session", lambda: (owner, deployment["desktop"]))
+                changed.setattr(ca, "_probe_cdp", unexpected_cdp)
+                with pytest.raises(runner.RuntimeHold, match="^CDP_PROTOCOL_UNAVAILABLE$"):
+                    chrome.lifecycle_snapshot(hostops=True)
 
             with monkeypatch.context() as changed:
                 process = snapshot["processes"][0]
@@ -2565,7 +2585,7 @@ def test_protected_legacy_health_tick_allows_root_and_parent_acl_only_for_health
                 published.clear()
                 result = runner.run_supervisor(path, repo, max_ticks=1, observe_only=True, _deployment=deployment)
                 assert result.code == "CHROME_OBSERVATION_CHANGED" and published == ["CHROME_OBSERVATION_HOLD"]
-            holder_verified = False
+            no_conflicting_holder = False
     finally:
         marker.unlink()
 

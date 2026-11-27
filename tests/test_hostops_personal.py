@@ -3421,6 +3421,7 @@ class PersonalCdp9444ConfigRegistryTests(unittest.TestCase):
         for status, code in (("OBSERVED", "TASK_READY"),
                              ("OBSERVED", "TASK_INSTANCE_PRESENT"),
                              ("OBSERVED", "TASK_INSTANCE_PRESENT+CHROME_OBSERVATION_HOLD+RUN_MATCH+MUTEX_ACTIVE+HEALTH_MATCH_LIVE+UPGRADE_ABSENT"),
+                             ("OBSERVED", "TASK_INSTANCE_PRESENT+POWERSHELL_UNAVAILABLE+RUN_MATCH+MUTEX_ACTIVE+HEALTH_MATCH_LIVE+UPGRADE_ABSENT"),
                              ("OBSERVED", "TASK_INSTANCE_PRESENT+ACTIVE_SOURCE_BATCH_TIMEOUT+RUN_MATCH+MUTEX_ACTIVE+HEALTH_MATCH_LIVE+UPGRADE_ABSENT"),
                              ("HOLD", "TASK_MISSING"),
                              ("HOLD", "TASK_DACL_REPR_MISMATCH"),
@@ -4981,14 +4982,65 @@ $out | ConvertTo-Json -Compress
         before = dict(self.values)
         self.browser.side_effect = acquisition._EnrollmentHold("ENROLLMENT_PROFILE_LOCK_UNPROVEN")
         self.assertEqual(self.dispatch()["code"], "ENROLLMENT_PROFILE_LOCK_UNPROVEN")
+        self.browser.side_effect = acquisition.AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
+        self.assertEqual(self.dispatch()["code"], "POWERSHELL_UNAVAILABLE")
         self.stop.assert_not_called()
         self.browser.side_effect = ["2" * 64, "3" * 64]
-        self.assertEqual(self.dispatch()["code"], "CHROME_OBSERVATION_HOLD")
+        self.assertEqual(self.dispatch()["code"], "CHROME_OBSERVATION_CHANGED")
         self.assertTrue(all(call.kwargs == {"expected_health": "CHROME_OWNED"} for call in self.browser.call_args_list))
         self.assertEqual(self.values, before)
         self.store.assert_not_called()
         self.stop_effect.assert_not_called()
         self.launch.assert_not_called()
+
+    def test_protected_legacy_read_keeps_exact_chrome_failure_stage(self):
+        env, value = self.setup_legacy_health_only_config()
+        self.stale_supervisor(health="ENROLLMENT_PROFILE_LOCK_UNPROVEN", mock_browser=False)
+        marker, _, query, _, _, _ = self.mock_owned_legacy_chrome(env)
+        self.env["AI_COMMERCE_WAKEHUB_CONFIG"] = str(self.config)
+        self.probe_state = "TASK_INSTANCE_PRESENT"
+        inventory = query.return_value
+        listener, = inventory["listeners"]
+        process, = inventory["processes"]
+        changed = {**inventory, "processes": [{**process, "CreationDate": "2026-11-26T01:00:01Z"}]}
+        foreign = {**inventory, "listeners": [{**listener, "OwningProcess": 699}]}
+        absent = {"listeners": [], "processes": []}
+        before = dict(self.values)
+
+        def check(code):
+            receipt = self.dispatch_task_probe()
+            self.assertEqual((receipt["status"], receipt["code"]), (
+                "OBSERVED", f"TASK_INSTANCE_PRESENT+{code}+RUN_MATCH+MUTEX_ACTIVE+HEALTH_MATCH_LIVE+UPGRADE_ABSENT",
+            ))
+            self.assertEqual(self.values, before)
+
+        for error, code in (
+            (acquisition.AcquisitionBlocked("POWERSHELL_UNAVAILABLE"), "POWERSHELL_UNAVAILABLE"),
+            (acquisition.AcquisitionBlocked("PROCESS_IDENTITY_UNKNOWN"), "PROCESS_IDENTITY_UNKNOWN"),
+            (RuntimeError("PRIVATE_NATIVE_INVENTORY"), "WINDOWS_PROBE_UNAVAILABLE"),
+            (acquisition.AcquisitionBlocked("PRIVATE_NATIVE_INVENTORY"), "WINDOWS_PROBE_UNAVAILABLE"),
+        ):
+            with self.subTest(code=code):
+                query.side_effect = error
+                check(code)
+        query.side_effect = [inventory, changed]
+        check("CHROME_OBSERVATION_CHANGED")
+        query.side_effect = [foreign]
+        check("BROWSER_OWNERSHIP_UNPROVEN")
+        query.side_effect = None
+        with patch.object(acquisition, "_probe_cdp", side_effect=RuntimeError("PRIVATE_CDP")):
+            check("CDP_PROTOCOL_UNAVAILABLE")
+        with patch.object(acquisition, "_supervisor_9444_config", side_effect=OSError("PRIVATE_CONFIG")):
+            check("LOCAL_CONFIG_INVALID")
+        with patch.object(self.config_read.return_value[0], "_owner_context", side_effect=OSError("PRIVATE_OWNER")):
+            check("WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+        query.return_value = absent
+        check("ENROLLMENT_PROFILE_LOCK_UNPROVEN")
+        marker.unlink()
+        check("ACTIVE_CHROME_OWNED_REQUIRED")
+        self.assertEqual(json.loads(self.config.read_bytes()), value)
+        self.assert_task_probe_has_no_effects(config_inspected=True)
+        self.stop.assert_not_called()
 
     def test_upgrade_rejects_nonpositive_operational_health(self):
         self.stale_supervisor(operational=True, health="ENROLLMENT_PROFILE_LOCK_UNPROVEN")
@@ -6140,6 +6192,11 @@ $results | ConvertTo-Json -Compress -Depth 4
             approval = self.approval
             self.probe_state = "TASK_INSTANCE_PRESENT"
             self.env["AI_COMMERCE_WAKEHUB_CONFIG"] = str(self.config)
+            holder.return_value = False
+            self.assertEqual(self.dispatch_task_probe()["code"],
+                             "TASK_INSTANCE_PRESENT+ENROLLMENT_PROFILE_LOCK_UNPROVEN+RUN_MATCH+MUTEX_ACTIVE"
+                             "+HEALTH_MATCH_LIVE+UPGRADE_ABSENT")
+            holder.return_value = True
             self.assertEqual(self.dispatch_task_probe()["code"],
                              "TASK_INSTANCE_PRESENT+ACTIVE_LEGACY_RETIREMENT_ELIGIBLE+RUN_MATCH+MUTEX_ACTIVE"
                              "+HEALTH_MATCH_LIVE+UPGRADE_ABSENT")

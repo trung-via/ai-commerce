@@ -1397,7 +1397,7 @@ class _NativeEnrollment:
         return self._marker_holder_matches(path)
 
     def observe_marker(self, path):
-        """Prove a holder for existing health-only config under the verified owner token."""
+        """Check for a conflicting holder after the live browser has been identified."""
         try:
             self.pinned = []
             self.process = self._keep(self.k.OpenProcess(0x101000, False, self.identity[0]))
@@ -1407,11 +1407,11 @@ class _NativeEnrollment:
             # session. The target must still have the exact interactive token.
             self._process(require_interactive_caller=False)
             self._pin_path(path, directory=False, private=True, marker_observation=True)
-            return self._marker_holder_matches(path, require_interactive_caller=False)
+            return self._marker_holder_matches(path, require_interactive_caller=False, allow_unheld=True)
         finally:
             self.__exit__()
 
-    def _marker_holder_matches(self, path, *, require_interactive_caller=True):
+    def _marker_holder_matches(self, path, *, require_interactive_caller=True, allow_unheld=False):
         c, w = self.c, self.w
         session, key = w.DWORD(), c.create_unicode_buffer(33)
         if self.rm.RmStartSession(c.byref(session), 0, key):
@@ -1422,7 +1422,14 @@ class _NativeEnrollment:
                 return False
             needed, count, reasons = w.UINT(), w.UINT(2), w.DWORD()
             rows = (self.RmInfo * 2)()
-            if self.rm.RmGetList(session, c.byref(needed), c.byref(count), rows, c.byref(reasons)) or count.value != 1:
+            if self.rm.RmGetList(session, c.byref(needed), c.byref(count), rows, c.byref(reasons)):
+                return False
+            if count.value == 0 and needed.value == 0 and allow_unheld:
+                # Marker presence alone is compatible with an already owned live
+                # listener. Keep exact holder proof for enrollment.
+                self._process(require_interactive_caller=require_interactive_caller)
+                return True
+            if count.value != 1:
                 return False
             proc = rows[0].process
             self._process(require_interactive_caller=require_interactive_caller)
@@ -2280,6 +2287,8 @@ def _observe_legacy_profile_markers(env, local, session, sid, state, identity):
                 marker.lstat()
             except FileNotFoundError:
                 continue
+            except OSError:
+                raise _EnrollmentHold(hold) from None
             if state == "OWNED":
                 try:
                     native = _NativeEnrollment(env, local, session, sid, identity[1][0])
