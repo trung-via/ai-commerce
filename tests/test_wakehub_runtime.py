@@ -7000,9 +7000,9 @@ def test_protected_legacy_health_only_liveness_counterexamples_and_recovery(obse
     def scripted_query(_port):
         step = tick_counter[0]
         if step == 0:
-            raise r.chrome_acquisition.AcquisitionBlocked("POWERSHELL_UNAVAILABLE")
+            raise r.chrome_acquisition.AcquisitionBlocked("WINDOWS_PROBE_CIM_FAILED")
         if step == 1:
-            raise r.chrome_acquisition.AcquisitionBlocked("WINDOWS_PROBE_UNAVAILABLE")
+            raise r.chrome_acquisition.AcquisitionBlocked("WINDOWS_PROBE_TCP_FAILED")
         if step == 2:
             # Foreign listener on 9444 (unknown non-Chrome PID)
             return {"listeners": [{"LocalAddress": "127.0.0.1", "LocalPort": 9444, "OwningProcess": 999}],
@@ -7039,7 +7039,7 @@ def test_protected_legacy_health_only_liveness_counterexamples_and_recovery(obse
     assert all(row["mode"] == "CHROME_HEALTH_ONLY" for row in records)
     assert [row["observed_ns"] for row in records] == sorted(row["observed_ns"] for row in records)
     assert len({row["observed_ns"] for row in records}) == 5
-    assert events == [("FIRST_HEALTH", "POWERSHELL_UNAVAILABLE")]
+    assert events == [("FIRST_HEALTH", "WINDOWS_PROBE_CIM_FAILED")]
     assert "Health" not in stored
     assert not s.path.exists() and s.requests == [] and s.ticks == []
 

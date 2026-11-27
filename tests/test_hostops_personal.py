@@ -5041,6 +5041,8 @@ $out | ConvertTo-Json -Compress
         for error, code in (
             (acquisition.AcquisitionBlocked("POWERSHELL_UNAVAILABLE"), "POWERSHELL_UNAVAILABLE"),
             (acquisition.AcquisitionBlocked("PROCESS_IDENTITY_UNKNOWN"), "PROCESS_IDENTITY_UNKNOWN"),
+            *((acquisition.AcquisitionBlocked(code), code)
+              for code in sorted(acquisition._WINDOWS_PROBE_FAILURE_CODES)),
             (RuntimeError("PRIVATE_NATIVE_INVENTORY"), "WINDOWS_PROBE_UNAVAILABLE"),
             (acquisition.AcquisitionBlocked("PRIVATE_NATIVE_INVENTORY"), "WINDOWS_PROBE_UNAVAILABLE"),
         ):
@@ -8212,8 +8214,7 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
 
     def test_real_query_with_offline_subprocess_distinguishes_raw_failure_from_inventory(self):
         self.native.side_effect = self.native_query
-        # Run the real query/parser with all process I/O replaced. A malformed
-        # outer response fails in the query; returned row data fails normalization.
+        # Run the real query/parser with TCP and subprocess I/O replaced.
         cases = [
             (SimpleNamespace(returncode=1, stdout=b"PRIVATE CIM"), "NATIVE_QUERY_FAILED"),
             (OSError("PRIVATE process"), "NATIVE_QUERY_FAILED"),
@@ -8222,11 +8223,10 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
             (SimpleNamespace(returncode=0, stdout=b"\xff"), "NATIVE_QUERY_FAILED"),
             (SimpleNamespace(returncode=0, stdout=b"x" * 262145), "NATIVE_QUERY_FAILED"),
             (SimpleNamespace(returncode=0, stdout=b"{}"), "NATIVE_QUERY_FAILED"),
-            (SimpleNamespace(returncode=0, stdout=b'{"listeners":null,"processes":[]}'),
-             "NATIVE_NORMALIZATION_FAILED"),
-            (SimpleNamespace(returncode=0, stdout=b'{"listeners":[],"processes":[]}'), "NO_LISTENER"),
+            (SimpleNamespace(returncode=0, stdout=b'{"processes":[]}'), "NO_LISTENER"),
         ]
         with patch.object(self.acquisition, "_powershell", return_value=Path("PRIVATE_POWERSHELL")), \
+                patch.object(self.acquisition, "_windows_tcp_listeners", return_value=[]), \
                 patch.object(self.acquisition, "_child_environment", return_value={}):
             for response, code in cases:
                 self.native.reset_mock()
@@ -8245,7 +8245,7 @@ class PersonalCdp9444TopologyTests(unittest.TestCase):
                 self.native.assert_called_once_with(9444)
                 run.assert_called_once()
                 self.assertEqual(run.call_args.kwargs["timeout"], 8)
-                self.assertEqual(run.call_args.kwargs["env"]["AI_COMMERCE_ACQ_PROBE_PORT"], "9444")
+                self.assertEqual(run.call_args.kwargs["env"], {})
         self.private_identity.assert_not_called()
         self.protocol.assert_not_called()
 
