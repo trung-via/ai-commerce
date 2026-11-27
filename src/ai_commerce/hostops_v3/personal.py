@@ -2568,7 +2568,9 @@ def _probe_supervisor_active_run(runtime, acquisition, root, owner, executable, 
             return "HEALTH_UNREADABLE"
         if health is None:
             return "ACTIVE_HEALTH_CHANGED"
-        if health["health"] not in runtime._OBSERVED_CHROME_HEALTH:
+        lock_migration = _supervisor_upgrade_from_lock_hold(runtime, health)
+        if (health["health"] not in runtime._OBSERVED_CHROME_HEALTH
+                and (not lock_migration or run["source_sha"] == sha)):
             return health["health"]
         if run["source_sha"] == sha:
             if run["source_digest"] != source:
@@ -2588,8 +2590,11 @@ def _probe_supervisor_active_run(runtime, acquisition, root, owner, executable, 
         except Exception:
             return "ACTIVE_ENROLLMENT_UNVERIFIED"
         try:
-            _supervisor_upgrade_chrome_pin(runtime, acquisition, root, owner, config, config_pin, mode)
-        except Exception:
+            options = {"expected_health": "CHROME_OWNED"} if lock_migration else {}
+            _supervisor_upgrade_chrome_pin(runtime, acquisition, root, owner, config, config_pin, mode, **options)
+        except Exception as exc:
+            if lock_migration:
+                return _supervisor_upgrade_chrome_hold(exc)
             return "ACTIVE_CHROME_UNVERIFIED"
         try:
             if not _supervisor_upgrade_task_process(acquisition, executable, arguments, root, owner, run, health["pid"]):
@@ -2704,7 +2709,17 @@ def _probe_protected_supervisor_task(event):
     return _probe_protected_supervisor_read(event, _SUPERVISOR_TASK_PROBE, inspect)
 
 
-def _supervisor_upgrade_chrome_pin(runtime, acquisition, root, owner, config, config_pin, mode):
+def _supervisor_upgrade_from_lock_hold(runtime, health):
+    return (health.get("mode") == runtime._CHROME_HEALTH_ONLY
+            and health["health"] == "ENROLLMENT_PROFILE_LOCK_UNPROVEN")
+
+
+def _supervisor_upgrade_chrome_hold(error):
+    code = str(error)
+    return code if code in _SUPERVISOR_CHROME_HOLDS else "CHROME_OBSERVATION_HOLD"
+
+
+def _supervisor_upgrade_chrome_pin(runtime, acquisition, root, owner, config, config_pin, mode, *, expected_health=None):
     chrome, pin = runtime._observe_only_config(config, root, owner, lambda: False, protected=True)
     if pin != config_pin:
         deny("SUPERVISOR_ACTIVE_UNVERIFIED")
@@ -2726,10 +2741,15 @@ def _supervisor_upgrade_chrome_pin(runtime, acquisition, root, owner, config, co
     if (mode != runtime._CHROME_HEALTH_ONLY or not isinstance(chrome, runtime.NativeChrome9444)
             or not chrome.legacy_health_only):
         deny("SUPERVISOR_ACTIVE_UNVERIFIED")
-    inventory = acquisition._query_windows(9444, owner_action=lambda bootstrap: bootstrap)
-    state, identity = acquisition._legacy_health_inventory(
-        chrome.environment, inventory, session=owner[1], sid=owner[2],
-    )
+    state, provenance, pending = chrome.lifecycle_snapshot(hostops=True)
+    if (pending or provenance[:3] != owner or state not in ("OWNED", "ABSENT")
+            or (expected_health is not None and expected_health != f"CHROME_{state}")):
+        deny("CHROME_OBSERVATION_HOLD")
+    _, latest_pin = runtime._observe_only_config(config, root, owner, lambda: False, protected=True)
+    if latest_pin != pin:
+        deny("LOCAL_CONFIG_CHANGED")
+    identity = provenance[4]
+    # Preserve the persisted R2 digest so interrupted upgrades retain their browser pin.
     return hashlib.sha256(json.dumps((state, identity), separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
@@ -2872,8 +2892,8 @@ def _deploy_protected_supervisor(event):
         def task(**kwargs):
             return _supervisor_task(acquisition, executable, arguments, root, owner, **kwargs)
 
-        def chrome_pin(mode):
-            return _supervisor_upgrade_chrome_pin(runtime, acquisition, root, owner, config, config_pin, mode)
+        def chrome_pin(mode, **options):
+            return _supervisor_upgrade_chrome_pin(runtime, acquisition, root, owner, config, config_pin, mode, **options)
 
         def remember_upgrade():
             nonlocal raw_upgrade
@@ -2894,7 +2914,10 @@ def _deploy_protected_supervisor(event):
                 deny(failure)
             pins = {key: prior[key] for key in (*runtime._ENROLLMENT_PINS, "config_digest")}
             health = _read_supervisor_health(runtime, pins, executable, owner)
-            if health is None or health["health"] not in runtime._OBSERVED_CHROME_HEALTH:
+            if health is None:
+                deny(failure)
+            lock_migration = _supervisor_upgrade_from_lock_hold(runtime, health)
+            if health["health"] not in runtime._OBSERVED_CHROME_HEALTH and not lock_migration:
                 deny(failure)
             mode = health.get("mode")
             if mode not in (runtime._CHROME_HEALTH_ONLY, runtime._OPERATIONAL_TICK_V1):
@@ -2907,6 +2930,16 @@ def _deploy_protected_supervisor(event):
                 deny(failure)
             pid, created = health["pid"], health["created"]
 
+            def observe_browser():
+                nonlocal failure
+                if not lock_migration:
+                    return chrome_pin(mode)
+                try:
+                    return chrome_pin(mode, expected_health="CHROME_OWNED")
+                except Exception as exc:
+                    failure = _supervisor_upgrade_chrome_hold(exc)
+                    raise
+
             def checkpoint():
                 nonlocal failure, upgrade
                 recheck(check_source=True)
@@ -2914,8 +2947,13 @@ def _deploy_protected_supervisor(event):
                 if (runtime._supervisor_deployment_value("Run") != raw_run
                         or runtime._supervisor_deployment_value("StartPending") is not None
                         or runtime._supervisor_deployment_value(upgrade_key) is not None
-                        or enrollment_pending(prior, pid) or chrome_pin(mode) != browser
-                        or not _supervisor_upgrade_task_process(acquisition, executable, arguments, root, owner, prior, pid)):
+                        or enrollment_pending(prior, pid)):
+                    deny(failure)
+                if observe_browser() != browser:
+                    if lock_migration:
+                        failure = "CHROME_OBSERVATION_HOLD"
+                    deny(failure)
+                if not _supervisor_upgrade_task_process(acquisition, executable, arguments, root, owner, prior, pid):
                     deny(failure)
                 latest = _read_supervisor_health(runtime, pins, executable, owner)
                 if (latest is None or (latest["pid"], latest["created"], latest.get("mode"), latest["health"])
@@ -2941,7 +2979,7 @@ def _deploy_protected_supervisor(event):
                             time.sleep(0.25)
                 if enrollment_pending(prior, pid):
                     deny(failure)
-                browser = chrome_pin(mode)
+                browser = observe_browser()
                 try:
                     runtime._stop_verified_supervisor(pid, created, executable, owner, checkpoint)
                 except (OSError, runtime.RuntimeHold):
@@ -3026,15 +3064,21 @@ def _deploy_protected_supervisor(event):
                 return None
             if proven["health"] in _SUPERVISOR_DESKTOP_HOLDS:
                 return proven["health"]
+            legacy_upgrade = upgrade is not None and upgrade_mode() == runtime._CHROME_HEALTH_ONLY
+            options = {"expected_health": proven["health"]} if legacy_upgrade else {}
             if upgrade is not None and (
                 proven.get("mode") != upgrade_mode() or proven["health"] not in runtime._OBSERVED_CHROME_HEALTH
                 or (proven["pid"], proven["created"]) == (upgrade["pid"], upgrade["created"])
-                or chrome_pin(upgrade_mode()) != upgrade["chrome"]
+                or chrome_pin(upgrade_mode(), **options) != upgrade["chrome"]
                 or not _supervisor_upgrade_task_process(acquisition, executable, arguments, root, owner,
                                                         {**intent, "instance": instance}, proven["pid"])
                 or not 0 <= runtime.monotonic_ns() - proven["observed_ns"] <= runtime._SUPERVISOR_HEALTH_MAX_AGE_NS
             ):
                 return "SUPERVISOR_START_UNKNOWN"
+            if legacy_upgrade:
+                latest = _read_supervisor_health(runtime, {**expected, "nonce": intent["nonce"]}, executable, owner)
+                if latest is None or any(latest.get(key) != proven.get(key) for key in ("pid", "created", "mode", "health")):
+                    return "SUPERVISOR_START_UNKNOWN"
             if pending is not None or upgrade is not None:
                 if not _complete_supervisor_start(runtime, intent, instance, pending, upgrade=raw_upgrade):
                     return "SUPERVISOR_START_UNKNOWN"
