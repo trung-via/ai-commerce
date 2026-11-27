@@ -1197,7 +1197,8 @@ def _existing_9444_candidate(inventory: dict, *, local: Path, checkout: Path,
 
 
 def _check_enrollment_custody(env: ChromeEnvironment, local: Path, sid: str, *,
-                              marker_proof=None, existing_config: bool = False) -> None:
+                              marker_proof=None, existing_config: bool = False,
+                              owned_observation: tuple[int, tuple] | None = None) -> None:
     from .local_completion_handoff import HandoffBlocked, _private_identity
     root = (local / "AI-Commerce").resolve(strict=True)
     paths = {env.user_data_dir, env.user_data_dir / env.profile_directory}
@@ -1213,6 +1214,11 @@ def _check_enrollment_custody(env: ChromeEnvironment, local: Path, sid: str, *,
         raise _EnrollmentHold("OPERATOR_OWNERSHIP_UNPROVEN") from None
     if unsafe:
         raise _EnrollmentHold("OPERATOR_OWNERSHIP_UNPROVEN")
+    if existing_config and owned_observation is not None:
+        session, identity = owned_observation
+        _verify_google_chrome(env)
+        _observe_legacy_profile_markers(env, local, session, sid, "OWNED", identity)
+        return
     for name in _MARKERS:
         try:
             (env.user_data_dir / name).lstat()

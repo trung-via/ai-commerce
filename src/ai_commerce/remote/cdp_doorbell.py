@@ -470,7 +470,7 @@ class _PlaywrightInventory:
         with self._browser(endpoint) as browser:
             yield list(browser.contexts)
 
-    def preload(self, binding: ResolvedBinding, *, current_binding=None) -> str:
+    def preload(self, binding: ResolvedBinding, *, current_binding=None, before_open=None) -> str:
         """Auto-load exactly the private, enrolled chat; no Send or tab hijack.
 
         Only used after the existing operator/D2 authorization. A unique Chrome
@@ -482,7 +482,8 @@ class _PlaywrightInventory:
                 not _endpoint(binding.cdp_endpoint) or
                 urlsplit(binding.cdp_endpoint).port != 9444):
             return "PRELOAD_ROUTE_INVALID"
-        if current_binding is not None and not callable(current_binding):
+        if ((current_binding is not None and not callable(current_binding))
+                or (before_open is not None and not callable(before_open))):
             return "PRELOAD_ROUTE_INVALID"
         try:
             if current_binding is not None and current_binding() != binding:
@@ -507,6 +508,13 @@ class _PlaywrightInventory:
                         return "PRELOAD_ROUTE_CHANGED"
                     return "EXACT_CHAT_PRESENT" if outcome == "CANDIDATE_READY" else outcome
                 # Never navigate the currently active, latest, or other tab.
+                if before_open is not None:
+                    before_open()
+                    if list(browser.contexts) != contexts or any(
+                        isinstance(page.url, str) and page.url.rstrip("/") == binding.chat_url
+                        for page in contexts[0].pages
+                    ):
+                        return "PRELOAD_ROUTE_CHANGED"
                 new_page = contexts[0].new_page()
                 try:
                     new_page.goto(binding.chat_url,
@@ -1173,7 +1181,7 @@ class LocalChromeDoorbellAdapter:
         return receipt(status, outcome.code)
 
     def send_registered_ui(self, *, binding: ResolvedBinding, event_id: str,
-                           marker_digest: str,
+                           marker_digest: str | None,
                            revalidate: Callable[[], None],
                            before_stage: Callable[[str, list[str]], None],
                            account_id: str | None = None,
@@ -1184,7 +1192,7 @@ class LocalChromeDoorbellAdapter:
                                    standby_refs=standby_refs)
 
     def observe_registered_ui(self, *, binding: ResolvedBinding, event_id: str,
-                              marker_digest: str, revalidate: Callable[[], None],
+                              marker_digest: str | None, revalidate: Callable[[], None],
                               excluded_refs: list[str], document: str | None = None,
                               account_id: str | None = None) -> LocalUISendResult:
         """Look once for an existing UI turn on the current exact-chat document."""
@@ -1194,7 +1202,7 @@ class LocalChromeDoorbellAdapter:
                                    excluded_refs=excluded_refs, document=document, account_id=account_id)
 
     def inspect_registered_ui(self, *, binding: ResolvedBinding, event_id: str,
-                              marker_digest: str, revalidate: Callable[[], None],
+                              marker_digest: str | None, revalidate: Callable[[], None],
                               capture: Callable[[LocalUISurface], None],
                               account_id: str | None = None) -> LocalUISendResult:
         """Read the same guarded composer and collect its pre-mutation witness."""
@@ -1212,8 +1220,12 @@ class LocalChromeDoorbellAdapter:
             return LocalUISendResult("NATIVE_DESKTOP_UNPROVEN")
         if excluded_refs is None and (not self.allow_submit or not self.send_only or self.fixed_check_test):
             return LocalUISendResult("CDP_PROBE_DISABLED")
+        if marker_digest is None and (type(account_id) is not str or not account_id):
+            return LocalUISendResult("ACCOUNT_UNPROVEN")
 
         def check_page(page) -> None:
+            if marker_digest is None:
+                return  # The scoped DOM checks still require the exact account and document.
             args = {"digest": marker_digest}
             if excluded_refs is not None or capture is not None:
                 args["strict"] = True
