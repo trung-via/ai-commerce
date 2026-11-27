@@ -1060,9 +1060,17 @@ _SUPERVISOR_PENDING_RUN_CODES = frozenset({
 _SUPERVISOR_UPGRADE_PROBE_CODES = frozenset({
     "UPGRADE_ABSENT", "UPGRADE_UNREADABLE", "UPGRADE_MALFORMED", "UPGRADE_MATCH_RUN", "UPGRADE_OTHER_RUN",
 })
+_SUPERVISOR_SOURCE_PROBE_STAGES = frozenset({
+    "ACTIVE_SOURCE_PINS_INVALID", "ACTIVE_SOURCE_CURRENT_DIGEST_MISMATCH", "ACTIVE_SOURCE_DIGEST_MISMATCH",
+    "ACTIVE_SOURCE_BATCH_OBJECT_MISSING", "ACTIVE_SOURCE_BATCH_TRUNCATED",
+    "ACTIVE_SOURCE_RUNNER_MISSING", "ACTIVE_SOURCE_LEGACY_GUARD_MISSING", "ACTIVE_SOURCE_TICK_FENCE_MISSING",
+    *(f"ACTIVE_SOURCE_{phase}_{outcome}"
+      for phase in ("PRIOR_OBJECT", "ANCESTRY", "TREE", "BATCH")
+      for outcome in ("FAILED", "UNAVAILABLE", "TIMEOUT", "INVALID")),
+})
 _SUPERVISOR_ACTIVE_PROBE_STAGES = (
     _SUPERVISOR_PENDING_RUN_CODES | _SUPERVISOR_PENDING_HEALTH_CODES | _SUPERVISOR_UPGRADE_PROBE_CODES
-    | _SUPERVISOR_CHROME_HOLDS | _SUPERVISOR_DESKTOP_HOLDS | {
+    | _SUPERVISOR_CHROME_HOLDS | _SUPERVISOR_DESKTOP_HOLDS | _SUPERVISOR_SOURCE_PROBE_STAGES | {
         "ACTIVE_TASK_UNVERIFIED", "ACTIVE_TASK_INSTANCE_MISMATCH", "ACTIVE_RUN_OWNER_DRIFT",
         "ACTIVE_RUN_SESSION_DRIFT", "ACTIVE_CONFIG_UNVERIFIED", "ACTIVE_CONFIG_PATH_MISMATCH",
         "ACTIVE_CONFIG_DIGEST_MISMATCH", "ACTIVE_RUN_SOURCE_UNVERIFIED", "ACTIVE_HEALTH_CHANGED",
@@ -2287,7 +2295,9 @@ def _git_bytes(root, args, *, stdin_bytes=None):
             ["git", "-C", str(root), *args], input=stdin_bytes, capture_output=True,
             timeout=15, check=False, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except subprocess.TimeoutExpired:
+        deny("GIT_READ_TIMEOUT")
+    except OSError:
         deny("GIT_READ_UNAVAILABLE")
     if result.returncode:
         deny("GIT_READ_FAILED")
@@ -2312,7 +2322,7 @@ _SUPERVISOR_PRIOR_SOURCE_PROVENANCES = frozenset({
 
 
 def _verify_prior_supervisor_source(root, prior_sha, prior_digest, current_sha, current_digest, *,
-                                    require_rehashed=False, require_tick=False):
+                                    require_rehashed=False, require_tick=False, report_failure=False):
     """Return closed prior-source provenance for legacy health-only recovery, or None.
 
     - Exact match to current verified checkout SHA requires exact runtime digest
@@ -2325,21 +2335,30 @@ def _verify_prior_supervisor_source(root, prior_sha, prior_digest, current_sha, 
       (GIT_HISTORY_REHASHED).
     A live upgrade requires GIT_HISTORY_REHASHED, including for reviewed SHAs.
     Operational upgrades also require the shared tick protocol in prior source.
+    The bounded READ can request a fixed stage code in place of None on failure.
     """
+    def unverified(code):
+        return code if report_failure else None
+
     require_rehashed = require_rehashed or require_tick
     if (type(prior_sha) is not str or re.fullmatch(r"[a-f0-9]{40}", prior_sha) is None
             or type(prior_digest) is not str or re.fullmatch(r"[a-f0-9]{64}", prior_digest) is None
             or type(current_sha) is not str or re.fullmatch(r"[a-f0-9]{40}", current_sha) is None
             or type(current_digest) is not str or re.fullmatch(r"[a-f0-9]{64}", current_digest) is None):
-        return None
+        return unverified("ACTIVE_SOURCE_PINS_INVALID")
     if prior_sha == current_sha:
-        return "CURRENT_SOURCE_EXACT" if not require_rehashed and prior_digest == current_digest else None
+        if prior_digest != current_digest:
+            return unverified("ACTIVE_SOURCE_CURRENT_DIGEST_MISMATCH")
+        return None if require_rehashed else "CURRENT_SOURCE_EXACT"
     if not require_rehashed and prior_sha in _SUPERVISOR_REVIEWED_PRIOR_HEALTH_ONLY_SHAS:
         return "REVIEWED_PRIOR_SHA_COMPATIBILITY"
+    phase = "PRIOR_OBJECT"
     try:
         if _git_bytes(root, ("rev-parse", "--verify", f"{prior_sha}^{{commit}}")).decode("ascii").strip() != prior_sha:
-            return None
+            return unverified("ACTIVE_SOURCE_PRIOR_OBJECT_INVALID")
+        phase = "ANCESTRY"
         _git_bytes(root, ("merge-base", "--is-ancestor", prior_sha, current_sha))
+        phase = "TREE"
         raw_tree = _git_bytes(root, ("ls-tree", "-r", "-z", prior_sha, "--", "src/ai_commerce"))
         entries = [item for item in raw_tree.split(b"\0") if item]
         names = []
@@ -2353,51 +2372,62 @@ def _verify_prior_supervisor_source(root, prior_sha, prior_digest, current_sha, 
             if len(parts) != 3 or parts[1] != b"blob":
                 continue
             if require_rehashed and parts[0] not in (b"100644", b"100755"):
-                return None
+                return unverified("ACTIVE_SOURCE_TREE_INVALID")
             names.append(rel_str[len("src/"):])
             blob_shas.append(parts[2].decode("ascii"))
         if not names or len(names) > 4096:
-            return None
+            return unverified("ACTIVE_SOURCE_TREE_INVALID")
+        phase = "BATCH"
         batch = _git_bytes(root, ("cat-file", "--batch"), stdin_bytes=("\n".join(blob_shas) + "\n").encode("ascii"))
         pos = 0
         raw_manifest = []
         crlf_manifest = []
         runner_bytes = None
         for name in names:
-            nl = batch.index(b"\n", pos)
+            nl = batch.find(b"\n", pos)
+            if nl < 0:
+                return unverified("ACTIVE_SOURCE_BATCH_TRUNCATED")
             header = batch[pos:nl].decode("ascii").split()
+            if len(header) == 2 and header[1] == "missing":
+                return unverified("ACTIVE_SOURCE_BATCH_OBJECT_MISSING")
             if len(header) != 3 or header[1] != "blob":
-                return None
+                return unverified("ACTIVE_SOURCE_BATCH_INVALID")
             size = int(header[2])
             pos = nl + 1
+            if pos + size >= len(batch):
+                return unverified("ACTIVE_SOURCE_BATCH_TRUNCATED")
             blob = batch[pos:pos + size]
             if len(blob) != size or batch[pos + size:pos + size + 1] != b"\n":
-                return None
+                return unverified("ACTIVE_SOURCE_BATCH_INVALID")
             pos += size + 1
             if name == "ai_commerce/wakehub_runtime/runner.py":
                 runner_bytes = blob
             raw_manifest.append([name, hashlib.sha256(blob).hexdigest()])
             crlf_blob = blob.replace(b"\n", b"\r\n") if b"\r" not in blob else blob
             crlf_manifest.append([name, hashlib.sha256(crlf_blob).hexdigest()])
-        if pos != len(batch) or runner_bytes is None:
-            return None
+        if pos != len(batch):
+            return unverified("ACTIVE_SOURCE_BATCH_INVALID")
+        if runner_bytes is None:
+            return unverified("ACTIVE_SOURCE_RUNNER_MISSING")
         raw_digest = hashlib.sha256(json.dumps(sorted(raw_manifest), separators=(",", ":")).encode("ascii")).hexdigest()
         crlf_digest = hashlib.sha256(json.dumps(sorted(crlf_manifest), separators=(",", ":")).encode("ascii")).hexdigest()
         if prior_digest not in (raw_digest, crlf_digest):
-            return None
+            return unverified("ACTIVE_SOURCE_DIGEST_MISMATCH")
         # Confirm the prior commit itself enforced legacy health-only mode for legacy 9444 configs.
         if (b"legacy_health_only=True" not in runner_bytes
-                or b"observe_only = not isinstance(chrome, _SupervisorChrome)" not in runner_bytes):
-            return None
-        if require_rehashed and b"_deployment_health(deployment, health_only=True)" not in runner_bytes:
-            return None
+                or b"observe_only = not isinstance(chrome, _SupervisorChrome)" not in runner_bytes
+                or (require_rehashed and b"_deployment_health(deployment, health_only=True)" not in runner_bytes)):
+            return unverified("ACTIVE_SOURCE_LEGACY_GUARD_MISSING")
         if require_tick and (b'_OPERATIONAL_TICK_V1 = "OPERATIONAL_TICK_V1"' not in runner_bytes
                              or b"_protected_operational_tick(run," not in runner_bytes
                              or b"stack.enter_context(_supervisor_slot(_SUPERVISOR_TICK_MUTEX))" not in runner_bytes):
-            return None
+            return unverified("ACTIVE_SOURCE_TICK_FENCE_MISSING")
         return "GIT_HISTORY_REHASHED"
-    except (Denied, OSError, ValueError, UnicodeError):
-        return None
+    except Denied as exc:
+        outcome = {"GIT_READ_UNAVAILABLE": "UNAVAILABLE", "GIT_READ_TIMEOUT": "TIMEOUT"}.get(str(exc), "FAILED")
+        return unverified(f"ACTIVE_SOURCE_{phase}_{outcome}")
+    except (OSError, ValueError):
+        return unverified(f"ACTIVE_SOURCE_{phase}_INVALID")
 
 
 def _probe_protected_supervisor_read(event, operation, inspect):
@@ -2574,16 +2604,17 @@ def _probe_supervisor_active_run(runtime, acquisition, root, owner, executable, 
             return health["health"]
         if run["source_sha"] == sha:
             if run["source_digest"] != source:
-                return "ACTIVE_RUN_SOURCE_UNVERIFIED"
+                return "ACTIVE_SOURCE_CURRENT_DIGEST_MISMATCH"
             return "ACTIVE_READ_CHECKS_COMPLETE"
         mode = health.get("mode")
         if mode not in (runtime._CHROME_HEALTH_ONLY, runtime._OPERATIONAL_TICK_V1):
             return "ACTIVE_HEALTH_MODE_UNVERIFIED"
-        if _verify_prior_supervisor_source(
+        prior_source = _verify_prior_supervisor_source(
             root, run["source_sha"], run["source_digest"], sha, source,
-            require_rehashed=True, require_tick=(mode == runtime._OPERATIONAL_TICK_V1),
-        ) != "GIT_HISTORY_REHASHED":
-            return "ACTIVE_RUN_SOURCE_UNVERIFIED"
+            require_rehashed=True, require_tick=(mode == runtime._OPERATIONAL_TICK_V1), report_failure=True,
+        )
+        if prior_source != "GIT_HISTORY_REHASHED":
+            return prior_source if prior_source in _SUPERVISOR_SOURCE_PROBE_STAGES else "ACTIVE_RUN_SOURCE_UNVERIFIED"
         try:
             if _supervisor_upgrade_enrollment_pending(runtime, run, health["pid"]):
                 return "ACTIVE_ENROLLMENT_UNVERIFIED"
