@@ -1217,7 +1217,7 @@ class _NativeEnrollment:
         return (info.Volume, info.IndexHigh, info.IndexLow, info.SizeHigh, info.SizeLow)
 
     def _relative(self, parent, name, *, directory, create=False, write=False, optional=False,
-                  readback=False, repair_acl=False):
+                  readback=False, repair_acl=False, marker_observation=False):
         c, w = self.c, self.w
         if not name or name in {".", ".."} or any(ch in name for ch in "\\/:\x00"):
             self._blocked()
@@ -1230,6 +1230,10 @@ class _NativeEnrollment:
                                 0x40 | 0x1000, self.descriptor if create else None, None)
         io, handle = self.IoStatus(), w.HANDLE()
         access = 0x120089 | (0x116 if write else 0)  # read/control/synchronize; optional write
+        share = 3 if readback else 1
+        if marker_observation:
+            # Open only metadata, allow the live writer, and pin the name against replacement.
+            access, share = 0x120080, 3  # READ_CONTROL | SYNCHRONIZE | FILE_READ_ATTRIBUTES
         options = 0x20 | 0x200000 | (1 if directory else 0x40)
         if repair_acl:
             # SetSecurityInfo does not propagate ACEs from MAXIMUM_ALLOWED handles.
@@ -1239,7 +1243,7 @@ class _NativeEnrollment:
         if create:
             self.effect_possible = True  # Set BEFORE crossing the mutation boundary.
         status = self.n.NtCreateFile(c.byref(handle), access, c.byref(attrs), c.byref(io), None,
-            0x80, 3 if readback else 1, 2 if create else 1,
+            0x80, share, 2 if create else 1,
             options, None, 0)
         unsigned = status & 0xFFFFFFFF
         if unsigned in {0xC0000034, 0xC000003A} and optional and not create:
@@ -1257,7 +1261,7 @@ class _NativeEnrollment:
         self._info(handle, directory)
         return handle
 
-    def _pin_path(self, path, *, directory=True, private=False):
+    def _pin_path(self, path, *, directory=True, private=False, marker_observation=False):
         # Only a native local drive: no UNC/device paths or reparse mount points.
         if (not re.fullmatch(r"[A-Za-z]:\\", path.anchor)
                 or self.k.GetDriveTypeW(path.anchor) != 3
@@ -1270,7 +1274,8 @@ class _NativeEnrollment:
         self._info(handle, True)
         for index, name in enumerate(path.parts[1:]):
             last = index == len(path.parts) - 2
-            handle = self._relative(handle, name, directory=directory if last else True)
+            options = {"marker_observation": True} if last and marker_observation else {}
+            handle = self._relative(handle, name, directory=directory if last else True, **options)
         if private:
             self._acl(handle)
         self.pinned.append((path, handle, directory, self._info(handle, directory), private))
@@ -1315,7 +1320,7 @@ class _NativeEnrollment:
         if not {"S-1-5-4", "S-1-5-11"} <= found:
             self._blocked()
 
-    def _process(self):
+    def _process(self, *, require_interactive_caller=True):
         c, w = self.c, self.w
         # Never create under a thread identity different from the process token
         # used by the SID, known-folder and interactive-session observations.
@@ -1342,7 +1347,8 @@ class _NativeEnrollment:
             self._blocked()
         self.process_ticks = ticks
         self._token(self.process)
-        self._token(self.k.GetCurrentProcess())
+        if require_interactive_caller:
+            self._token(self.k.GetCurrentProcess())
 
     def __enter__(self):
         try:
@@ -1387,8 +1393,26 @@ class _NativeEnrollment:
         Never interpret lock contents, remove a marker or accept an owner ACL as
         process proof. Unsupported, stale, shared or inaccessible markers HOLD.
         """
-        c, w = self.c, self.w
         self._pin_path(path, directory=False, private=True)
+        return self._marker_holder_matches(path)
+
+    def observe_marker(self, path):
+        """Prove a holder for existing health-only config under the verified owner token."""
+        try:
+            self.pinned = []
+            self.process = self._keep(self.k.OpenProcess(0x101000, False, self.identity[0]))
+            if not self.process:
+                self._blocked()
+            # Protected HostOps can read under the owner token outside the desktop
+            # session. The target must still have the exact interactive token.
+            self._process(require_interactive_caller=False)
+            self._pin_path(path, directory=False, private=True, marker_observation=True)
+            return self._marker_holder_matches(path, require_interactive_caller=False)
+        finally:
+            self.__exit__()
+
+    def _marker_holder_matches(self, path, *, require_interactive_caller=True):
+        c, w = self.c, self.w
         session, key = w.DWORD(), c.create_unicode_buffer(33)
         if self.rm.RmStartSession(c.byref(session), 0, key):
             return False
@@ -1401,7 +1425,7 @@ class _NativeEnrollment:
             if self.rm.RmGetList(session, c.byref(needed), c.byref(count), rows, c.byref(reasons)) or count.value != 1:
                 return False
             proc = rows[0].process
-            self._process()
+            self._process(require_interactive_caller=require_interactive_caller)
             return (proc.pid == self.identity[0] and rows[0].session == self.session
                     and (proc.start.dwHighDateTime << 32 | proc.start.dwLowDateTime) == self.process_ticks)
         finally:
@@ -2243,6 +2267,27 @@ def _legacy_health_inventory(env: ChromeEnvironment, inventory: dict, *,
                              session: int, sid: str) -> tuple[str, tuple]:
     """Observe health without granting operational use of the startup command."""
     return _observe_9444_inventory(env, inventory, session=session, sid=sid, for_adoption=False)
+
+
+def _observe_legacy_profile_markers(env, local, session, sid, state, identity):
+    for directory, hold in (
+        (env.user_data_dir, "ENROLLMENT_PROFILE_LOCK_UNPROVEN"),
+        (env.user_data_dir / env.profile_directory, "PROFILE_LOCK_HOLD"),
+    ):
+        for name in _MARKERS:
+            marker = directory / name
+            try:
+                marker.lstat()
+            except FileNotFoundError:
+                continue
+            if state == "OWNED":
+                try:
+                    native = _NativeEnrollment(env, local, session, sid, identity[1][0])
+                    if native.observe_marker(marker) is True:
+                        continue
+                except (_EnrollmentHold, OSError):
+                    pass
+            raise _EnrollmentHold(hold)
 
 
 def _lifecycle_inventory(env: ChromeEnvironment, inventory: dict, *,

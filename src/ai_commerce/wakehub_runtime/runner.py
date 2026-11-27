@@ -894,13 +894,14 @@ class NativeChrome9444:
                  and env.port == 9444 and env.endpoint == "http://127.0.0.1:9444",
                  "CDP_OWNER_MISMATCH")
         if hostops:
-            _require(self.supervised and not self.legacy_health_only, "CHROME_OWNER_UNPROVEN")
+            _require(self.supervised, "CHROME_OWNER_UNPROVEN")
             (local, session, sid), desktop = _supervisor_owner_session()
         else:
             operator = chrome_acquisition._enrollment_operator
             local, session, sid = operator(attended=False, protocol_only=True) if self.supervised else operator()
             desktop = _supervised_desktop(session, sid) if self.supervised else None
         if self.legacy_health_only:
+            _require(not require_launch_identity, "CHROME_OWNER_UNPROVEN")
             selected = chrome_acquisition._supervisor_9444_config(local, self.repository_root, sid)
             _require(selected is not None and selected[0] == env, "CHROME_ENROLLMENT_DRIFT")
             try:
@@ -909,22 +910,8 @@ class NativeChrome9444:
                     state, identity = chrome_acquisition._legacy_health_inventory(
                         env, inventory, session=session, sid=sid)
                     chrome_acquisition._require_operator_control(env)
-                    # Protected legacy health skips broad root and intermediate parent
-                    # ACLs while keeping strict file/profile custody, lock markers and
-                    # executable signature verification on each observation.
-                    for name in chrome_acquisition._MARKERS:
-                        try:
-                            (env.user_data_dir / name).lstat()
-                        except FileNotFoundError:
-                            continue
-                        raise chrome_acquisition._EnrollmentHold("ENROLLMENT_PROFILE_LOCK_UNPROVEN")
                     chrome_acquisition._verify_google_chrome(env)
-                    for name in chrome_acquisition._MARKERS:
-                        try:
-                            (env.user_data_dir / env.profile_directory / name).lstat()
-                        except FileNotFoundError:
-                            continue
-                        raise RuntimeHold("PROFILE_LOCK_HOLD")
+                    chrome_acquisition._observe_legacy_profile_markers(env, local, session, sid, state, identity)
                     if state == "OWNED":
                         chrome_acquisition._probe_cdp(env)
                     _require(state in ("ABSENT", "OWNED"), "CHROME_OWNER_UNPROVEN")
@@ -933,7 +920,11 @@ class NativeChrome9444:
                 raise
             except Exception:
                 raise RuntimeHold("CHROME_OBSERVATION_HOLD") from None
-            _require(_supervised_desktop(session, sid) == desktop, "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+            if hostops:
+                _require(_supervisor_owner_session() == ((local, session, sid), desktop),
+                         "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
+            else:
+                _require(_supervised_desktop(session, sid) == desktop, "WINDOWS_OWNER_CONTEXT_UNVERIFIED")
             return state, (local, session, sid, env, identity, desktop)
         if self.adopted_config is None:
             current = chrome_acquisition._read_9444_config(env.config_path, local, self.repository_root, sid)
@@ -987,14 +978,14 @@ class NativeChrome9444:
 
     def lifecycle_snapshot(self, *, require_launch_identity: bool = False, hostops: bool = False) -> tuple:
         """Read the native launch marker around two independent owner observations."""
-        _require(not hostops or not self.legacy_health_only, "CHROME_OWNER_UNPROVEN")
+        options = {"hostops": True} if hostops else {}
         if self.legacy_health_only:
             # Protected legacy health-only observation does not depend on the
             # unrelated clean 9444 demand-task launch marker.
-            observed = self._owner_snapshot()
-            _require(self._owner_snapshot() == observed, "CHROME_OBSERVATION_CHANGED")
+            _require(not require_launch_identity, "CHROME_OWNER_UNPROVEN")
+            observed = self._owner_snapshot(**options)
+            _require(self._owner_snapshot(**options) == observed, "CHROME_OBSERVATION_CHANGED")
             return (*observed, False)
-        options = {"hostops": True} if hostops else {}
         observed = self._owner_snapshot(require_launch_identity=require_launch_identity, **options)
         pending = chrome_acquisition._clean_launch_pending()
         _require(self._owner_snapshot(require_launch_identity=require_launch_identity, **options) == observed

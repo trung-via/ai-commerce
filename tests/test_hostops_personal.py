@@ -4793,7 +4793,7 @@ $out | ConvertTo-Json -Compress
         self.assertEqual(self.dispatch()["code"], "SUPERVISOR_ACTIVE_UNVERIFIED")
         self.assertEqual(set(self.modes), {"inspect"})
 
-    def stale_supervisor(self, *, operational=False):
+    def stale_supervisor(self, *, operational=False, health="CHROME_OWNED", mock_browser=True):
         self.approval["comment"]["id"] = 1001
         self.state = self.instance
         self.prior = {**self.intent(self.nonce), "instance": self.instance,
@@ -4801,10 +4801,13 @@ $out | ConvertTo-Json -Compress
         self.values["Run"] = json.dumps(self.prior)
         self.supervisor_mode = self.runtime._OPERATIONAL_TICK_V1 if operational else self.runtime._CHROME_HEALTH_ONLY
         self.publish_health(source_sha=self.prior["source_sha"], source_digest=self.prior["source_digest"],
-                            mode=self.supervisor_mode, health="CHROME_OWNED")
+                            mode=self.supervisor_mode, health=health)
         self.history = self.mock(hostops, "_verify_prior_supervisor_source", return_value="GIT_HISTORY_REHASHED")
-        self.browser = self.mock(hostops, "_supervisor_upgrade_chrome_pin", return_value="2" * 64)
-        self.mock(acquisition, "_commandline_argv", side_effect=lambda raw: [str(self.executable), raw])
+        if mock_browser:
+            self.browser = self.mock(hostops, "_supervisor_upgrade_chrome_pin", return_value="2" * 64)
+        self.mock(acquisition, "_commandline_argv", side_effect=lambda raw: (
+            json.loads(raw) if raw.startswith("[") else [str(self.executable), raw]
+        ))
         self.stop_effect = Mock()
         self.stop = self.mock(self.runtime, "_stop_verified_supervisor", side_effect=self.stop_stale_supervisor)
         self.exited = self.mock(self.runtime, "_supervisor_process_exited", side_effect=lambda *_: self.state != self.instance)
@@ -4860,6 +4863,100 @@ $out | ConvertTo-Json -Compress
         self.assertEqual(self.modes.count("prove_upgrade"), 2)
         self.assertNotIn("install", self.modes)
         self.spawn.assert_not_called()
+
+    def test_upgrade_migrates_exact_legacy_lock_hold_with_live_owned_chrome(self):
+        env, _ = self.setup_legacy_health_only_config()
+        self.stale_supervisor(health="ENROLLMENT_PROFILE_LOCK_UNPROVEN", mock_browser=False)
+        prior_guid = self.state
+        marker = env.user_data_dir / "lockfile"
+        marker.write_bytes(b"opaque marker")
+        proc = {"ProcessId": 700, "ExecutablePath": str(env.executable), "CommandLine": json.dumps(env.command()),
+                "SessionId": self.owner[1], "OwnerSid": self.owner[2], "CreationDate": "2026-11-26T01:00:00Z"}
+        inventory = {"listeners": [{"OwningProcess": 700, "LocalAddress": "127.0.0.1", "LocalPort": 9444}],
+                     "processes": [proc]}
+        expected = acquisition._legacy_health_inventory(env, inventory, session=self.owner[1], sid=self.owner[2])
+        query = self.mock(acquisition, "_query_windows", return_value=inventory)
+        self.mock(acquisition, "_require_operator_control")
+        holder = Mock(return_value=True)
+        native = self.mock(acquisition, "_NativeEnrollment", return_value=SimpleNamespace(observe_marker=holder))
+        observed = []
+        self.mock(acquisition, "_probe_cdp", side_effect=lambda _: observed.append(self.state))
+        config_bytes = self.config.read_bytes()
+
+        approval = self.approval
+        self.probe_state = "TASK_INSTANCE_PRESENT"
+        self.env["AI_COMMERCE_WAKEHUB_CONFIG"] = str(self.config)
+        before = dict(self.values)
+        self.assertEqual(self.dispatch_task_probe()["code"],
+                         "TASK_INSTANCE_PRESENT+ACTIVE_READ_CHECKS_COMPLETE+RUN_MATCH+MUTEX_ACTIVE"
+                         "+HEALTH_MATCH_LIVE+UPGRADE_ABSENT")
+        self.assertEqual(self.values, before)
+        self.store.assert_not_called()
+        self.stop.assert_not_called()
+        observed.clear()
+
+        self.approval = approval
+        self.env["GITHUB_EVENT_NAME"] = "issue_comment"
+        receipt = self.dispatch()
+        self.assertEqual((receipt["status"], receipt["code"]), ("OBSERVED", "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED"))
+        self.assertEqual(observed, [prior_guid] * 4 + ["READY"] * 2 + [self.state] * 2)
+        self.assertEqual(query.call_count, 10)
+        self.assertEqual(holder.call_count, 10)
+        holder.assert_called_with(marker)
+        native.assert_called_with(env, *self.owner, expected[1][1][0])
+        self.assertEqual(json.loads(self.values["Health"])["health"], "CHROME_OWNED")
+        self.assertEqual(json.loads(self.values["Run"]), {**self.intent(self.replacement_nonce), "instance": self.state})
+        self.assertIsNone(self.values["UpgradePending"])
+        self.assertIsNone(self.values["StartPending"])
+        self.assertEqual((self.config.read_bytes(), marker.read_bytes()), (config_bytes, b"opaque marker"))
+        self.assertEqual(self.dispatch(), receipt)
+        self.stop_effect.assert_called_once_with(123, 456)
+        self.launch.assert_called_once()
+        self.spawn.assert_not_called()
+
+    def test_legacy_lock_hold_requires_owned_proof_and_unchanged_chrome_at_reservation(self):
+        self.stale_supervisor(health="ENROLLMENT_PROFILE_LOCK_UNPROVEN")
+        before = dict(self.values)
+        self.browser.side_effect = acquisition._EnrollmentHold("ENROLLMENT_PROFILE_LOCK_UNPROVEN")
+        self.assertEqual(self.dispatch()["code"], "ENROLLMENT_PROFILE_LOCK_UNPROVEN")
+        self.stop.assert_not_called()
+        self.browser.side_effect = ["2" * 64, "3" * 64]
+        self.assertEqual(self.dispatch()["code"], "CHROME_OBSERVATION_HOLD")
+        self.assertTrue(all(call.kwargs == {"expected_health": "CHROME_OWNED"} for call in self.browser.call_args_list))
+        self.assertEqual(self.values, before)
+        self.store.assert_not_called()
+        self.stop_effect.assert_not_called()
+        self.launch.assert_not_called()
+
+    def test_upgrade_rejects_nonpositive_operational_health(self):
+        self.stale_supervisor(operational=True, health="ENROLLMENT_PROFILE_LOCK_UNPROVEN")
+        before = dict(self.values)
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_ACTIVE_UNVERIFIED")
+        self.assertEqual(self.values, before)
+        self.browser.assert_not_called()
+        self.store.assert_not_called()
+        self.stop.assert_not_called()
+        self.launch.assert_not_called()
+
+    def test_legacy_lock_upgrade_waits_for_positive_replacement_health(self):
+        self.stale_supervisor(health="ENROLLMENT_PROFILE_LOCK_UNPROVEN")
+
+        def start_held(nonce):
+            instance = self.start_replacement(nonce)
+            health = json.loads(self.values["Health"])
+            self.publish_health(**dict(health, health="ENROLLMENT_PROFILE_LOCK_UNPROVEN"))
+            return instance
+
+        self.launch.side_effect = start_held
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_START_UNKNOWN")
+        self.assertIsNotNone(self.values["UpgradePending"])
+        self.assertIsNotNone(self.values["StartPending"])
+        self.assertIsNone(self.values["Run"])
+        health = json.loads(self.values["Health"])
+        self.publish_health(**dict(health, health="CHROME_OWNED"))
+        self.assertEqual(self.dispatch()["code"], "SUPERVISOR_CHROME_HEALTH_ONLY_OBSERVED")
+        self.stop_effect.assert_called_once_with(123, 456)
+        self.launch.assert_called_once()
 
     def test_operational_upgrade_fences_delivery_and_uses_read_only_target_ticks(self):
         self.stale_supervisor(operational=True)

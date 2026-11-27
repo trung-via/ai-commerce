@@ -1461,6 +1461,23 @@ def test_wh01b_native_create_uses_relative_no_reparse_protected_create_new(monke
     assert calls == [(99, 321, 0x1040, len("config.json") * 2, (1, 2, 0x200060))]
 
 
+def test_legacy_health_marker_opens_only_metadata_and_pins_against_replacement(monkeypatch):
+    tx = offline_native(monkeypatch)
+    calls = []
+
+    def open_existing(*args):
+        attrs = args[2]._obj
+        calls.append((args[1], attrs.SecurityDescriptor, attrs.Attributes, args[6:9]))
+        args[0]._obj.value = 101
+        return 0
+
+    tx.n.NtCreateFile.handler = open_existing
+    tx._info = lambda *args: (1, 0, 2, 0, 0)
+    handle = tx._relative(99, "lockfile", directory=False, marker_observation=True)
+    assert handle.value == 101 and tx.effect_possible is False
+    assert calls == [(0x120080, None, 0x1040, (3, 1, 0x200060))]
+
+
 @pytest.mark.parametrize("kind", ["reparse", "hardlink", "wrong_type", "non_disk", "unavailable"])
 def test_wh01b_native_handle_rejects_unsafe_file_identity(monkeypatch, kind):
     tx = offline_native(monkeypatch)
@@ -1511,12 +1528,15 @@ def test_wh01b_native_private_acl_requires_exact_protected_owner(monkeypatch, ki
 
 
 @pytest.mark.parametrize("kind", ["valid", "foreign_pid", "pid_reuse", "session", "shared", "none", "unavailable"])
-def test_wh01b_native_marker_restart_manager_is_exact_process_proof(monkeypatch, kind):
+@pytest.mark.parametrize("observe_only", [False, True])
+def test_wh01b_native_marker_restart_manager_is_exact_process_proof(monkeypatch, kind, observe_only):
     tx = offline_native(monkeypatch)
     tx.identity = (123, None, None, 1, _OPERATOR_SID, "2026-11-14T01:00:00Z")
     tx.process_ticks = ca._creation_ticks(tx.identity[5])
-    tx._pin_path = lambda *args, **kwargs: None
-    tx._process = lambda: None
+    pinned, checked = [], []
+    tx._pin_path = lambda path, **options: pinned.append((path, options))
+    tx._process = lambda *, require_interactive_caller=True: checked.append(require_interactive_caller)
+    tx.k.OpenProcess.handler = lambda *args: 33
     def start(session, flags, key):
         session._obj.value = 7
         return 0
@@ -1531,7 +1551,13 @@ def test_wh01b_native_marker_restart_manager_is_exact_process_proof(monkeypatch,
     tx.rm.RmStartSession.handler = start
     tx.rm.RmRegisterResources.handler = lambda *args: 0
     tx.rm.RmGetList.handler = listing
-    assert tx.prove_marker(Path("synthetic-marker")) is (kind == "valid")
+    path = Path("synthetic-marker")
+    prove = tx.observe_marker if observe_only else tx.prove_marker
+    assert prove(path) is (kind == "valid")
+    options = {"marker_observation": True} if observe_only else {}
+    assert pinned == [(path, {"directory": False, "private": True, **options})]
+    assert all(value is not observe_only for value in checked)
+    assert not tx.handles and tx.effect_possible is False
 
 
 @pytest.mark.parametrize("kind", ["valid", "short_write", "write_error", "flush_error"])
@@ -2492,13 +2518,54 @@ def test_protected_legacy_health_tick_allows_root_and_parent_acl_only_for_health
     assert ca._assess_lifecycle_9444(repo).code == "CONFIG_UNTRUSTED"
     assert ca.assess_logon_9444(repo)["code"] == "CONFIG_UNTRUSTED"
 
-    # Negative guards on health tick: root lock marker, profile lock marker, session drift, pin change.
+    marker_proofs = []
+    holder_verified = False
+
+    def observe_marker(tx, marker):
+        marker_proofs.append((tx.identity, marker))
+        return holder_verified
+
+    monkeypatch.setattr(ca._NativeEnrollment, "observe_marker", observe_marker, raising=False)
+    # A root marker keeps its HOLD unless the configured live Chrome is proven to hold it.
     marker = nested_profile / ca._MARKERS[0]
     marker.touch()
     try:
         published.clear()
         assert runner.run_supervisor(path, repo, max_ticks=1, observe_only=True, _deployment=deployment).code == "ENROLLMENT_PROFILE_LOCK_UNPROVEN"
         assert published == ["ENROLLMENT_PROFILE_LOCK_UNPROVEN"]
+        assert len(marker_proofs) == int(running)
+        if running:
+            holder_verified = True
+            marker_proofs.clear()
+            published.clear()
+            cdp_probes.clear()
+            inventory = ca._legacy_health_inventory(d5_env, snapshot, session=1, sid=_OPERATOR_SID)[1]
+            result = runner.run_supervisor(path, repo, max_ticks=1, observe_only=True, _deployment=deployment)
+            assert result.code == result.chrome_health == "CHROME_OWNED" and published == ["CHROME_OWNED"]
+            assert marker_proofs == [(inventory[1][0], marker)] * 2
+            assert cdp_probes == [d5_env] * 2
+            assert marker.is_file()
+
+            with monkeypatch.context() as changed:
+                process = snapshot["processes"][0]
+                changed.setitem(process, "OwnerSid", "S-1-5-21-123-1002")
+                published.clear()
+                marker_proofs.clear()
+                cdp_probes.clear()
+                result = runner.run_supervisor(path, repo, max_ticks=1, observe_only=True, _deployment=deployment)
+                assert result.code == "BROWSER_OWNERSHIP_UNPROVEN" and published == ["CHROME_OBSERVATION_HOLD"]
+                assert marker_proofs == cdp_probes == []
+
+            with monkeypatch.context() as changed:
+                changed_inventory = {**snapshot, "processes": [
+                    {**snapshot["processes"][0], "CreationDate": "2026-11-14T01:00:01Z"},
+                ]}
+                snapshots = iter((snapshot, changed_inventory))
+                changed.setattr(ca, "_query_windows", lambda _: next(snapshots))
+                published.clear()
+                result = runner.run_supervisor(path, repo, max_ticks=1, observe_only=True, _deployment=deployment)
+                assert result.code == "CHROME_OBSERVATION_CHANGED" and published == ["CHROME_OBSERVATION_HOLD"]
+            holder_verified = False
     finally:
         marker.unlink()
 
