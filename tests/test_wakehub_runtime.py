@@ -4869,6 +4869,10 @@ def test_supervisor_enrollment_mailbox_is_explicit_and_bound_to_current_instance
     r._receive_enrollment(e.f.i["root"], deployment, stop)
     assert r._ENROLLMENT_RECEIPT not in rows and not e.custody
     rows[r._ENROLLMENT_INTENT] = json.dumps(intent)
+    rows["UpgradePending"] = "reserved upgrade"
+    r._receive_enrollment(e.f.i["root"], deployment, stop)
+    assert r._ENROLLMENT_RECEIPT not in rows and not e.custody
+    del rows["UpgradePending"]
     e.ui.readback = False
     r._receive_enrollment(e.f.i["root"], deployment, stop)
     uncertain = json.loads(rows[r._ENROLLMENT_RECEIPT])
@@ -5580,7 +5584,10 @@ class SimulatedWakeHubCrash(BaseException):
 
 @pytest.fixture
 def flat05(request, flat04, r3a_ingress, monkeypatch):
-    f = request.getfixturevalue("shared_root_chat") if getattr(request, "param", False) else flat04
+    variant = getattr(request, "param", None)
+    f = request.getfixturevalue("shared_root_chat") if variant is True else flat04
+    if variant == "protected" and os.name != "nt":
+        monkeypatch.setattr(r, "_private_identity", lambda _: f.s.owner()[2])
     prepared = f.enroll()
     event = f.i["event"]
     f.ef02 = r.SourceIdentity("ef02-completion", event["repository"], event["run_id"], event["run_attempt"])
@@ -5901,6 +5908,69 @@ def test_standing_ef02_reopens_cursor_and_delivers_later_source_without_a_run_fi
     assert f.rows() == rows and f.ui.clicks == 2
 
 
+@pytest.mark.parametrize("flat05", ["protected"], indirect=True)
+def test_protected_operational_restart_preserves_journal_and_reconciles_without_resending(standing_ef02, monkeypatch):
+    from ai_commerce.hostops_v3 import personal
+
+    f = standing_ef02
+    i, s = f.i, f.s
+    selected = f.standing.add(17, "b" * 40)
+    event_id = selected.event["event_id"]
+    f.ui.ref_mode = "boolean"
+    assert s.run().code == "SUBMISSION_UNPROVEN"
+    before = f.rows()[event_id]
+    owner = s.owner()
+    path, root = i["config_path"], i["root"]
+    desktop = r._supervised_desktop(owner[1], owner[2])
+    monkeypatch.setattr(r, "_supervisor_owner_session", lambda: (owner, desktop))
+    chrome, config_pin = r._observe_only_config(path, root, owner, lambda: False, protected=True)
+    assert isinstance(chrome, r._SupervisorChrome)
+    mode = r._OPERATIONAL_TICK_V1
+    browser_pin = personal._supervisor_upgrade_chrome_pin(r, r.chrome_acquisition, root, owner, path, config_pin, mode)
+    journal_before = s.path.read_bytes()
+    config_before = path.read_bytes()
+    origin_before = f.origin()
+    deployment = {"source_sha": "d" * 40, "source_digest": "e" * 64, "config_digest": config_pin,
+                  "desktop": desktop, "session": owner[1], "sid": owner[2],
+                  "config": str(path), "nonce": "f" * 32}
+    registry, health = {"UpgradePending": "reserved upgrade"}, []
+    slots = set()
+
+    @contextmanager
+    def slot(name=r._SUPERVISOR_MUTEX):
+        assert name not in slots
+        slots.add(name)
+        try:
+            yield
+        finally:
+            slots.remove(name)
+
+    def store(name, value):
+        registry[name] = value
+        if name == "Health" and value is not None:
+            assert r._SUPERVISOR_TICK_MUTEX in slots
+            health.append(json.loads(value))
+
+    monkeypatch.setattr(r, "_supervisor_slot", slot)
+    monkeypatch.setattr(r, "_supervisor_process", lambda *_: 123456)
+    monkeypatch.setattr(r, "_supervisor_deployment_value", registry.get)
+    monkeypatch.setattr(r, "_store_supervisor_deployment_value", store)
+    assert s.run(_deployment=deployment).code == "CHROME_OWNED"
+    assert health[-1]["mode"] == mode and health[-1]["nonce"] == deployment["nonce"]
+    assert s.path.read_bytes() == journal_before and f.rows()[event_id] == before
+    assert personal._supervisor_upgrade_chrome_pin(
+        r, r.chrome_acquisition, root, owner, path, config_pin, mode,
+    ) == browser_pin
+    del registry["UpgradePending"]
+    resumed = s.run(2, _deployment=deployment)
+    assert resumed.code == "LOCAL_UI_EXISTING_TURN_RECONCILED" and resumed.replayed
+    row = f.rows()[event_id]
+    assert row["evidence"]["local_send"] == before["evidence"]["local_send"]
+    assert f.ui.clicks == f.ui.inserts == f.ui.observations == 1
+    assert f.origin() == origin_before and path.read_bytes() == config_before
+    assert not s.requests and not slots
+
+
 @pytest.mark.parametrize(("fault", "code"), [
     ("workflow", "EF02_REUSABLE_WORKFLOW_UNPROVEN"),
     ("attempt", "RUN_IDENTITY_MISMATCH"),
@@ -5972,6 +6042,20 @@ def test_standing_agy_observes_expired_preparation_as_persistent_enrollment(dual
     assert result.code == "LOCAL_UI_EXISTING_TURN_RECONCILED"
     assert len(f.agy.calls) == f.ui.observations == 1 and f.ui.clicks == 0
     assert f.s.run().replayed and len(f.agy.calls) == 1
+
+
+def test_upgrade_keeps_the_journal_read_only_when_agy_exit_is_unproven(dual_route):
+    f = dual_route
+    event_id = f.select("github-issue-created")
+    f.agy.effect = lambda _: "AGY_PROCESS_UNPROVEN"
+    assert f.s.run().code == "AGY_PROCESS_UNPROVEN"
+    runtime = r._read_runtime_config(f.i["config_path"], f.i["root"])
+    before = f.s.path.read_bytes()
+    with pytest.raises(r.RuntimeHold, match="^SUPERVISOR_ACTIVE_UNVERIFIED$"):
+        runtime.journal.enrolled_origin(runtime.registration, runtime.principal, for_upgrade=True)
+    assert f.s.path.read_bytes() == before
+    assert f.rows()[event_id]["status"] == "UNKNOWN_EFFECT"
+    assert len(f.agy.calls) == 1 and f.ui.clicks == 0
 
 
 @pytest.mark.parametrize("account_id", [None, "foreign-account"])
@@ -6659,6 +6743,47 @@ def test_flat05_other_modes_and_legacy_unknown_do_not_send(flat05):
     f.save()
     assert f.s.run().code == "LOCAL_UI_OWNER_AUTHORIZED_TURN_OBSERVED"
     assert f.rows()[event_id] == legacy and f.ui.clicks == 1
+
+
+@pytest.mark.parametrize("opened_created,wait_result,terminate", [(456, 258, True), (456, 0, False), (789, 258, False)])
+def test_supervisor_upgrade_targets_only_the_verified_process_handle(monkeypatch, opened_created, wait_result, terminate):
+    from unittest.mock import Mock
+
+    kernel = SimpleNamespace(WaitForSingleObject=Mock(return_value=wait_result), TerminateProcess=Mock(return_value=0))
+    handle = object()
+    owner = (r.Path("local"), 7, "S-1-5-21-101-202-303-1001")
+    executable = r.Path("pythonw.exe")
+    order = []
+
+    @contextmanager
+    def open_process(pid, *, for_stop):
+        assert (pid, for_stop) == (123, True)
+        order.append("open")
+        try:
+            yield kernel, handle, opened_created
+        finally:
+            order.append("close")
+
+    def verify(api, target, pid, image, context):
+        assert (api, target, pid, image, context) == (kernel, handle, 123, executable, owner)
+        order.append("verify")
+
+    def stop(target, code):
+        assert (target, code) == (handle, 1)
+        order.append("terminate")
+        return 0  # HostOps requires observed stop regardless of the API return.
+
+    kernel.TerminateProcess.side_effect = stop
+    monkeypatch.setattr(r, "_supervisor_process_handle", open_process)
+    monkeypatch.setattr(r, "_verify_supervisor_process", verify)
+    if opened_created != 456:
+        with pytest.raises(r.RuntimeHold, match="SUPERVISOR_PROCESS_UNVERIFIED"):
+            r._stop_verified_supervisor(123, 456, executable, owner, lambda: order.append("checkpoint"))
+        assert order == ["open", "close"]
+    else:
+        r._stop_verified_supervisor(123, 456, executable, owner, lambda: order.append("checkpoint"))
+        assert order == ["open", "verify", "checkpoint", *(["terminate"] if terminate else []), "close"]
+    assert kernel.TerminateProcess.call_count == int(terminate)
 
 
 def test_protected_supervisor_startup_receipt_owner_config_and_first_health_boundaries(observe_only, monkeypatch):

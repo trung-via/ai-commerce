@@ -888,14 +888,18 @@ class NativeChrome9444:
         self.adopted_config = adopted_config
         self.adapter = None if legacy_health_only else LocalChromeDoorbellAdapter(allow_submit=False)
 
-    def _owner_snapshot(self, *, require_launch_identity: bool = False) -> tuple:
+    def _owner_snapshot(self, *, require_launch_identity: bool = False, hostops: bool = False) -> tuple:
         env = self.environment
         _require(type(env) is chrome_acquisition.ChromeEnvironment
                  and env.port == 9444 and env.endpoint == "http://127.0.0.1:9444",
                  "CDP_OWNER_MISMATCH")
-        operator = chrome_acquisition._enrollment_operator
-        local, session, sid = operator(attended=False, protocol_only=True) if self.supervised else operator()
-        desktop = _supervised_desktop(session, sid) if self.supervised else None
+        if hostops:
+            _require(self.supervised and not self.legacy_health_only, "CHROME_OWNER_UNPROVEN")
+            (local, session, sid), desktop = _supervisor_owner_session()
+        else:
+            operator = chrome_acquisition._enrollment_operator
+            local, session, sid = operator(attended=False, protocol_only=True) if self.supervised else operator()
+            desktop = _supervised_desktop(session, sid) if self.supervised else None
         if self.legacy_health_only:
             selected = chrome_acquisition._supervisor_9444_config(local, self.repository_root, sid)
             _require(selected is not None and selected[0] == env, "CHROME_ENROLLMENT_DRIFT")
@@ -972,23 +976,28 @@ class NativeChrome9444:
                 env.config_path, local, self.repository_root, sid)
             _require(current == env and config == self.adopted_config, "CHROME_ENROLLMENT_DRIFT")
         if self.supervised:
-            _require(_supervised_desktop(session, sid) == desktop, "CHROME_OBSERVATION_CHANGED")
+            if hostops:
+                _require(_supervisor_owner_session() == ((local, session, sid), desktop), "CHROME_OBSERVATION_CHANGED")
+            else:
+                _require(_supervised_desktop(session, sid) == desktop, "CHROME_OBSERVATION_CHANGED")
             # Keep the same target-only receipt for adoption and strict proof.
             pid = identity[0][0][2] if state == "OWNED" else None
             identity = identity[0], tuple(row for row in identity[1] if row[0] == pid)
         return state, (local, session, sid, env, identity, desktop)
 
-    def lifecycle_snapshot(self, *, require_launch_identity: bool = False) -> tuple:
+    def lifecycle_snapshot(self, *, require_launch_identity: bool = False, hostops: bool = False) -> tuple:
         """Read the native launch marker around two independent owner observations."""
+        _require(not hostops or not self.legacy_health_only, "CHROME_OWNER_UNPROVEN")
         if self.legacy_health_only:
             # Protected legacy health-only observation does not depend on the
             # unrelated clean 9444 demand-task launch marker.
             observed = self._owner_snapshot()
             _require(self._owner_snapshot() == observed, "CHROME_OBSERVATION_CHANGED")
             return (*observed, False)
-        observed = self._owner_snapshot(require_launch_identity=require_launch_identity)
+        options = {"hostops": True} if hostops else {}
+        observed = self._owner_snapshot(require_launch_identity=require_launch_identity, **options)
         pending = chrome_acquisition._clean_launch_pending()
-        _require(self._owner_snapshot(require_launch_identity=require_launch_identity) == observed
+        _require(self._owner_snapshot(require_launch_identity=require_launch_identity, **options) == observed
                  and chrome_acquisition._clean_launch_pending() == pending,
                  "CHROME_OBSERVATION_CHANGED")
         return (*observed, pending)
@@ -1819,7 +1828,7 @@ class Journal:
         actual = json.dumps(_decode_unique(rows[0][1]), sort_keys=True)
         _require(actual == json.dumps(asdict(registration), sort_keys=True), "REGISTRATION_DRIFT")
 
-    def enrolled_origin(self, registration: Registration, principal: str) -> dict | None:
+    def enrolled_origin(self, registration: Registration, principal: str, *, for_upgrade: bool = False) -> dict | None:
         """Read the exact existing enrollment without creating, migrating or recovering state."""
         with _private_access(self.path, self.repository_root) as (owner, _):
             _require(owner == principal, "JOURNAL_OWNER_DRIFT")
@@ -1833,7 +1842,7 @@ class Journal:
                          and db.execute("PRAGMA application_id").fetchone() == (_APP_ID,),
                          "JOURNAL_SCHEMA_INCOMPATIBLE")
                 schemas = dict(db.execute("SELECT name, sql FROM sqlite_master WHERE type='table' "
-                                          "AND name IN ('identity', 'local_origin')"))
+                                          "AND name IN ('identity', 'local_origin', 'events', 'chrome_lifecycle')"))
                 _require(schemas.get("identity") == _TABLES["identity"], "JOURNAL_SCHEMA_INCOMPATIBLE")
                 self._check_registration(db, owner, registration)
                 if "local_origin" not in schemas:
@@ -1843,6 +1852,28 @@ class Journal:
                 _require(len(rows) == 1 and rows[0][0] == 1, "LOCAL_ORIGIN_JOURNAL_INVALID")
                 origin = _decode_unique(rows[0][1])
                 _validate_local_origin(origin, registration)
+                if for_upgrade:
+                    # The tick slot excludes synchronous effects. Durable
+                    # records still need to rule out detached or interrupted ones.
+                    _require(schemas.get("events") == _TABLES["events"], "JOURNAL_SCHEMA_INCOMPATIBLE")
+                    if "chrome_lifecycle" in schemas:
+                        _require(schemas["chrome_lifecycle"] == _CHROME_TABLE, "JOURNAL_SCHEMA_INCOMPATIBLE")
+                        rows = db.execute("SELECT singleton, record FROM chrome_lifecycle").fetchall()
+                        _require(len(rows) == 1 and rows[0][0] == 1, "CHROME_JOURNAL_INVALID")
+                        chrome = _decode_unique(rows[0][1])
+                        _validate_chrome(chrome)
+                        _require(chrome["launch"] is None, _LAUNCH_UNKNOWN)
+                    navigation = origin["navigation"]
+                    _require(navigation is None or navigation["phase"] != "RESERVED",
+                             "EXACT_CHAT_PRELOAD_RECONCILE_REQUIRED")
+                    for (raw,) in db.execute("SELECT record FROM events"):
+                        record = _decode_unique(raw)
+                        send = record["evidence"].get("local_send", {})
+                        _require(record["status"] != "RESERVED"
+                                 and not (record["status"] == "UNKNOWN_EFFECT" and (
+                                     send.get("agy_attempt", {}).get("code") == "AGY_PROCESS_UNPROVEN"
+                                     or send.get("transport") == _AGY and "agy_attempt" not in send)),
+                                 "SUPERVISOR_ACTIVE_UNVERIFIED")
                 return origin if origin["phase"] == "ENROLLED" else None
 
     @contextmanager
@@ -4081,6 +4112,8 @@ def _registered_result(run: Callable[[], Result]) -> Result:
 
 _SUPERVISOR_MUTEX = r"Global\AI-Commerce-WakeHub-9444-Receiver-v1"
 _SUPERVISOR_DEPLOY_MUTEX = r"Global\AI-Commerce-WakeHub-Supervisor-Deploy-v1"
+_SUPERVISOR_TICK_MUTEX = r"Global\AI-Commerce-WakeHub-Supervisor-Tick-v1"
+_OPERATIONAL_TICK_V1 = "OPERATIONAL_TICK_V1"
 _SUPERVISOR_DEPLOYMENT_KEY = r"Software\AI-Commerce\WakeHubSupervisor"
 _SUPERVISOR_HEALTH_MAX_AGE_NS = 60_000_000_000
 _ENROLLMENT_SCHEMA = "WakeHubChatEnrollment.v1"
@@ -4200,12 +4233,10 @@ def _supervisor_active() -> bool:
     return False
 
 
-def _supervisor_process(pid: int, executable: Path, owner: tuple[Path, int, str]) -> int:
-    """Verify the live image, non-elevated token and session, and return creation time."""
+@contextmanager
+def _supervisor_process_handle(pid: int, *, for_stop: bool = False):
     import ctypes as c
     from ctypes import wintypes as w
-
-    from ai_commerce.hostops_v3.security import windows_identity
 
     kernel = c.WinDLL("kernel32", use_last_error=True)
     kernel.OpenProcess.argtypes = [w.DWORD, w.BOOL, w.DWORD]
@@ -4215,27 +4246,73 @@ def _supervisor_process(pid: int, executable: Path, owner: tuple[Path, int, str]
     kernel.WaitForSingleObject.restype = w.DWORD
     kernel.GetProcessTimes.argtypes = [w.HANDLE, *([c.POINTER(w.FILETIME)] * 4)]
     kernel.GetProcessTimes.restype = w.BOOL
+    access = 0x101000 | (1 if for_stop else 0)  # SYNCHRONIZE | QUERY_LIMITED_INFORMATION | optional PROCESS_TERMINATE
+    handle = kernel.OpenProcess(access, False, pid)
+    if not handle:
+        if not for_stop and c.get_last_error() == 87:  # No such process ID.
+            yield None
+            return
+        raise RuntimeHold("SUPERVISOR_PROCESS_UNVERIFIED")
+    try:
+        times = [w.FILETIME() for _ in range(4)]
+        _require(kernel.GetProcessTimes(handle, *(c.byref(t) for t in times)), "SUPERVISOR_PROCESS_UNVERIFIED")
+        created = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+        yield kernel, handle, created
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def _verify_supervisor_process(kernel, handle, pid, executable, owner):
+    import ctypes as c
+    from ctypes import wintypes as w
+
+    from ai_commerce.hostops_v3.security import windows_identity
+
     kernel.QueryFullProcessImageNameW.argtypes = [w.HANDLE, w.DWORD, w.LPWSTR, c.POINTER(w.DWORD)]
     kernel.QueryFullProcessImageNameW.restype = w.BOOL
     kernel.ProcessIdToSessionId.argtypes = [w.DWORD, c.POINTER(w.DWORD)]
     kernel.ProcessIdToSessionId.restype = w.BOOL
 
-    code = "SUPERVISOR_PROCESS_UNVERIFIED"
-    handle = kernel.OpenProcess(0x101000, False, pid)  # SYNCHRONIZE | QUERY_LIMITED_INFORMATION
-    _require(bool(handle), code)
-    try:
-        image = c.create_unicode_buffer(32768)
-        size, session = w.DWORD(len(image)), w.DWORD()
-        times = [w.FILETIME() for _ in range(4)]
-        _require(kernel.QueryFullProcessImageNameW(handle, 0, image, c.byref(size))
-                 and Path(image.value) == executable
-                 and kernel.GetProcessTimes(handle, *(c.byref(t) for t in times))
-                 and kernel.ProcessIdToSessionId(pid, c.byref(session)) and session.value == owner[1]
-                 and windows_identity(handle) == (owner[2], False)
-                 and kernel.WaitForSingleObject(handle, 0) == 258, code)
-        return (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
-    finally:
-        kernel.CloseHandle(handle)
+    image = c.create_unicode_buffer(32768)
+    size, session = w.DWORD(len(image)), w.DWORD()
+    _require(kernel.QueryFullProcessImageNameW(handle, 0, image, c.byref(size))
+             and Path(image.value) == executable
+             and kernel.ProcessIdToSessionId(pid, c.byref(session)) and session.value == owner[1]
+             and windows_identity(handle) == (owner[2], False)
+             and kernel.WaitForSingleObject(handle, 0) == 258, "SUPERVISOR_PROCESS_UNVERIFIED")
+
+
+def _supervisor_process(pid: int, executable: Path, owner: tuple[Path, int, str]) -> int:
+    """Verify the live image, non-elevated token and session, and return creation time."""
+    with _supervisor_process_handle(pid) as process:
+        _require(process is not None, "SUPERVISOR_PROCESS_UNVERIFIED")
+        kernel, handle, created = process
+        _verify_supervisor_process(kernel, handle, pid, executable, owner)
+        return created
+
+
+def _supervisor_process_exited(pid: int, created: int) -> bool:
+    with _supervisor_process_handle(pid) as process:
+        if process is None:
+            return True
+        kernel, handle, opened_created = process
+        return opened_created != created or kernel.WaitForSingleObject(handle, 0) == 0
+
+
+def _stop_verified_supervisor(pid, created, executable, owner, before_stop):
+    from ctypes import wintypes as w
+
+    with _supervisor_process_handle(pid, for_stop=True) as (kernel, handle, opened_created):
+        _require(opened_created == created, "SUPERVISOR_PROCESS_UNVERIFIED")
+        _verify_supervisor_process(kernel, handle, pid, executable, owner)
+        kernel.TerminateProcess.argtypes = [w.HANDLE, w.UINT]
+        kernel.TerminateProcess.restype = w.BOOL
+        before_stop()
+        # Holding the verified handle avoids PID reuse. TerminateProcess targets
+        # one process object, with no task-wide, job, or descendant termination.
+        if kernel.WaitForSingleObject(handle, 0) == 258:
+            kernel.TerminateProcess(handle, 1)
+        # Treat the API return as inconclusive. HostOps observes exit and task idleness.
 
 
 def _supervisor_deployment_value(name: str) -> str | None:
@@ -4246,7 +4323,7 @@ def _supervisor_deployment_value(name: str) -> str | None:
             value, kind = winreg.QueryValueEx(key, name)
     except FileNotFoundError:
         return None
-    limit = 4096 if name.startswith("RetiredPending_") else 2048
+    limit = 4096 if name == "UpgradePending" or name.startswith("RetiredPending_") else 2048
     _require(kind == winreg.REG_SZ and 0 < len(value) <= limit, "SUPERVISOR_EVIDENCE_INVALID")
     return value
 
@@ -4264,7 +4341,7 @@ def _store_supervisor_deployment_value(name: str, value: str | None) -> None:
                     raise
         else:
             winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
-        if name in {"StartPending", "Run", "StartupReceipt", _ENROLLMENT_INTENT, _ENROLLMENT_RECEIPT
+        if name in {"StartPending", "Run", "StartupReceipt", "UpgradePending", _ENROLLMENT_INTENT, _ENROLLMENT_RECEIPT
                     } or name.startswith("RetiredPending_"):
             winreg.FlushKey(key)
 
@@ -4340,6 +4417,8 @@ def _receive_enrollment(root: Path, deployment: dict, stop: SupervisorStop) -> N
         if not set(_ENROLLMENT_PINS) <= deployment.keys() or _supervisor_deployment_value(_ENROLLMENT_INTENT) is None:
             return
         with _supervisor_slot(_SUPERVISOR_DEPLOY_MUTEX):
+            if _supervisor_deployment_value("UpgradePending") is not None:
+                return
             intent = _parse_enrollment_intent(_supervisor_deployment_value(_ENROLLMENT_INTENT), deployment)
             if intent is None or stop.is_set():
                 return
@@ -4405,6 +4484,24 @@ def _supervisor_slot(name: str = _SUPERVISOR_MUTEX):
 class SupervisorStop(Protocol):
     def is_set(self) -> bool: ...
     def wait(self, timeout: float) -> bool: ...
+
+
+def _protected_operational_tick(tick: Callable[[], Result], observe: Callable[[], Result]) -> Result:
+    # HostOps can reserve a stop only while it owns this same slot. Keep the
+    # slot through enrollment, delivery and provider cleanup. A durable upgrade
+    # also fences effects after a lost stop reply or while the target starts.
+    with ExitStack() as stack:
+        try:
+            stack.enter_context(_supervisor_slot(_SUPERVISOR_TICK_MUTEX))
+        except RuntimeHold as exc:
+            if str(exc) != "SUPERVISOR_ACTIVE":
+                raise
+            return Result("HOLD", "SUPERVISOR_ACTIVE", "SOURCE_ONLY")
+        try:
+            pending = _supervisor_deployment_value("UpgradePending")
+        except (OSError, ValueError):
+            return Result("HOLD", "SUPERVISOR_ACTIVE", "SOURCE_ONLY")
+        return tick() if pending is None else observe()
 
 
 def supervise(tick: Callable[[], Result], *, stop: SupervisorStop, max_ticks: int | None = None,
@@ -4826,7 +4923,7 @@ def _deployment_health(deployment: dict, *, health_only: bool = False):
         last_health = json.dumps({
             **{key: deployment[key] for key in (
                 "source_sha", "source_digest", "config_digest", "desktop", "session", "nonce")},
-            **({"mode": _CHROME_HEALTH_ONLY} if health_only else {}),
+            "mode": _CHROME_HEALTH_ONLY if health_only else _OPERATIONAL_TICK_V1,
             "pid": pid, "created": created, "observed_ns": monotonic_ns(), "health": code,
         }, separators=(",", ":"))
         _store_supervisor_deployment_value("Health", last_health)
@@ -5042,13 +5139,14 @@ def run_supervisor(config_path: Path | None, repository_root: Path, *, dry_run: 
     next_source_at = float("-inf")
     wake_at = 0.0
 
-    def registered_tick() -> Result:
+    def registered_tick(*, upgrade_observation: bool = False) -> Result:
         nonlocal chrome_retry, next_source_at, wake_at, tick_startup_reported
         chrome_context = None
         if _deployment is None:
             runtime = _read_runtime_config(config_path, repository_root)
         else:
-            _receive_enrollment(repository_root, _deployment, stop)
+            if not upgrade_observation:
+                _receive_enrollment(repository_root, _deployment, stop)
             owner = chrome_acquisition._enrollment_operator(attended=False, protocol_only=True)
             _require((owner[1], owner[2]) == (_deployment["session"], _deployment["sid"])
                      and _supervised_desktop(owner[1], owner[2]) == _deployment["desktop"],
@@ -5057,6 +5155,12 @@ def run_supervisor(config_path: Path | None, repository_root: Path, *, dry_run: 
             _require(isinstance(chrome_context, _SupervisorChrome) and pin == _deployment["config_digest"],
                      "LOCAL_CONFIG_CHANGED")
             runtime = chrome_context.runtime
+            if upgrade_observation:
+                state, _, pending = chrome_context.sender.lifecycle_snapshot()
+                _require(not pending, _LAUNCH_UNKNOWN)
+                health = "CHROME_OWNED" if state == "OWNED" else "CHROME_ABSENT"
+                publish(health)
+                return SupervisorTickResult("HOLD", health, "SOURCE_ONLY", False, chrome_health=health)
 
         def chrome_tick() -> Result:
             nonlocal chrome_context
@@ -5128,7 +5232,16 @@ def run_supervisor(config_path: Path | None, repository_root: Path, *, dry_run: 
         nonlocal wake_at, tick_startup_reported
         tick_startup_reported = False
         wake_at = monotonic() + idle_seconds
-        result = _registered_result(registered_tick)
+
+        def run(*, upgrade_observation=False):
+            return _registered_result(lambda: registered_tick(upgrade_observation=upgrade_observation))
+
+        if _deployment is None:
+            result = run()
+        else:
+            result = _protected_operational_tick(run, lambda: run(upgrade_observation=True))
+            if result.code == "SUPERVISOR_ACTIVE":
+                return result
         if clear_health is not None and not isinstance(result, SupervisorTickResult):
             if not first_health_published and not tick_startup_reported:
                 tick_startup_reported = True
