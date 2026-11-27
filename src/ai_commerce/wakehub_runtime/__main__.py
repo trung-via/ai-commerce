@@ -14,18 +14,17 @@ from .runner import (
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="WakeHub intake for exact EF02 runs and GitHub Issue creations. "
-                    "Chrome 9444 readiness and locally opted-in exact-chat preload. "
-                    "The supervisor supports owner-authorized local UI delivery to the registered chat.")
+                    "The supervisor delivers authorized jobs to an exact owner-configured chat on Chrome 9444.")
     sub = parser.add_subparsers(dest="command", required=True)
     supervisor = sub.add_parser(
         "supervise", help="Run serial ticks for the interactive owner on Windows.",
-        description="Observe Chrome 9444 by default. An owner-controlled private runtime config may set "
-                    "chrome_lifecycle to demand-start for the verified demand task, or paused to withhold effects. "
-                    "Set chat_preload to true to allow dedicated-browser preload after local registration. "
-                    "To explicitly opt in to Send, configure private ui_delivery with schema "
-                    "WakeHubLocalUIDelivery.v3, the current route_marker, registration_id, marker_digest, "
-                    "and a grants list with exact source_key and expires_ms (UTC epoch milliseconds) entries. "
-                    "AGY also requires account_id for each grant it uses. "
+        description="Reuse the existing Chrome 9444 profile. An owner-controlled private runtime config may set "
+                    "chrome_lifecycle to demand-start to run the verified demand task for an eligible job, "
+                    "or paused to withhold effects. Configure private ui_delivery with schema "
+                    "WakeHubLocalUIDelivery.v3 and chat_target set to an exact ChatGPT conversation URL or ID. "
+                    "When registration.binding.chat_url is present, it must match the canonical target. "
+                    "Use the existing journal and route identity. Direct delivery reuses or opens the exact chat. "
+                    "For exact jobs, use grants with source_key, account_id and expires_ms (UTC epoch milliseconds). "
                     "Standing intake permits an empty grants list and uses account_id from its private scope. "
                     "For GitHub issue creations, add standing_issue with repository_id, creator_id, title_prefix "
                     "(for example '[WAKEHUB PROJECT] '), not_before (UTC ISO timestamp) and account_id. "
@@ -33,9 +32,10 @@ def main(argv: list[str] | None = None) -> int:
                     "(for example title_prefix '[EF02] [PROJECT] ' and batch_prefix 'project_'). "
                     "Configure the existing private GitHub read token with Actions and Issues read access. "
                     "Human decision #1406 defaults v3 to transport agy. Set transport to playwright to "
-                    "select the direct route. For agy, supply an agy object with the local absolute agy.exe "
+                    "select Playwright explicitly. For agy, supply an agy object with the local absolute agy.exe "
                     "path (executable), executable_sha256, the absolute private workspace, and the enrolled "
-                    "wakehub-executor SKILL.md digest (skill_sha256). The workspace or owner profile must "
+                    "wakehub-executor SKILL.md digest (skill_sha256) for a procedure that accepts the direct target. "
+                    "The workspace or owner profile must "
                     "enroll wake-browser with a versioned chrome-devtools-mcp package on "
                     "http://127.0.0.1:9444. The default model is gemini-4-hydrogen-low with low effort. "
                     "The agy config accepts model, effort and timeout_seconds overrides. "
@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--target-index", type=int,
                      help="Select a zero-based entry in the private registered_targets list (default 0).")
     registration = sub.add_parser(
-        "register", help="Enroll the owner's exact chat from a local Windows owner terminal.",
+        "register", help="Manage legacy marker enrollment from a local Windows owner terminal.",
         description="For an initial Chrome-health-only install, prepare a private WakeHubRuntimeR1.v1 draft "
                     "and pass it explicitly with --config for manual enrollment. Use the existing Chrome config, the owner-selected "
                     "exact route and its private journal. Set chat_preload explicitly. A registration-only "

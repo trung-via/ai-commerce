@@ -708,12 +708,27 @@ def test_owner_admission_and_existing_consumer_closure():
         "tests/test_wakehub_private_operator.py",
         "tests/test_wakehub_native_inventory.py",
     }
-    # HostOps personal reaches native authority through the WakeHub runtime runner.
-    closure_groups = wakehub_groups | {"hostops-personal"}
-    closure_tests = wakehub_tests | {"tests/test_hostops_personal.py"}
-    assert set(impact.selected_groups) == closure_groups
-    assert set(impact.selected_tests) == closure_tests
+    assert set(impact.selected_groups) == wakehub_groups
+    assert set(impact.selected_tests) == wakehub_tests
     assert "ONBOARD_CONSUMER_OWNER_CLOSURE" in impact.reason_codes
+
+    runner = "src/ai_commerce/wakehub_runtime/runner.py"
+    hostops = "src/ai_commerce/hostops_v3/personal.py"
+    reverse, _ = impact_v21._reverse_import_graph(ROOT, [*PATHS[:3], runner, hostops])
+    assert runner not in reverse[PATHS[1]]
+    assert PATHS[0] in reverse[PATHS[1]]  # Signed native runtime still depends on its authority.
+    assert hostops in reverse[runner]  # Local HostOps imports the protected supervisor.
+
+    # The historical G2 baseline predates these two committed component owners.
+    current_head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    current_records = impact_v21.load_baseline_component_owner_records(
+        root=ROOT, base_sha=current_head, existing_groups=groups)
+    current_groups = (*groups, *(r["group"] for r in current_records))
+    supervisor_impact = impact_v21.select_impact(root=ROOT, changed_paths=(runner,), groups=current_groups)
+    assert supervisor_impact.runnable, supervisor_impact.missing_mapping
+    assert {"wakehub-runtime", "hostops-personal"} <= set(supervisor_impact.selected_groups)
+    assert {"tests/test_wakehub_runtime.py", "tests/test_hostops_personal.py"} <= set(supervisor_impact.selected_tests)
+
     profiles = json.loads((ROOT / ".github/ef02/verify-profiles.json").read_text())
     candidate = minimum_test.file_hashes(ROOT)
     base = dict(candidate)
@@ -721,9 +736,8 @@ def test_owner_admission_and_existing_consumer_closure():
         base_files=base, candidate_files=candidate, changed_paths=changed, required_acs=data["acs"],
         fallback_argv=profiles["mt01-component-onboarding"], groups=groups,
         registered_profiles=profiles, allowed_paths=changed)
-    # The runtime now imports the new attestation symbol in the TASK_PARENT delta.
-    assert plan["selected_groups"] == sorted(closure_groups)
-    assert set(plan["impact_v21"]["selected_tests"]) == closure_tests
+    assert plan["selected_groups"] == sorted(wakehub_groups)
+    assert set(plan["impact_v21"]["selected_tests"]) == wakehub_tests
     assert not plan["unknown_acs"]
     assert all(g["execute"] for g in plan["groups"]), plan["reason_codes"]
     for selected in plan["groups"]:
