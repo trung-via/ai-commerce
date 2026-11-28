@@ -5020,6 +5020,510 @@ def issue_fixture(i, monkeypatch):
                            calls=calls, responses=responses)
 
 
+def bind_owner_decision(i, github, journal, registration, owner, issue, execution_id, *, consumer="ef02"):
+    github.repo["owner"] = {"id": 711, "type": "User", "login": "fixture-owner"}
+    assert r.run_read_only(i["config_path"], i["root"], target_index=len(github.targets) - 1).code == (
+        "ISSUE_CREATED_ROUTE_AUTHORITY_UNAVAILABLE")
+    request = journal.execution_request(registration, execution_id, principal=owner)
+    evidence, = journal.decision_source_evidence(registration, issue.target.identity, principal=owner)
+    scope = i["config"].setdefault("owner_decision_ingress", {
+        "schema": "WakeHubOwnerDecisionReceipt.v1", "repository_id": github.repo["id"], "owner_id": 711,
+        "bindings": [],
+    })
+    row = {"execution_id": execution_id, "issue_id": issue.issue["id"], "issue_number": issue.issue["number"],
+           "request_sha256": digest(asdict(request)), "source_sha256": evidence.coverage.payload_sha256,
+           "continuation_consumer": consumer}
+    scope["bindings"].append(row)
+    i["save"](i["config_path"], i["config"])
+    return digest([scope["schema"], {
+        "identity": asdict(issue.target.identity), "issue_number": row["issue_number"], "owner_id": scope["owner_id"],
+        "execution_id": execution_id, "request_sha256": row["request_sha256"], "source_sha256": row["source_sha256"],
+        "continuation_consumer": consumer,
+    }])
+
+
+def owner_decision_fixture(i, monkeypatch, *, consumer="ef02", ground=True):
+    journal, registration, owner, demand, operation, _ = decision_fixture(i, runs=(17,))
+    journal.record_decision_demand(registration, demand, principal=owner)
+    plan = journal.record_decision_plan(registration, r.DecisionProposal(
+        demand.decision_id, 1, digest("owner decision fixture"), next_operation=operation), principal=owner)
+    github = issue_fixture(i, monkeypatch)
+    issue = github.add(1317)
+    scope_sha = bind_owner_decision(i, github, journal, registration, owner, issue, demand.execution_id, consumer=consumer)
+    args = i["config_path"], i["root"], demand.execution_id
+    if ground:
+        r.ground_owner_decision_revision(*args, demand.decision_id, expected_revision=demand.decision_id,
+                                        expected_checkpoint=plan.checkpoint)
+    return SimpleNamespace(journal=journal, registration=registration, owner=owner, demand=demand, plan=plan,
+                           operation=operation, github=github, issue=issue, scope_sha=scope_sha, args=args)
+
+
+def owner_receipt(f, *, demand=None, plan=None, disposition="CONTINUE", previous=None, supersedes=None,
+                  enumerate_pages=True):
+    demand = demand or f.demand
+    plan = plan or f.plan
+    journal, registration, owner = f.journal, f.registration, f.owner
+    packet = journal.build_continuity_packet(registration, demand.execution_id, demand.decision_id, principal=owner)
+    context = json.loads(packet.context)
+    manifest = {}
+    for section in ("source_evidence", "decision_obligations", "outbox", "captures", "instructions"):
+        if not enumerate_pages:
+            manifest[section] = [context[section]["count"], context[section]["sha256"]]
+            continue
+        committed, count, cursor = hashlib.sha256(), 0, None
+        while True:
+            page = journal.continuity_page(registration, demand.execution_id, demand.decision_id, packet.checkpoint,
+                                           packet.packet_id, section, principal=owner, cursor=cursor)
+            assert page.offset == count
+            for row in page.rows:
+                committed.update(r._continuity_json(row).encode("ascii") + b"\n")
+                count += 1
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+        assert (count, committed.hexdigest()) == (page.count, page.sha256)
+        manifest[section] = [count, committed.hexdigest()]
+    intent = plan.operation
+    return packet, {
+        "schema": "WakeHubOwnerDecisionReceipt.v1", "execution_id": demand.execution_id,
+        "decision_id": demand.decision_id, "revision_sha256": digest(demand.revision),
+        "scope_sha256": f.scope_sha, "checkpoint": plan.checkpoint, "previous_checkpoint": plan.previous_checkpoint,
+        "previous_accepted_checkpoint": previous, "packet_id": packet.packet_id, "context_sha256": packet.context_sha256,
+        "readback": manifest, "disposition": disposition, "supersedes_operation_id": supersedes,
+        "operation": [intent.operation_id, intent.execution_id, digest(asdict(intent.operation))] if intent else None,
+    }
+
+
+def owner_comment(f, payload, *, comment_id=9001):
+    url = f"{f.github.root_url}/issues/comments/{comment_id}"
+    comment = {"id": comment_id, "url": url, "issue_url": f.issue.url,
+               "user": {"id": 711, "type": "User", "login": "fixture-owner"},
+               "created_at": "2026-11-17T00:00:00Z", "updated_at": "2026-11-17T00:00:00Z",
+               "body": r._continuity_json(payload)}
+    f.github.responses[url] = comment
+    return url, comment
+
+
+def test_owner_decision_composed_acceptance_restart_and_history(ingress, monkeypatch):
+    f = owner_decision_fixture(ingress, monkeypatch)
+    packet, payload = owner_receipt(f)
+    url, comment = owner_comment(f, payload)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Owner comment ingress crossed into a native effect or authority lane")
+
+    monkeypatch.setattr(r.NativeBrainAdapter, "authenticate_receipt", forbidden)
+    monkeypatch.setattr(r.NativeSender, "send", forbidden)
+    monkeypatch.setattr(r.LocalChromeDoorbellAdapter, "send_registered_ui", forbidden)
+    monkeypatch.setattr(r.GitHubExactRunReader, "__init__", forbidden)
+    f.github.calls.clear()
+    accepted = r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+    assert f.github.calls == [f.github.root_url, f.issue.url, url]
+    assert (accepted.disposition, accepted.operation_id, accepted.child_execution_id) == (
+        "CONTINUE", f.operation.operation_id, f.plan.operation.execution_id)
+    assert accepted.receipt_sha256 == hashlib.sha256(comment["body"].encode("ascii")).hexdigest()
+    assert accepted.packet_id == packet.packet_id and accepted.checkpoint == f.plan.checkpoint
+    assert accepted.missing_capabilities == ("NATIVE_BRAIN_RECEIPT_UNAVAILABLE", "BRAIN_SEMANTIC_AUTHORITY_UNVERIFIED",
+                                              "RECEIVER_RESERVATION_UNVERIFIED",
+                                              "ATTEMPT_ACTIVATION_UNVERIFIED")
+    assert f.journal.decision_plan(f.registration, f.demand.decision_id, principal=f.owner) == f.plan
+
+    with f.journal.locked(f.registration) as (txn, _):
+        txn.write_chrome({"scope": None, "process": None, "launch": None}, migrate=True)
+    reopened, _, _ = execution_registry(ingress)
+    assert reopened.enrolled_origin(f.registration, f.owner, for_upgrade=True) is None
+    assert reopened.enrolled_origin(f.registration, f.owner, for_retirement=True) is None
+    assert reopened.continuity_packet(f.registration, packet.packet_id, principal=f.owner) == packet
+    comment["user"]["login"] = "owner-renamed"
+    replay = r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+    assert replay == replace(accepted, replayed=True)
+    assert (replay.retrieval_proof, replay.continuation_applicability) == ("UNVERIFIED", "PENDING_AUTHORITY")
+    owner_comment(f, payload, comment_id=9002)
+    with pytest.raises(r.RuntimeHold, match="OWNER_DECISION_CHECKPOINT_ALREADY_ACCEPTED"):
+        r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9002)
+    with closing(sqlite3.connect(reopened.path)) as db:
+        assert db.execute("SELECT comment_id, receipt_sha256 FROM owner_decision_receipts").fetchall() == [
+            (9001, accepted.receipt_sha256)]
+        assert db.execute("SELECT state FROM decision_outbox").fetchall() == [("PENDING_INTENT",)]
+        assert db.execute("SELECT COUNT(*) FROM execution_requests").fetchone() == (3,)
+        assert comment["body"] not in "\n".join(db.iterdump())
+
+
+@pytest.mark.parametrize(("fault", "code"), [
+    ("repository", "ISSUE_REPOSITORY_UNPROVEN"), ("repository-owner", "OWNER_DECISION_REPOSITORY_OWNER_UNPROVEN"),
+    ("issue-id", "ISSUE_IDENTITY_UNPROVEN"), ("issue-number", "ISSUE_CREATION_UNPROVEN"),
+    ("issue-pr", "ISSUE_IDENTITY_UNPROVEN"), ("comment-id", "OWNER_DECISION_COMMENT_AFFINITY_UNPROVEN"),
+    ("comment-url", "OWNER_DECISION_COMMENT_AFFINITY_UNPROVEN"),
+    ("comment-issue", "OWNER_DECISION_COMMENT_AFFINITY_UNPROVEN"), ("actor", "OWNER_DECISION_COMMENT_ACTOR_UNPROVEN"),
+    ("app", "OWNER_DECISION_COMMENT_ACTOR_UNPROVEN"), ("edited", "OWNER_DECISION_COMMENT_VERSION_UNPROVEN"),
+    ("pr-pass", "OWNER_DECISION_BODY_INVALID"), ("test-only", "OWNER_DECISION_BODY_INVALID"),
+    ("user-turn", "OWNER_DECISION_BODY_INVALID"), ("remote-timeout", "GITHUB_READ_RETRY_EXHAUSTED"),
+])
+def test_owner_decision_requires_exact_authenticated_issue_comment(ingress, monkeypatch, fault, code):
+    f = owner_decision_fixture(ingress, monkeypatch)
+    _, payload = owner_receipt(f)
+    url, comment = owner_comment(f, payload)
+    if fault == "repository":
+        f.github.repo["id"] += 1
+    elif fault == "repository-owner":
+        f.github.repo["owner"]["id"] += 1
+    elif fault == "issue-id":
+        f.issue.issue["id"] += 1
+    elif fault == "issue-number":
+        f.issue.issue["number"] += 1
+    elif fault == "issue-pr":
+        f.issue.issue["pull_request"] = {}
+    elif fault == "comment-id":
+        comment["id"] += 1
+    elif fault == "comment-url":
+        comment["url"] += "0"
+    elif fault == "comment-issue":
+        comment["issue_url"] += "0"
+    elif fault == "actor":
+        comment["user"]["id"] += 1
+    elif fault == "app":
+        comment["performed_via_github_app"] = {"id": 24}
+    elif fault == "edited":
+        comment["updated_at"] = "2026-11-18T00:00:00Z"
+    elif fault == "remote-timeout":
+        f.github.responses[url] = TimeoutError()
+    else:
+        comment["body"] = r._continuity_json(dict(payload, schema=fault))
+    f.github.calls.clear()
+    with pytest.raises(r.RuntimeHold, match=code):
+        r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+    assert len(f.github.calls) == len(set(f.github.calls)) <= 3
+    with closing(sqlite3.connect(f.journal.path)) as db:
+        assert db.execute("SELECT COUNT(*) FROM owner_decision_receipts").fetchone() == (0,)
+
+
+@pytest.mark.parametrize(("field", "value", "code"), [
+    ("execution_id", "e" * 32, "OWNER_DECISION_RECEIPT_SCOPE_MISMATCH"),
+    ("decision_id", "d" * 64, "OWNER_DECISION_RECEIPT_SCOPE_MISMATCH"),
+    ("revision_sha256", "a" * 64, "OWNER_DECISION_RECEIPT_SCOPE_MISMATCH"),
+    ("scope_sha256", "a" * 64, "OWNER_DECISION_RECEIPT_SCOPE_MISMATCH"),
+    ("checkpoint", "c" * 64, "OWNER_DECISION_CHECKPOINT_STALE"),
+    ("previous_checkpoint", "c" * 64, "OWNER_DECISION_CHECKPOINT_STALE"),
+    ("previous_accepted_checkpoint", "c" * 64, "OWNER_DECISION_CHECKPOINT_STALE"),
+    ("packet_id", "a" * 64, "CONTINUITY_PACKET_UNVERIFIED"),
+    ("context_sha256", "a" * 64, "CONTINUITY_CONTEXT_STALE"),
+    ("readback", {}, "OWNER_DECISION_READBACK_INCOMPLETE"),
+    ("operation", None, "OWNER_DECISION_OPERATION_MISMATCH"),
+    ("supersedes_operation_id", "a" * 64, "OWNER_DECISION_SUPERSESSION_MISMATCH"),
+])
+def test_owner_decision_rechecks_current_pins(ingress, monkeypatch, field, value, code):
+    f = owner_decision_fixture(ingress, monkeypatch)
+    _, payload = owner_receipt(f)
+    owner_comment(f, dict(payload, **{field: value}))
+    with pytest.raises(r.RuntimeHold, match=code):
+        r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+    with closing(sqlite3.connect(f.journal.path)) as db:
+        assert db.execute("SELECT COUNT(*) FROM owner_decision_receipts").fetchone() == (0,)
+
+
+@pytest.mark.parametrize(("consumer", "code"), [(None, "OWNER_DECISION_CONSUMER_APPLICABILITY_UNPROVEN"),
+                                               ("ef02", "OWNER_DECISION_SEMANTIC_AUTHORITY_UNPROVEN")])
+def test_owner_decision_record_only_reports_semantic_and_producer_gaps(ingress, monkeypatch, consumer, code):
+    f = owner_decision_fixture(ingress, monkeypatch, consumer=consumer)
+    f.journal.record_turn_capture(f.registration, f.demand.execution_id, continuity_turn(f.registration),
+                                  principal=f.owner)
+    _, payload = owner_receipt(f)
+    owner_comment(f, payload)
+    with pytest.raises(r.RuntimeHold, match=code):
+        r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+    _, payload = owner_receipt(f, disposition="RECORD_ONLY")
+    _, comment = owner_comment(f, payload)
+    accepted = r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+    assert accepted.disposition == "RECORD_ONLY" and accepted.operation_id is accepted.child_execution_id is None
+    assert {"TURN_ACTOR_UNVERIFIED", "CAPTURE_INVENTORY_UNVERIFIED", "OWNER_REQUEST_PRODUCER_UNAVAILABLE"} <= set(
+        accepted.context_gaps)
+    comment["body"] = r._continuity_json(dict(payload, disposition="CONTINUE"))
+    with pytest.raises(r.RuntimeHold, match="OWNER_DECISION_COMMENT_CONFLICT"):
+        r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+
+
+def test_owner_decision_revision_cas_keeps_late_and_unrelated_requests_separate(ingress, monkeypatch):
+    f = owner_decision_fixture(ingress, monkeypatch)
+    old_packet, payload = owner_receipt(f)
+    owner_comment(f, payload)
+    original = r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+    later = replace(f.demand, revision="explicit-successor")
+    delayed = replace(f.demand, revision="delayed-unseen-predecessor")
+    f.journal.record_decision_demand(f.registration, later, principal=f.owner)
+    r.ground_owner_decision_revision(*f.args, later.decision_id, expected_revision=f.demand.decision_id,
+                                    expected_checkpoint=f.plan.checkpoint)
+    f.journal.record_decision_demand(f.registration, delayed, principal=f.owner)
+    with pytest.raises(r.RuntimeHold, match="OWNER_DECISION_REVISION_CAS_STALE"):
+        r.ground_owner_decision_revision(*f.args, delayed.decision_id, expected_revision=f.demand.decision_id,
+                                        expected_checkpoint=f.plan.checkpoint)
+    with pytest.raises(r.RuntimeHold, match="DECISION_REVISION_STALE"):
+        f.journal.record_decision_plan(f.registration, r.DecisionProposal(
+            delayed.decision_id, 1, digest("delayed"), f.plan.checkpoint), principal=f.owner)
+    next_plan = f.journal.record_decision_plan(f.registration, r.DecisionProposal(
+        later.decision_id, 1, digest("successor"), f.plan.checkpoint, f.operation), principal=f.owner)
+    _, receipt = owner_receipt(f, demand=later, plan=next_plan, previous=original.checkpoint)
+    owner_comment(f, receipt, comment_id=9002)
+    with pytest.raises(r.RuntimeHold, match="OWNER_DECISION_SCOPE_UNGROUNDED"):
+        r.submit_owner_decision(*f.args, delayed.decision_id, comment_id=9002)
+    owner_comment(f, payload, comment_id=9003)
+    with pytest.raises(r.RuntimeHold, match="DECISION_REVISION_STALE"):
+        r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9003)
+    accepted = r.submit_owner_decision(*f.args, later.decision_id, comment_id=9002)
+    assert accepted.child_execution_id == original.child_execution_id
+    assert f.journal.continuity_packet(f.registration, old_packet.packet_id, principal=f.owner) == old_packet
+    assert r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001) == replace(original, replayed=True)
+
+    evidence = f.journal.decision_source_evidence(f.registration, f.demand.coverage[0].identity, principal=f.owner)
+    other, = (item for item in evidence if item.lineage.execution_id != f.demand.execution_id)
+    unrelated = replace(f.demand, execution_id=other.lineage.execution_id, coverage=(other.coverage,))
+    issue = f.github.add(1321)
+    scope_sha = bind_owner_decision(ingress, f.github, f.journal, f.registration, f.owner, issue, unrelated.execution_id)
+    other_args = *f.args[:2], unrelated.execution_id
+    f.journal.record_decision_demand(f.registration, unrelated, principal=f.owner)
+    r.ground_owner_decision_revision(*other_args, unrelated.decision_id, expected_revision=None, expected_checkpoint=None)
+    unrelated_plan = f.journal.record_decision_plan(f.registration, r.DecisionProposal(
+        unrelated.decision_id, 1, digest("independent")), principal=f.owner)
+    other_fixture = SimpleNamespace(**(vars(f) | {"demand": unrelated, "plan": unrelated_plan,
+                                                 "scope_sha": scope_sha, "issue": issue}))
+    _, receipt = owner_receipt(other_fixture, disposition="RECORD_ONLY")
+    owner_comment(other_fixture, receipt, comment_id=9004)
+    with pytest.raises(r.RuntimeHold, match="OWNER_DECISION_EXECUTION_MISMATCH"):
+        r.submit_owner_decision(*other_args, later.decision_id, comment_id=9002)
+    other_accepted = r.submit_owner_decision(*other_args, unrelated.decision_id, comment_id=9004)
+    assert other_accepted.execution_id == unrelated.execution_id and other_accepted.disposition == "RECORD_ONLY"
+    assert other_accepted.operation_id is other_accepted.continuation_applicability is None
+    assert other_accepted.retrieval_proof == "UNVERIFIED"
+
+
+@pytest.mark.parametrize("custody", ["PENDING_INTENT", "RECEIVER_RESERVED", "EFFECT_RESERVED", "UNKNOWN", "SHARED"])
+def test_owner_decision_supersedes_only_unreserved_unshared_intents(ingress, monkeypatch, custody):
+    f = owner_decision_fixture(ingress, monkeypatch)
+    _, receipt = owner_receipt(f)
+    owner_comment(f, receipt)
+    first = r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+    if custody == "SHARED":
+        other = replace(f.demand, obligation="other-consumer-reference")
+        f.journal.record_decision_demand(f.registration, other, principal=f.owner)
+        f.journal.record_decision_plan(f.registration, r.DecisionProposal(
+            other.decision_id, 1, digest("shared"), next_operation=f.operation), principal=f.owner)
+    elif custody != "PENDING_INTENT":
+        with closing(sqlite3.connect(f.journal.path)) as db, db:
+            db.execute("UPDATE decision_outbox SET state=? WHERE operation_id=?", (custody, first.operation_id))
+    next_operation = replace(f.operation, slot="different-slot", effect=replace(f.operation.effect, scope="other"))
+    plan = f.journal.record_decision_plan(f.registration, r.DecisionProposal(
+        f.demand.decision_id, 2, digest("new intent"), f.plan.checkpoint, next_operation), principal=f.owner)
+    packet, receipt = owner_receipt(f, plan=plan, previous=first.checkpoint, supersedes=first.operation_id)
+    owner_comment(f, receipt, comment_id=9002)
+    if custody == "PENDING_INTENT":
+        accepted = r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9002)
+        assert accepted.supersedes_operation_id == first.operation_id
+        assert accepted.child_execution_id != first.child_execution_id
+        assert r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001) == replace(first, replayed=True)
+        with pytest.raises(r.RuntimeHold, match="OWNER_DECISION_OPERATION_SUPERSEDED"):
+            f.journal.record_decision_plan(f.registration, r.DecisionProposal(
+                f.demand.decision_id, 3, digest("retired"), plan.checkpoint, f.operation), principal=f.owner)
+        current = f.journal.build_continuity_packet(f.registration, f.demand.execution_id, f.demand.decision_id,
+                                                    principal=f.owner)
+        old, = (row for row in json.loads(current.context)["outbox"]["rows"]
+                if row["operation_id"] == first.operation_id)
+        assert old["applicability"] == "SUPERSEDED" and old["state"] == "PENDING_INTENT"
+    else:
+        code = "OWNER_DECISION_OPERATION_SHARED" if custody == "SHARED" else "DECISION_OPERATION_CUSTODY_UNRESOLVED"
+        with pytest.raises(r.RuntimeHold, match=code):
+            r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9002)
+        assert f.journal.decision_plan(f.registration, f.demand.decision_id, version=1, principal=f.owner).operation.state == (
+            "PENDING_INTENT" if custody == "SHARED" else custody)
+    assert f.journal.continuity_packet(f.registration, packet.packet_id, principal=f.owner) == packet
+
+
+@pytest.mark.parametrize("enumerate_pages", [False, True], ids=["copied-manifest", "local-enumeration"])
+def test_owner_decision_manifest_leaves_brain_retrieval_unverified(ingress, monkeypatch, enumerate_pages):
+    f = owner_decision_fixture(ingress, monkeypatch)
+    for index in range(8):
+        demand = replace(f.demand, obligation=f"clean-obligation-{index}")
+        slot = f"clean-{index}"
+        operation = replace(f.operation, slot=slot, effect=replace(f.operation.effect, scope=slot))
+        f.journal.record_decision_demand(f.registration, demand, principal=f.owner)
+        f.journal.record_decision_plan(f.registration, r.DecisionProposal(
+            demand.decision_id, 1, digest(["clean", index]), next_operation=operation), principal=f.owner)
+
+    def forbid_page_read(*args, **kwargs):
+        pytest.fail("Copying the manifest from the preview must require no page reads")
+
+    if not enumerate_pages:
+        monkeypatch.setattr(r.Journal, "continuity_page", forbid_page_read)
+    packet, payload = owner_receipt(f, enumerate_pages=enumerate_pages)
+    context = json.loads(packet.context)
+    assert len(context["outbox"]["rows"]) == 8 < context["outbox"]["count"] == 9
+    assert payload["readback"] == {name: [context[name]["count"], context[name]["sha256"]]
+                                   for name in r._CONTINUITY_SECTIONS}
+    assert context["captures"]["count"] == context["instructions"]["count"] == 0
+    owner_comment(f, payload)
+    accepted = r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+    assert (accepted.disposition, accepted.operation_id, accepted.child_execution_id) == (
+        "CONTINUE", f.operation.operation_id, f.plan.operation.execution_id)
+    assert accepted.retrieval_proof == "UNVERIFIED"
+    assert accepted.continuation_applicability == "PENDING_AUTHORITY"
+    assert "CAPTURE_INVENTORY_UNVERIFIED" in accepted.context_gaps
+    assert "BRAIN_SEMANTIC_AUTHORITY_UNVERIFIED" in accepted.missing_capabilities
+    assert f.journal.decision_plan(f.registration, f.demand.decision_id, principal=f.owner) == f.plan
+
+
+def test_owner_decision_rejects_omitted_and_changed_paginated_custody(ingress, monkeypatch):
+    f = owner_decision_fixture(ingress, monkeypatch)
+    demands = sorted((replace(f.demand, obligation=f"tail-obligation-{index}") for index in range(10)),
+                     key=lambda demand: demand.decision_id)
+    for index, demand in enumerate(demands[:-1]):
+        operation = replace(f.operation, slot=f"tail-{index}", effect=replace(f.operation.effect, scope=f"tail-{index}"))
+        f.journal.record_decision_demand(f.registration, demand, principal=f.owner)
+        f.journal.record_decision_plan(f.registration, r.DecisionProposal(
+            demand.decision_id, 1, digest(["tail", index]), next_operation=operation), principal=f.owner)
+    packet, receipt = owner_receipt(f)
+    context = json.loads(packet.context)
+    assert receipt["readback"]["outbox"][0] == 10
+    preview = context["outbox"]["rows"]
+    preview_sha = hashlib.sha256(b"".join(r._continuity_json(row).encode("ascii") + b"\n" for row in preview)).hexdigest()
+    owner_comment(f, dict(receipt, readback=receipt["readback"] | {"outbox": [len(preview), preview_sha]}))
+    with pytest.raises(r.RuntimeHold, match="OWNER_DECISION_READBACK_INCOMPLETE"):
+        r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+    tail = f.journal.continuity_page(f.registration, f.demand.execution_id, f.demand.decision_id, packet.checkpoint,
+                                     packet.packet_id, "outbox", principal=f.owner,
+                                     cursor=r._continuity_cursor(packet.packet_id, "outbox", len(preview)))
+    operation_id = next(row["operation_id"] for row in tail.rows if row["operation_id"] != f.operation.operation_id)
+    f.journal.record_decision_demand(f.registration, demands[-1], principal=f.owner)
+    owner_comment(f, receipt)
+    with pytest.raises(r.RuntimeHold, match="CONTINUITY_CONTEXT_STALE"):
+        r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+    pending_packet, pending = owner_receipt(f)
+    assert all(row["decision_id"] != demands[-1].decision_id
+               for row in json.loads(pending_packet.context)["decision_obligations"]["rows"])
+    owner_comment(f, pending)
+    with pytest.raises(r.RuntimeHold, match="DECISION_OBLIGATION_REPLAN_REQUIRED"):
+        r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+    with closing(sqlite3.connect(f.journal.path)) as db, db:
+        db.execute("UPDATE decision_outbox SET state='UNKNOWN' WHERE operation_id=?", (operation_id,))
+    with pytest.raises(r.RuntimeHold, match="CONTINUITY_CONTEXT_STALE"):
+        r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+    _, current = owner_receipt(f)
+    owner_comment(f, current)
+    with pytest.raises(r.RuntimeHold, match="DECISION_OPERATION_CUSTODY_UNRESOLVED"):
+        r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+    assert f.journal.continuity_packet(f.registration, packet.packet_id, principal=f.owner) == packet
+
+
+def test_owner_decision_requires_local_scope_and_never_accepts_caller_proof(ingress, monkeypatch):
+    f = owner_decision_fixture(ingress, monkeypatch)
+    _, payload = owner_receipt(f)
+    with pytest.raises(TypeError):
+        r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001, receipt=payload)
+    scope = ingress["config"].pop("owner_decision_ingress")
+    ingress["save"](ingress["config_path"], ingress["config"])
+    f.github.calls.clear()
+    with pytest.raises(r.DependencyHold, match="OWNER_DECISION_STANDING_SCOPE_MISSING"):
+        r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+    ingress["config"]["owner_decision_ingress"] = scope
+    ingress["save"](ingress["config_path"], ingress["config"])
+    with monkeypatch.context() as patch:
+        patch.delenv("AI_COMMERCE_GITHUB_READ_TOKEN")
+        with pytest.raises(r.DependencyHold, match="OWNER_DECISION_GITHUB_READ_CREDENTIAL_MISSING"):
+            r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+    assert f.github.calls == []
+
+    url, comment = owner_comment(f, payload)
+
+    def changed_config():
+        scope["bindings"][0]["source_sha256"] = "0" * 64
+        ingress["save"](ingress["config_path"], ingress["config"])
+        return comment
+
+    f.github.responses[url] = changed_config
+    with pytest.raises(r.RuntimeHold, match="LOCAL_AUTHORITY_DRIFT"):
+        r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+    with pytest.raises(r.RuntimeHold, match="OWNER_DECISION_ISSUE_SOURCE_DRIFT"):
+        r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+    with closing(sqlite3.connect(f.journal.path)) as db:
+        assert db.execute("SELECT COUNT(*) FROM owner_decision_receipts").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("statement", ["CREATE TABLE owner_decision_revisions", "CREATE TABLE owner_decision_receipts",
+                                      "INSERT INTO owner_decision_revisions", "INSERT INTO owner_decision_receipts"])
+def test_owner_decision_transaction_rolls_back_each_write(ingress, monkeypatch, statement):
+    receipt_write = statement.startswith("INSERT INTO owner_decision_receipts")
+    f = owner_decision_fixture(ingress, monkeypatch, ground=receipt_write)
+    _, payload = owner_receipt(f)
+    owner_comment(f, payload)
+    connect = sqlite3.connect
+
+    def dump():
+        with closing(connect(f.journal.path)) as db:
+            return list(db.iterdump())
+
+    def ground():
+        return r.ground_owner_decision_revision(*f.args, f.demand.decision_id, expected_revision=f.demand.decision_id,
+                                                expected_checkpoint=f.plan.checkpoint)
+
+    def submit():
+        return r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+
+    class Fault(sqlite3.Connection):
+        def execute(self, sql, parameters=(), /):
+            result = super().execute(sql, parameters)
+            if sql.startswith(statement):
+                raise RuntimeError("injected after owner decision write")
+            return result
+
+    before = dump()
+    with monkeypatch.context() as patch:
+        patch.setattr(r.sqlite3, "connect", lambda *args, **kwargs: connect(*args, **kwargs, factory=Fault))
+        with pytest.raises(RuntimeError, match="injected after owner decision write"):
+            (submit if receipt_write else ground)()
+    assert dump() == before
+    if not receipt_write:
+        ground()
+    assert submit().disposition == "CONTINUE"
+
+
+def test_owner_decision_24_competing_authenticated_submissions(ingress, monkeypatch, record_property):
+    f = owner_decision_fixture(ingress, monkeypatch)
+    _, payload = owner_receipt(f)
+    url, comment = owner_comment(f, payload)
+    workers = tuple(range(24))
+    ready = Barrier(len(workers), timeout=30)
+
+    def synchronized_read():
+        ready.wait()
+        return comment
+
+    f.github.responses[url] = synchronized_read
+
+    def submit(_):
+        try:
+            return r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+        except r.RuntimeHold as exc:
+            if exc.args != ("JOURNAL_BUSY",):
+                raise
+            # Native lock timeout keeps its OSError context. A SQLite error
+            # after lock acquisition is a different failure and is not allowed.
+            assert isinstance(exc.__context__, OSError)
+            return None
+
+    with ThreadPoolExecutor(max_workers=len(workers)) as pool:
+        results = list(pool.map(submit, workers))
+    accepted, = (item for item in results if item is not None and not item.replayed)
+    f.github.responses[url] = comment
+    exact = r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
+    assert exact == replace(accepted, replayed=True)
+    assert all(item in (None, accepted, exact) for item in results)
+    with closing(sqlite3.connect(f.journal.path)) as db:
+        assert db.execute("SELECT comment_id, checkpoint FROM owner_decision_receipts").fetchall() == [
+            (9001, exact.checkpoint)]
+        assert db.execute("SELECT COUNT(*) FROM decision_outbox").fetchone() == (1,)
+        assert db.execute("SELECT COUNT(*) FROM execution_requests").fetchone() == (3,)
+    record_property("wakehub_owner_decision_burst", json.dumps({"attempted": len(results),
+                    "immediate_readback": sum(item == exact for item in results),
+                    "pre_lock_busy": results.count(None), "reconciled": len(results)}, sort_keys=True))
+
+
 def issue_only(supervisor, monkeypatch):
     i = supervisor.i
     fixture = issue_fixture(i, monkeypatch)
