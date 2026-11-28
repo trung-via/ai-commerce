@@ -1994,7 +1994,7 @@ def test_continuity_resume_rebuilds_scoped_evidence_and_preserves_unknown(ingres
     assert ingress["calls"] == calls
 
 
-def test_continuity_requires_current_decision_revision_and_explicit_replan(ingress):
+def test_continuity_uses_current_demand_until_explicit_replan(ingress):
     journal, registration, owner, demand, proposal, plan = continuity_fixture(ingress)
     eid, did = demand.execution_id, demand.decision_id
     original = journal.build_continuity_packet(registration, eid, did, principal=owner)
@@ -2002,8 +2002,10 @@ def test_continuity_requires_current_decision_revision_and_explicit_replan(ingre
     journal.record_decision_demand(registration, revised, principal=owner)
     with pytest.raises(r.RuntimeHold, match="^DECISION_REVISION_STALE$"):
         journal.resume_decision(registration, eid, did, original, principal=owner)
-    with pytest.raises(r.RuntimeHold, match="^CONTINUITY_REPLAN_REQUIRED$"):
-        journal.build_continuity_packet(registration, eid, revised.decision_id, principal=owner)
+    request = journal.build_continuity_packet(registration, eid, revised.decision_id, principal=owner)
+    assert request.checkpoint != original.checkpoint
+    assert "DECISION_PLAN_UNAVAILABLE" in json.loads(request.context)["gaps"]
+    assert json.loads(request.context)["decision"]["proposal_sha256"] is None
     with pytest.raises(r.RuntimeHold, match="^DECISION_REVISION_STALE$"):
         journal.record_decision_plan(registration, replace(proposal, version=2, expected_checkpoint=plan.checkpoint),
                                      principal=owner)
@@ -5235,6 +5237,8 @@ def test_owner_decision_record_only_reports_semantic_and_producer_gaps(ingress, 
     _, comment = owner_comment(f, payload)
     accepted = r.submit_owner_decision(*f.args, f.demand.decision_id, comment_id=9001)
     assert accepted.disposition == "RECORD_ONLY" and accepted.operation_id is accepted.child_execution_id is None
+    with f.journal.locked(f.registration, execution_owner=f.owner) as (txn, _):
+        assert r._project_packet(txn, f.demand) is None
     assert {"TURN_ACTOR_UNVERIFIED", "CAPTURE_INVENTORY_UNVERIFIED", "OWNER_REQUEST_PRODUCER_UNAVAILABLE"} <= set(
         accepted.context_gaps)
     comment["body"] = r._continuity_json(dict(payload, disposition="CONTINUE"))
@@ -7677,12 +7681,27 @@ def test_direct_wake_reconciles_a_legacy_unknown_by_its_original_grant(flat05):
     for key in ("route_marker", "registration_id", "marker_digest"):
         del f.consent[key]
     f.consent.update(chat_target=f.exact.url, grants=[grant])
+    f.i["config"]["decision_project"] = {"schema": "WakeHubDecisionProject.v1", "project_id": "g-p-fixture",
+                                        "account_id": f.ui.account_id}
     f.save()
     assert s.run().code == r._UI_TURN_RECONCILED
     after = f.rows()[event_id]
     assert after["event"] == before["event"] and f.origin() == origin
     assert after["evidence"]["local_send"] == before["evidence"]["local_send"]
     assert f.ui.clicks == 1
+
+
+@pytest.mark.parametrize("flat05", ["direct"], indirect=True)
+def test_supervisor_with_project_selection_keeps_the_configured_source_route(flat05):
+    f = flat05
+    event_id = f.select("ef02-completion")
+    f.i["config"][r._PROJECT_WAKE] = {"schema": r._PROJECT_WAKE_SCHEMA, "project_id": "g-p-fixture",
+                                    "account_id": f.ui.account_id}
+    f.save()
+    assert f.s.run(2).code == "PROJECT_DECISION_WAITING"
+    assert f.s.ticks[0][0].code == r._UI_TURN_OBSERVED
+    assert f.rows()[event_id]["status"] == "UI_TURN_OBSERVED"
+    assert f.ui.inserts == f.ui.clicks == 1
 
 
 @pytest.mark.parametrize("flat05", ["direct"], indirect=True)
@@ -9206,4 +9225,444 @@ def test_protected_legacy_health_only_liveness_counterexamples_and_recovery(obse
     s.slot.pending = False
 
 
+@pytest.fixture
+def project_wake(ingress, monkeypatch):
+    """Use authenticated source fixtures and real SQLite with synthetic UI evidence."""
+    journal, registration, owner, demand, operation, _ = decision_fixture(
+        ingress, runs=(17,), objective="Private objective never included in the wake")
+    with journal.locked(registration) as (txn, _):
+        txn.write_chrome({"scope": "1" * 64, "process": "2" * 64, "launch": None}, migrate=True)
+    selection = r.ProjectSelection("g-p-fixture", "fixture-account")
+    config = ingress["config"]
+    config["ui_delivery"] = {"schema": r._UI_DELIVERY_SCHEMA, "transport": "playwright",
+                             "chat_target": registration.binding.chat_url,
+                             "grants": [{"source_key": demand.coverage[0].identity.key,
+                                         "account_id": selection.account_id, "expires_ms": 2**62}]}
+    config[r._PROJECT_WAKE] = {"schema": r._PROJECT_WAKE_SCHEMA, **selection.identity()}
+    opened, sent, surfaces, turns = [], [], {}, {}
+    state = SimpleNamespace(capture_fault=None, send_fault=None, reuse_server=None, process="2" * 64, created=7)
+    inventory = SimpleNamespace()
+    project_ui = r.LocalChromeDoorbellAdapter.project_decision_ui
 
+    def rows():
+        with closing(sqlite3.connect(journal.path)) as db:
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE name='project_wakes'").fetchone():
+                return {}
+            return {decision: json.loads(raw) for decision, raw in
+                    db.execute("SELECT decision_id, record FROM project_wakes")}
+
+    def save_demand(current=demand, *, proposal=False, intent=None, expected_checkpoint=None):
+        journal.record_decision_demand(registration, current, principal=owner)
+        if proposal:
+            return journal.record_decision_plan(registration, r.DecisionProposal(
+                current.decision_id, 1, digest("fixture proposal"), expected_checkpoint=expected_checkpoint,
+                next_operation=intent), principal=owner)
+
+    def synthetic_ui(adapter, *, binding, selection, message, revalidate, capture=None, before_open=None,
+                     before_stage=None, before_send=None, resume_draft=False,
+                     document=None, observe=False, known_url=None, prior_refs=(), unavailable_documents=frozenset()):
+        assert adapter.inventory is inventory and binding.chat_url == selection.project_url
+        revalidate()
+        manifest = json.loads(message.splitlines()[1])
+        decision = manifest["decision_id"]
+        row = rows()[decision]
+        assert row["selection"] == {key: value for key, value in asdict(selection).items() if value is not None}
+        if row.get("payload_sha256") is not None:
+            assert row["payload_sha256"] == r.bytes_digest(message.encode("ascii"))
+        if observe:
+            assert row["phase"] == "SEND_RESERVED" and document == row["document"]
+            url, ref = turns.get(message, (None, None))
+            return r.cdp_doorbell.LocalUISendResult(r._UI_TURN_RECONCILED if ref else "PROJECT_USER_TURN_UNVERIFIED",
+                                                     chat_url=url, turn_ref=ref)
+        assert row["chat_url"] is None
+        if capture is not None:
+            if state.capture_fault in {"ACCOUNT_UNPROVEN", "PROJECT_SURFACE_UNVERIFIED"}:
+                return r.cdp_doorbell.LocalUISendResult(state.capture_fault)
+            if decision not in surfaces:
+                assert before_open is not None
+                before_open()
+                assert rows()[decision]["opening"] and row["phase"] == "PRE_SEND"
+                opened.append(manifest["reservation_id"])
+                surfaces[decision] = r.cdp_doorbell.LocalUISurface(digest(decision), len(opened), ())
+            surface = surfaces[decision]
+            assert document in (None, surface.document) and document == rows()[decision]["document"]
+            assert surface.document not in unavailable_documents
+            if state.capture_fault:
+                return r.cdp_doorbell.LocalUISendResult(state.capture_fault)
+            capture(surface)
+            return r.cdp_doorbell.LocalUISendResult("READY")
+        assert document == surfaces[decision].document
+        assert resume_draft == row["native_staging"]
+        before_stage()
+        assert rows()[decision]["native_staging"] and rows()[decision]["phase"] == "PRE_SEND"
+        if state.send_fault == "pre-send-crash":
+            raise SimulatedWakeHubCrash()
+        before_send()
+        assert rows()[decision]["phase"] == "SEND_RESERVED"
+        if state.send_fault == "no-effect":
+            return r.cdp_doorbell.LocalUISendResult("SEND_BLOCKED")
+        sent.append(message)
+        if state.send_fault == "disconnected":
+            return r.cdp_doorbell.LocalUISendResult("PROJECT_CDP_UNAVAILABLE", staged=True)
+        segment = selection.chat_route_alias or selection.project_id
+        url = state.reuse_server or f"https://chatgpt.com/g/{segment}/c/00000000-0000-0000-0000-{len(sent) + 40:012d}"
+        ref = f"fixture-turn-{len(sent)}"
+        turns[message] = (url, ref)
+        if state.send_fault == "send-crash":
+            raise SimulatedWakeHubCrash()
+        return r.cdp_doorbell.LocalUISendResult(r._UI_TURN_OBSERVED, staged=True, turn_ref=ref, chat_url=url)
+
+    monkeypatch.setattr(r.LocalChromeDoorbellAdapter, "project_decision_ui", synthetic_ui)
+    monkeypatch.setattr(r.chrome_acquisition, "_clean_launch_pending", lambda: False)
+    monkeypatch.setattr(r, "_owned_chrome_process", lambda *_: (state.process, state.created))
+
+    def restart_browser():
+        state.process = "3" * 64
+        state.created += 1
+        with journal.locked(registration) as (txn, _):
+            txn.write_chrome({"scope": "1" * 64, "process": state.process, "launch": None})
+
+    def run():
+        ingress["save"](ingress["config_path"], config)
+        runtime = r._read_runtime_config(ingress["config_path"], ingress["root"])
+        chrome = SimpleNamespace(runtime=runtime, sender=SimpleNamespace(adapter=SimpleNamespace(inventory=inventory)),
+                                 stop=lambda: False, _route_snapshot=lambda _: (None,) * 6)
+        return r._registered_result(lambda: r._run_project_wake(chrome, r.Result("HOLD", "CHROME_OWNED", "FIXTURE")))
+
+    return SimpleNamespace(run=run, rows=rows, save=save_demand, journal=journal, registration=registration, owner=owner,
+                           demand=demand, operation=operation, state=state, config=config, selection=selection,
+                           opened=opened, sent=sent, turns=turns, inventory=inventory, project_ui=project_ui,
+                           restart_browser=restart_browser)
+
+
+def test_project_wake_binds_exact_demand_packet_without_plan_and_preserves_existing_plans(project_wake):
+    f = project_wake
+    f.save()
+    other = replace(f.demand, obligation="independent-review")
+    plan = f.save(other, proposal=True, intent=f.operation)
+    for demand in (f.demand, other):
+        assert f.run().code == r._UI_TURN_OBSERVED
+        message = f.sent[-1]
+        manifest = json.loads(message.splitlines()[1])
+        packet = f.journal.continuity_packet(f.registration, manifest["packet_id"], principal=f.owner)
+        assert (packet.execution_id, packet.decision_id, packet.checkpoint) == (
+            demand.execution_id, demand.decision_id, manifest["checkpoint"])
+        assert manifest["target_sha256"] == digest([f.selection.identity(), f.selection.project_url])
+        assert manifest["reservation_id"] == f.opened[-1]
+        assert all(set(section) == {"count", "sha256"} for section in manifest["provenance"].values())
+        for section in ("captures", "instructions"):
+            page = f.journal.continuity_page(f.registration, packet.execution_id, packet.decision_id,
+                                             packet.checkpoint, packet.packet_id, section, principal=f.owner)
+            assert page.rows == () and page.next_cursor is None
+        assert "ATTEMPT_ACTIVATION_UNVERIFIED" in manifest["gaps"]
+        assert manifest["authority"] == "PENDING_AUTHORITY" and manifest["receiver_retrieval"] == "UNVERIFIED"
+        assert "Private objective" not in message and f.selection.account_id not in message
+        context = json.loads(packet.context)
+        if demand == f.demand:
+            assert "DECISION_PLAN_UNAVAILABLE" in manifest["gaps"]
+            assert context["decision"]["proposal_sha256"] is None
+            assert f.journal.decision_plan(f.registration, demand.decision_id, principal=f.owner) is None
+        else:
+            assert packet.checkpoint == plan.checkpoint
+    assert f.run().code == "PROJECT_DECISION_WAITING"
+    assert len(f.rows()) == len(f.opened) == len(f.sent) == 2
+    assert len({record["chat_url"] for record in f.rows().values()}) == 2
+    assert f.journal.decision_plan(f.registration, other.decision_id, principal=f.owner).operation.state == "PENDING_INTENT"
+
+
+def test_project_wake_excludes_record_only_unclassified_and_unresolved_lineage(project_wake):
+    f = project_wake
+    for classification in ("RECORD_ONLY", "UNCLASSIFIED"):
+        f.save(replace(f.demand, revision=classification, classification=classification))
+    assert f.run().code == "PROJECT_DECISION_WAITING"
+    f.save()
+    with closing(sqlite3.connect(f.journal.path)) as db, db:
+        db.execute("DELETE FROM execution_attempts WHERE execution_id=?", (f.demand.execution_id,))
+    assert f.run().code == "PROJECT_DECISION_WAITING"
+    assert f.rows() == {} and f.opened == f.sent == []
+
+
+@pytest.mark.parametrize("fault", ["ACCOUNT_UNPROVEN", "PROJECT_SURFACE_UNVERIFIED", "DRAFT_PRESENT",
+                                  "no-effect", "pre-send-crash"])
+def test_project_wake_resumes_same_pre_send_reservation_after_hold_or_restart(project_wake, fault):
+    f = project_wake
+    f.save()
+    if fault == "pre-send-crash":
+        f.state.send_fault = fault
+        with pytest.raises(SimulatedWakeHubCrash):
+            f.run()
+    else:
+        field = "send_fault" if fault == "no-effect" else "capture_fault"
+        setattr(f.state, field, fault)
+        assert f.run().status == "HOLD"
+    original = f.rows()[f.demand.decision_id]
+    assert original["phase"] == "PRE_SEND" and original["chat_url"] is None
+    assert not f.sent
+    f.state.send_fault = f.state.capture_fault = None
+    result = f.run()
+    assert result.replayed and result.code == r._UI_TURN_OBSERVED
+    completed = f.rows()[f.demand.decision_id]
+    assert completed["payload_sha256"] == original["payload_sha256"]
+    if original["document"] is not None:
+        assert completed["document"] == original["document"]
+    assert len(f.opened) == len(f.sent) == 1
+
+
+@pytest.mark.parametrize("interruption", ["opening", "before-binding", "before-staging", "draft", "after-send"])
+def test_project_wake_recovery_checks_chrome_generation_and_fresh_cdp_surface(
+        project_wake, monkeypatch, interruption):
+    f = project_wake
+    f.save()
+    pending = interruption
+    opened, sent = [], []
+    d = r.cdp_doorbell
+
+    class Page:
+        def __init__(self, number):
+            self.url = "about:blank"
+            self.clock = 120 + number
+            self.target_id = f"{number:032x}"
+            self.draft = None
+            self.turn = None
+
+        def goto(self, url, **_):
+            assert url == f.selection.project_url
+            self.url = url
+            if pending == "before-binding":
+                raise SimulatedWakeHubCrash()
+
+        def evaluate(self, script, args=None):
+            if script == d._DOCUMENT_CLOCK:
+                return self.clock
+            assert (args["url"], args["documentClock"], args["account_id"]) == (
+                self.url, self.clock, f.selection.account_id)
+            if script == d._CHECK:
+                assert self.url == f.selection.project_url
+                return "DRAFT_PRESENT" if self.draft else "READY"
+            if script == d._PRE_STAGE_REFS:
+                return []
+            if script == d._INSERT:
+                assert self.draft is None
+                self.draft = args["text"]
+                if pending == "draft":
+                    raise SimulatedWakeHubCrash()
+                return True
+            if script == d._READY:
+                return self.draft == args["text"]
+            if script == d._CLICK:
+                assert self.draft == args["text"]
+                self.turn, self.draft = self.draft, None
+                sent.append(self.turn)
+                self.url = self.url.replace("/project", f"/c/00000000-0000-0000-0000-{self.clock:012d}")
+                if pending == "after-send":
+                    raise SimulatedWakeHubCrash()
+                return []
+            if script == d._EXISTING_USER_TURN:
+                return f"turn-{self.clock}" if self.turn == args["text"] else False
+            assert script == d._PROJECT_COMPETING_TURN
+            return self.turn == args["text"]
+
+        def wait_for_function(self, script, *, arg, **_):
+            assert self.evaluate(script, arg)
+
+    def new_page():
+        if pending == "opening":
+            raise SimulatedWakeHubCrash()
+        page = Page(len(opened) + 1)
+        opened.append(page)
+        context.pages.append(page)
+        return page
+
+    def session(page):
+        details = {"type": "page", "targetId": page.target_id, "browserContextId": f"{f.state.created:032x}",
+                   "url": page.url}
+        return SimpleNamespace(send=lambda _: {"targetInfo": details}, detach=lambda: None)
+
+    context = SimpleNamespace(pages=[], new_page=new_page, new_cdp_session=session)
+
+    @contextmanager
+    def browser(endpoint):
+        assert endpoint == "http://127.0.0.1:9444"
+        yield SimpleNamespace(contexts=[context])
+
+    def project_ui(adapter, **kwargs):
+        if pending == "before-staging" and kwargs.get("before_stage") is not None:
+            assert kwargs["document"] == f.rows()[f.demand.decision_id]["document"]
+            raise SimulatedWakeHubCrash()
+        return f.project_ui(adapter, **kwargs)
+
+    f.inventory._browser = browser
+    monkeypatch.setattr(r.LocalChromeDoorbellAdapter, "project_decision_ui", project_ui)
+    monkeypatch.setattr(d, "_is_windows", lambda: True)
+    monkeypatch.setattr(d, "time", SimpleNamespace(monotonic=monotonic, sleep=lambda _: None))
+    with pytest.raises(SimulatedWakeHubCrash):
+        f.run()
+    original = f.rows()[f.demand.decision_id]
+    assert original["opening"] and original["browser"][1:] == ["2" * 64, 7]
+    assert (original["document"] is None) == (interruption in ("opening", "before-binding"))
+    assert original["native_staging"] == (interruption in ("draft", "after-send"))
+    pending = None
+
+    if interruption == "opening":
+        hold = f.run()
+        assert (hold.status, hold.code) == ("HOLD", "PROJECT_OPENING_RECONCILE_REQUIRED")
+        assert f.rows()[f.demand.decision_id] == original and not opened
+    elif interruption == "before-staging":
+        context.pages.clear()
+        hold = f.run()
+        assert (hold.status, hold.code) == ("HOLD", "PROJECT_PINNED_DOCUMENT_RECONCILE_REQUIRED")
+        assert f.rows()[f.demand.decision_id] == original and len(opened) == 1
+
+    if interruption != "before-binding":
+        previous = context.pages[:]
+        f.restart_browser()
+        # A restored draft or conversation may appear on a fresh CDP document.
+        context.pages[:] = previous if interruption in ("draft", "after-send") else []
+
+    result = f.run()
+    if interruption in ("draft", "after-send"):
+        expected = ("HOLD", "PROJECT_DRAFT_RECONCILE_REQUIRED") if interruption == "draft" else (
+            "UNKNOWN_EFFECT", "PROJECT_SERVER_ASSOCIATION_AMBIGUOUS")
+        assert (result.status, result.code) == expected
+        assert f.rows()[f.demand.decision_id] == original and len(opened) == 1
+        assert len(sent) == (interruption == "after-send")
+        if interruption == "draft":
+            draft = opened[0].draft
+            assert r.bytes_digest(draft.encode("ascii")) == original["payload_sha256"]
+        independent = replace(f.demand, obligation="independent-review")
+        f.save(independent)
+        assert f.run().code == r._UI_TURN_OBSERVED
+        assert f.rows()[f.demand.decision_id] == original and len(opened) == 2
+        if interruption == "draft":
+            assert opened[0].draft == draft
+    else:
+        assert result.replayed and result.code == r._UI_TURN_OBSERVED
+        completed = f.rows()[f.demand.decision_id]
+        assert len(sent) == 1
+        assert completed["payload_sha256"] == original["payload_sha256"] == r.bytes_digest(sent[0].encode("ascii"))
+        assert completed["document"] is not None and completed["document"] != original["document"]
+        assert completed["browser"][1:] == (["2" * 64, 7] if interruption == "before-binding" else ["3" * 64, 8])
+        assert len(opened) == (2 if interruption == "before-staging" else 1)
+
+
+@pytest.mark.parametrize("fault", ["disconnected", "send-crash"])
+def test_project_wake_reconciles_only_frozen_possible_send_and_independent_demand_progresses(project_wake, fault):
+    f = project_wake
+    f.save()
+    independent = replace(f.demand, obligation="independent-review")
+    f.save(independent)
+    f.state.send_fault = fault
+    if fault == "send-crash":
+        with pytest.raises(SimulatedWakeHubCrash):
+            f.run()
+    else:
+        assert f.run().status == "UNKNOWN_EFFECT"
+    original = f.rows()[f.demand.decision_id]
+    assert original["phase"] == "SEND_RESERVED" and original["chat_url"] is None
+    successor = replace(f.demand, revision="changed-revision")
+    f.save(successor)
+    f.state.send_fault = None
+    assert f.run().code == r._UI_TURN_OBSERVED
+    assert independent.decision_id in f.rows() and successor.decision_id not in f.rows()
+    result = f.run()
+    assert result.replayed and len(f.opened) == len(f.sent) == 2
+    if fault == "disconnected":
+        assert result.status == "UNKNOWN_EFFECT" and f.rows()[f.demand.decision_id] == original
+    else:
+        assert result.code == r._UI_TURN_RECONCILED
+        assert f.rows()[f.demand.decision_id]["payload_sha256"] == original["payload_sha256"]
+
+
+def test_project_wake_changed_pre_send_packet_freezes_original_reservation(project_wake):
+    f = project_wake
+    f.save()
+    f.state.capture_fault = "DRAFT_PRESENT"
+    assert f.run().code == "DRAFT_PRESENT"
+    original = f.rows()[f.demand.decision_id]
+    f.save(proposal=True)
+    f.state.capture_fault = None
+    assert f.run().code == "PROJECT_RESERVATION_SCOPE_CHANGED"
+    assert f.rows()[f.demand.decision_id] == original and not f.sent and len(f.opened) == 1
+
+
+def test_project_wake_preserves_retained_possible_effect_without_rekeying(project_wake):
+    f = project_wake
+    f.save(proposal=True)
+    independent = replace(f.demand, obligation="independent-review")
+    f.save(independent)
+    packet = f.journal.build_continuity_packet(f.registration, f.demand.execution_id, f.demand.decision_id,
+                                              principal=f.owner)
+    original_url = f.selection.project_url.replace("/project", "/c/00000000-0000-0000-0000-000000000777")
+    original = r._ProjectReservation(f.selection, "SEND_RESERVED", chat_url=original_url, document="d" * 64)
+    with f.journal.locked(f.registration, execution_owner=f.owner) as (txn, _):
+        r._write_project_wake(txn, packet, original, start=True, create_table=True)
+    assert f.run().code == r._UI_TURN_OBSERVED
+    assert f.run().status == "UNKNOWN_EFFECT"
+    assert f.rows()[f.demand.decision_id] == json.loads(original.record())
+    assert len(f.opened) == len(f.sent) == 1
+
+
+def test_project_wake_duplicate_server_association_remains_unknown(project_wake):
+    f = project_wake
+    f.save()
+    other = replace(f.demand, obligation="independent-review")
+    f.save(other)
+    assert f.run().code == r._UI_TURN_OBSERVED
+    f.state.reuse_server = f.rows()[f.demand.decision_id]["chat_url"]
+    assert f.run().code == "PROJECT_TARGET_NOT_FRESH"
+    original = f.rows()[other.decision_id]
+    assert original["phase"] == "SEND_RESERVED" and original["chat_url"] is None
+    assert f.run().status == "UNKNOWN_EFFECT"
+    assert len(f.sent) == 2 and f.rows()[other.decision_id] == original
+
+
+@pytest.mark.parametrize(("agy_code", "fault", "expected"), [
+    ("AGY_REPORTED_SEND", None, r._UI_TURN_RECONCILED),
+    ("AGY_LAUNCH_NOT_ATTEMPTED", None, r._UI_TURN_OBSERVED),
+    ("AGY_WINDOWS_PROCESS_QUOTA", "TARGET_PAGE_CHANGED", "TARGET_PAGE_CHANGED"),
+    ("AGY_PERMISSION_REQUIRED", None, "AGY_PERMISSION_REQUIRED"),
+    ("AGY_REPORTED_HOLD", None, "AGY_REPORTED_HOLD"),
+    ("AGY_TIMEOUT", None, "AGY_TIMEOUT"),
+])
+def test_project_wake_agy_standby_requires_no_invocation_and_fresh_shared_payload(
+        project_wake, monkeypatch, agy_code, fault, expected):
+    f = project_wake
+    f.save()
+    f.config["ui_delivery"].update(transport="agy", agy={
+        "executable": str(f.journal.path.with_name("agy.exe")),
+        "workspace": str(f.journal.path.parent), "executable_sha256": "1" * 64, "skill_sha256": "2" * 64})
+    f.config[r._PROJECT_WAKE]["agy_skill_sha256"] = "3" * 64
+    alias = f.selection.project_id + "-ai-commerce"
+    f.config[r._PROJECT_WAKE]["chat_route_alias"] = alias
+    messages = []
+
+    def launch(runtime, config, request, marker, surface, expiry, stop, revalidate, **kwargs):
+        revalidate()
+        assert (config["skill_sha256"], marker, request.event_key) == ("3" * 64, None, f.opened[0])
+        row = f.rows()[f.demand.decision_id]
+        assert row["phase"] == "SEND_RESERVED" and row["chat_url"] is None
+        prompt = r._agy_prompt(request, marker, surface, expiry, kwargs["account_id"])
+        assert prompt.startswith("/wakehub-project-executor") and "wake-browser" in prompt
+        envelope = json.loads(prompt.splitlines()[-1])
+        assert envelope["action_args"]["url"] == f.selection.project_url
+        message = envelope["action_args"]["text"]
+        assert r.bytes_digest(message.encode("ascii")) == row["payload_sha256"]
+        if agy_code == "AGY_REPORTED_SEND":
+            f.turns[message] = (f"https://chatgpt.com/g/{alias}/c/00000000-0000-0000-0000-000000000099",
+                                "fixture-agy-turn")
+        messages.append(message)
+        f.state.capture_fault = fault
+        return r._AgyOutcome(agy_code, 0)
+
+    monkeypatch.setattr(r, "_launch_agy", launch)
+    assert f.run().code == expected
+    assert len(f.opened) == len(messages) == 1
+    assert f.sent == (messages if agy_code == "AGY_LAUNCH_NOT_ATTEMPTED" else [])
+    if expected in (r._UI_TURN_OBSERVED, r._UI_TURN_RECONCILED):
+        row = f.rows()[f.demand.decision_id]
+        assert row["chat_url"].split("/")[4] == alias
+        assert row["selection"]["chat_route_alias"] == alias
+        manifest = json.loads(messages[0].splitlines()[1])
+        assert manifest["target_sha256"] == digest([f.selection.identity(), f.selection.project_url])
+    if agy_code in ("AGY_REPORTED_HOLD", "AGY_TIMEOUT"):
+        assert f.run().status == "UNKNOWN_EFFECT" and len(messages) == 1 and not f.sent
