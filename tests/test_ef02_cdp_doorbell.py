@@ -161,6 +161,75 @@ def test_registered_doorbell_rejects_foreign_port_and_legacy_issue_selector(monk
     assert inv.calls == []
 
 
+@pytest.mark.parametrize("drift", [False, True])
+def test_project_doorbell_reuses_scoped_send_only_on_the_bound_document(monkeypatch, drift):
+    """Synthetic UI evidence on the real scoped doorbell path."""
+    monkeypatch.setattr(doorbell, "_is_windows", lambda: True)
+    selection = doorbell.ProjectSelection("g-p-fixture", "fixture-account")
+    binding = replace(BIND, chat_url=URL.replace("/c/", "/g/g-p-fixture/c/"))
+    message = "[AI COMMERCE PROJECT DECISION WAKE]\nfixture manifest"
+    calls = []
+
+    class Page:
+        url = binding.chat_url
+        clock = 123
+
+        def set_default_timeout(self, timeout):
+            assert timeout == 3000
+
+        def evaluate(self, script, args=None):
+            if script == doorbell._DOCUMENT_CLOCK:
+                return self.clock
+            assert (args["account_id"], args["text"], args["url"]) == (selection.account_id, message, self.url)
+            if script == doorbell._CHECK:
+                return "READY"
+            if script in (doorbell._PRE_STAGE_REFS, doorbell._CLICK):
+                if script == doorbell._CLICK:
+                    calls.append("send")
+                    assert args["standbyRefs"] == []
+                return []
+            if script == doorbell._PROVE:
+                return "fixture-turn"
+            assert script in (doorbell._INSERT, doorbell._READY)
+            if script == doorbell._INSERT:
+                calls.append("stage")
+            return True
+
+        def wait_for_function(self, script, *, arg, timeout, polling):
+            assert polling == 100 and timeout in (3000, 5000)
+            assert self.evaluate(script, arg)
+
+    page = Page()
+    target = {"type": "page", "targetId": "a" * 32, "browserContextId": "b" * 32}
+    context = SimpleNamespace(pages=[page], new_cdp_session=lambda _: SimpleNamespace(
+        send=lambda _: {"targetInfo": target}, detach=lambda: None))
+
+    @contextmanager
+    def browser(endpoint):
+        assert endpoint == BIND.cdp_endpoint
+        yield SimpleNamespace(contexts=[context])
+
+    adapter = LocalChromeDoorbellAdapter(allow_submit=True, inventory=SimpleNamespace(_browser=browser))
+    document = adapter._surface_commitment(context, page, page.clock)
+
+    def reserve(current, refs):
+        assert (current, refs) == (document, [])
+        calls.append("reserve")
+        if drift:
+            target["targetId"] = "c" * 32
+
+    args = dict(selection=selection, message=message, revalidate=lambda: None,
+                before_stage=reserve, document=document, standby_refs=())
+    assert adapter.project_decision_ui(binding=BIND, **args).code == "PROJECT_TARGET_UNVERIFIED"
+    assert calls == []
+    result = adapter.project_decision_ui(binding=binding, **args)
+    if drift:
+        assert result.code == "TARGET_PAGE_CHANGED" and calls == ["reserve"]
+    else:
+        assert result.code == doorbell.LOCAL_UI_OWNER_AUTHORIZED_TURN_OBSERVED and result.turn_ref == "fixture-turn"
+        assert calls == ["reserve", "stage", "send"]
+
+
 def test_registered_doorbell_scripts_require_fresh_exact_user_reference():
     """Exercise the production JS on fake page primitives, including the synchronous click fence."""
     import json

@@ -1124,6 +1124,47 @@ class LocalUISurface:
     prior_refs: tuple[str, ...]
 
 
+@dataclass(frozen=True, repr=False)
+class ProjectSelection:
+    project_id: str
+    account_id: str
+
+    def __post_init__(self) -> None:
+        if (type(self.project_id) is not str or not re.fullmatch(r"g-p-[A-Za-z0-9_-]{1,128}", self.project_id)
+                or type(self.account_id) is not str or not re.fullmatch(r"[A-Za-z0-9_.:@-]{1,256}", self.account_id)):
+            raise ValueError("PROJECT_SELECTION_INVALID")
+
+    def chat_id(self, url: str | None) -> str | None:
+        match = _CHAT.fullmatch(url) if type(url) is str else None
+        if match is not None and url.startswith(f"https://chatgpt.com/g/{self.project_id}/c/"):
+            return match[1]
+        return None
+
+
+@dataclass(frozen=True, repr=False)
+class ProjectChat:
+    selection: ProjectSelection
+    reservation_id: str
+    url: str
+
+
+class ProjectInventory(Protocol):
+    """Project UI witnesses on the same owned browser connection as the doorbell."""
+
+    def inspect_project(self, selection: ProjectSelection) -> ProjectSelection | None:
+        """Independently read the selected Project and active account from the UI."""
+        ...
+
+    def create_project_chat(self, selection: ProjectSelection, reservation_id: str) -> ProjectChat | None:
+        """Create a fresh chat with a stable identity before staging a USER turn."""
+        ...
+
+    def observe_project_chat(self, selection: ProjectSelection, reservation_id: str,
+                             url: str | None) -> ProjectChat | None:
+        """Read membership and creation custody for this reservation. Use no foreground inference."""
+        ...
+
+
 class LocalChromeDoorbellAdapter:
     """UI-only exact-chat doorbell, explicitly opt-in, without semantic authority."""
 
@@ -1208,6 +1249,25 @@ class LocalChromeDoorbellAdapter:
         """Read the same guarded composer and collect its pre-mutation witness."""
         return self._registered_ui(binding, event_id, marker_digest, revalidate,
                                    capture=capture, account_id=account_id)
+
+    def project_decision_ui(self, *, binding: ResolvedBinding, selection: ProjectSelection, message: str,
+                            revalidate: Callable[[], None], capture: Callable[[LocalUISurface], None] | None = None,
+                            before_stage: Callable[[str, list[str]], None] | None = None,
+                            excluded_refs: list[str] | None = None, document: str | None = None,
+                            standby_refs: tuple[str, ...] | None = None) -> LocalUISendResult:
+        """Use the existing scoped composer for one already-bound Project decision."""
+        if (type(binding) is not ResolvedBinding or type(selection) is not ProjectSelection
+                or selection.chat_id(binding.chat_url) is None or binding.cdp_endpoint != "http://127.0.0.1:9444"
+                or not _is_windows()):
+            return LocalUISendResult("PROJECT_TARGET_UNVERIFIED")
+        if (type(message) is not str or not message.isascii() or len(message) > 8192
+                or not message.startswith("[AI COMMERCE PROJECT DECISION WAKE]\n")
+                or sum(mode is not None for mode in (capture, before_stage, excluded_refs)) != 1
+                or (before_stage is not None and (not self.allow_submit or document is None))):
+            return LocalUISendResult("PROJECT_DOORBELL_INVALID")
+        return self._send_ui(binding, message, check_page=lambda page: None, revalidate=revalidate,
+                             capture=capture, before_stage=before_stage, excluded_refs=excluded_refs,
+                             document=document, account_id=selection.account_id, standby_refs=standby_refs)
 
     def _registered_ui(self, binding, event_id, marker_digest, revalidate, *,
                        before_stage=None, excluded_refs=None, capture=None, document=None,
@@ -1297,6 +1357,9 @@ class LocalChromeDoorbellAdapter:
                         if (page.url != binding.chat_url or len(current_contexts) != 1
                                 or current_contexts[0] is not context or len(current_tabs) != 1
                                 or current_tabs[0] is not page or page.evaluate(_DOCUMENT_CLOCK) != clock):
+                            raise ValueError("TARGET_PAGE_CHANGED")
+                        if (document is not None and excluded_refs is None
+                                and self._surface_commitment(context, page, clock) != document):
                             raise ValueError("TARGET_PAGE_CHANGED")
 
                 def guard():
