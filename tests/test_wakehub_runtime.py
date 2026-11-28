@@ -1471,6 +1471,253 @@ def test_execution_lineage_checks_the_saved_event_commitment(ingress):
     assert journal.path.read_bytes() == before
 
 
+def decision_fixture(i, *, runs=(17, 18), include_other=True):
+    journal, registration, owner = execution_registry(i)
+    for run_id in runs:
+        actions = [
+            {"action_id": "fixture-action", "attempt_id": f"attempt-{run_id}", "status": "EXECUTOR_FAILED"},
+        ]
+        if include_other:
+            actions.append({"action_id": "other-action", "attempt_id": f"other-{run_id}", "status": "EXECUTOR_FAILED"})
+        register_execution_completion(i, run_id=run_id, actions=actions)
+        assert r.run_read_only(i["config_path"], i["root"]).code == "WINDOWS_INTERACTIVE_REQUIRED"
+        identity = r.SourceIdentity("ef02-completion", r.REPOSITORY, run_id, 1)
+        evidence = journal.decision_source_evidence(registration, identity, principal=owner)
+        assert len(evidence) == len(actions)
+        assert all(item.lineage.code == "OWNER_REQUEST_PRODUCER_UNAVAILABLE" for item in evidence)
+    parents = [journal.admit_execution(registration, execution_request(key), principal=owner)
+               for key in ("decision-parent", "unrelated-parent")]
+    for number, run_id in enumerate(runs, 1):
+        for parent, action, attempt in zip(parents, ("fixture-action", "other-action"),
+                                          (f"attempt-{run_id}", f"other-{run_id}")):
+            journal.record_execution_attempt(registration, execution_attempt(
+                parent, number, action=action, attempt=attempt, run_id=run_id), principal=owner)
+    sources = [journal.decision_source_evidence(
+        registration, r.SourceIdentity("ef02-completion", r.REPOSITORY, run_id, 1), principal=owner)
+        for run_id in runs]
+    demand = r.DecisionDemand(parents[0], "ef02", "review-evidence", "rev-1",
+                              tuple(items[0].coverage for items in sources), "DECISION_NEEDED")
+    operation = r.NextOperation("ef02", "work-item-42", "verify", "Verify scoped evidence",
+                                r.EffectIdentity("fixture", "work-item-42", "verification"))
+    return journal, registration, owner, demand, operation, sources
+
+
+def test_decision_intake_coverage_classification_and_exact_checkpoint(ingress):
+    journal, registration, owner, demand, operation, sources = decision_fixture(ingress)
+    assert all(item.lineage.code == "ATTEMPT_ACTIVATION_UNVERIFIED" for items in sources for item in items)
+    assert len(ingress["calls"]) == 12  # Actual composed readers, with offline API fixtures.
+    assert journal.record_decision_demand(registration, demand, principal=owner) == demand.decision_id
+    reordered = replace(demand, coverage=demand.coverage[::-1] + (demand.coverage[0],))
+    assert reordered == demand
+    assert journal.record_decision_demand(registration, reordered, principal=owner) == demand.decision_id
+    with pytest.raises(r.RuntimeHold, match="^DECISION_DEMAND_CONFLICT$"):
+        journal.record_decision_demand(registration, replace(demand, coverage=demand.coverage[:1]), principal=owner)
+
+    proposal = r.DecisionProposal(demand.decision_id, 1, digest("fixture proposal"), next_operation=operation)
+    plan = journal.record_decision_plan(registration, proposal, principal=owner)
+    assert plan.authority == "PENDING_AUTHORITY"
+    assert plan.missing_capabilities == ("BRAIN_DECISION_INGRESS_UNAVAILABLE", "ATTEMPT_ACTIVATION_UNVERIFIED")
+    assert plan.proposal_sha256 == proposal.proposal_sha256
+    assert plan.operation.state == "PENDING_INTENT"
+    assert plan.operation.operation == operation
+    assert journal.decision_plan(registration, demand.decision_id, principal=owner) == plan
+    assert journal.record_decision_plan(registration, proposal, principal=owner) == plan
+    with pytest.raises(r.RuntimeHold, match="^DECISION_PROPOSAL_CONFLICT$"):
+        journal.record_decision_plan(registration, replace(proposal, proposal_sha256=digest("other")), principal=owner)
+    with pytest.raises(r.RuntimeHold, match="^DECISION_PROPOSAL_INVALID$"):
+        journal.record_decision_plan(registration, {**asdict(proposal), "activated": True}, principal=owner)
+    with pytest.raises(r.RuntimeHold, match="^DECISION_CHECKPOINT_STALE$"):
+        journal.record_decision_plan(registration, replace(proposal, version=2), principal=owner)
+    no_next = replace(proposal, version=2, expected_checkpoint=plan.checkpoint, next_operation=None)
+    second = journal.record_decision_plan(registration, no_next, principal=owner)
+    assert second.operation is None and second.previous_checkpoint == plan.checkpoint
+    assert journal.decision_plan(registration, demand.decision_id, version=1, principal=owner) == plan
+    reopened, _, _ = execution_registry(ingress)
+    assert reopened.decision_demand(registration, demand.decision_id, principal=owner) == demand
+    assert reopened.record_decision_plan(registration, proposal, principal=owner) == plan
+    assert reopened.decision_plan(registration, demand.decision_id, principal=owner) == second
+
+    for classification in ("UNCLASSIFIED", "RECORD_ONLY"):
+        saved = replace(demand, revision=classification, classification=classification)
+        journal.record_decision_demand(registration, saved, principal=owner)
+        assert journal.decision_demand(registration, saved.decision_id, principal=owner) == saved
+        with pytest.raises(r.RuntimeHold, match="^DECISION_NOT_REQUESTED$"):
+            journal.record_decision_plan(registration, replace(proposal, decision_id=saved.decision_id),
+                                         principal=owner)
+    other_scope = replace(demand, obligation="other-obligation")
+    journal.record_decision_demand(registration, other_scope, principal=owner)
+    with pytest.raises(r.RuntimeHold, match="^DECISION_CHECKPOINT_STALE$"):
+        journal.record_decision_plan(registration, replace(
+            proposal, decision_id=other_scope.decision_id, expected_checkpoint=second.checkpoint), principal=owner)
+    assert len(ingress["calls"]) == 12
+
+
+def test_decision_competition_operation_dedup_and_exact_scope(ingress):
+    journal, registration, owner, demand, operation, _ = decision_fixture(ingress, runs=(17,))
+    journal.record_decision_demand(registration, demand, principal=owner)
+    proposal = r.DecisionProposal(demand.decision_id, 1, digest("contested"), next_operation=operation)
+
+    def record(_):
+        reopened, _, _ = execution_registry(ingress)
+        return reopened.record_decision_plan(registration, proposal, principal=owner)
+
+    with ThreadPoolExecutor(max_workers=24) as pool:
+        first, *duplicates = pool.map(record, range(24))
+    assert duplicates == [first] * 23
+    assert record(None) == first
+    later = replace(demand, revision="rev-2")
+    journal.record_decision_demand(registration, later, principal=owner)
+    successor = replace(proposal, decision_id=later.decision_id, expected_checkpoint=first.checkpoint)
+    for next_operation, code in (
+        (replace(operation, objective="Different contract"), "DECISION_OPERATION_CONFLICT"),
+        (replace(operation, consumer="another-consumer", scope="other-work-item", slot="other"),
+         "DECISION_EFFECT_SCOPE_CONFLICT"),
+    ):
+        with pytest.raises(r.RuntimeHold, match=f"^{code}$"):
+            journal.record_decision_plan(registration, replace(successor, next_operation=next_operation),
+                                         principal=owner)
+    again = journal.record_decision_plan(registration, successor, principal=owner)
+    assert again.operation == first.operation
+    assert again.decision_id != first.decision_id and again.previous_checkpoint == first.checkpoint
+    independent = journal.record_decision_plan(registration, replace(
+        successor, version=2, expected_checkpoint=again.checkpoint,
+        next_operation=replace(operation, slot="observe", effect=replace(operation.effect, scope="observation"))),
+        principal=owner)
+    assert independent.operation.execution_id != again.operation.execution_id
+    assert independent.operation.operation_id != again.operation.operation_id
+    assert independent.operation.effect_scope_status == "EXACT_EFFECT_IDENTITY_RECORDED"
+    unknown = journal.record_decision_plan(registration, replace(
+        successor, version=3, expected_checkpoint=independent.checkpoint,
+        next_operation=replace(operation, slot="audit", effect=None)), principal=owner)
+    assert unknown.operation.state == "PENDING_INTENT"
+    assert unknown.operation.effect_scope_status == "EFFECT_OVERLAP_UNPROVEN"
+    with closing(sqlite3.connect(journal.path)) as db:
+        assert db.execute("SELECT COUNT(*) FROM decision_outbox").fetchone() == (3,)
+        assert db.execute("SELECT COUNT(*) FROM execution_requests").fetchone() == (5,)
+        assert db.execute("SELECT COUNT(*) FROM execution_attempts WHERE execution_id IN (?, ?)",
+                          (first.operation.execution_id, independent.operation.execution_id)).fetchone() == (0,)
+
+
+@pytest.mark.parametrize("statement", ["INSERT INTO decision_proposals", "INSERT INTO decision_checkpoints",
+                                      "INSERT INTO execution_requests", "INSERT INTO decision_outbox"])
+def test_decision_transaction_rolls_back_each_write(ingress, monkeypatch, statement):
+    journal, registration, owner, demand, operation, _ = decision_fixture(ingress, runs=(17,))
+    journal.record_decision_demand(registration, demand, principal=owner)
+    proposal = r.DecisionProposal(demand.decision_id, 1, digest("rollback"), next_operation=operation)
+    connect = sqlite3.connect
+
+    class Fault(sqlite3.Connection):
+        def execute(self, sql, parameters=(), /):
+            result = super().execute(sql, parameters)
+            if sql.startswith(statement):
+                raise RuntimeError("injected after SQLite write")
+            return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(r.sqlite3, "connect", lambda *args, **kwargs: connect(*args, **kwargs, factory=Fault))
+        with pytest.raises(RuntimeError, match="injected after SQLite write"):
+            journal.record_decision_plan(registration, proposal, principal=owner)
+    reopened, _, _ = execution_registry(ingress)
+    assert reopened.decision_plan(registration, demand.decision_id, principal=owner) is None
+    with closing(connect(journal.path)) as db:
+        for table in ("decision_proposals", "decision_checkpoints", "decision_outbox"):
+            assert db.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (0,)
+        assert db.execute("SELECT COUNT(*) FROM execution_requests").fetchone() == (2,)
+    assert reopened.record_decision_plan(registration, proposal, principal=owner).operation.state == "PENDING_INTENT"
+
+
+def test_decision_rejects_unverified_facts_and_preserves_scoped_unknown(ingress):
+    journal, registration, owner, demand, operation, _ = decision_fixture(ingress, runs=(17,), include_other=False)
+    coverage, = demand.coverage
+    other_parent = journal.admit_execution(registration, execution_request("unrelated-parent"), principal=owner)
+    for forged, code in (
+        (replace(coverage, payload_sha256=digest("self-supplied proof")), "DECISION_SOURCE_UNVERIFIED"),
+        (replace(coverage, identity=replace(coverage.identity, object_id=99)), "DECISION_SOURCE_UNVERIFIED"),
+    ):
+        with pytest.raises(r.RuntimeHold, match=f"^{code}$"):
+            journal.record_decision_demand(registration, replace(demand, coverage=(forged,)), principal=owner)
+    with pytest.raises(r.RuntimeHold, match="^DECISION_EXECUTION_SCOPE_UNPROVEN$"):
+        journal.record_decision_demand(registration, replace(demand, execution_id=other_parent), principal=owner)
+    journal.record_decision_demand(registration, demand, principal=owner)
+    proposal = r.DecisionProposal(demand.decision_id, 1, digest("owner observation"), next_operation=operation)
+    with journal.locked(registration) as (txn, data):
+        data["events"][coverage.event_key].update(
+            status="UNKNOWN_EFFECT", code="SEND_OUTCOME_UNKNOWN", history=["PENDING", "RESERVED", "UNKNOWN_EFFECT"])
+        txn.write(data)
+    with pytest.raises(r.RuntimeHold, match="^DECISION_SOURCE_CUSTODY_UNRESOLVED$"):
+        journal.record_decision_plan(registration, proposal, principal=owner)
+    assert journal.decision_plan(registration, demand.decision_id, principal=owner) is None
+
+    register_execution_completion(ingress, run_id=18, actions=[
+        {"action_id": "fixture-action", "attempt_id": "late-attempt", "status": "EXECUTOR_FAILED"},
+        {"action_id": "other-action", "attempt_id": "other-18", "status": "EXECUTOR_FAILED"},
+    ])
+    assert r.run_read_only(ingress["config_path"], ingress["root"]).code == "WINDOWS_INTERACTIVE_REQUIRED"
+    journal.record_execution_attempt(registration, execution_attempt(
+        demand.execution_id, 2, attempt="late-attempt", run_id=18), principal=owner)
+    journal.record_execution_attempt(registration, execution_attempt(
+        other_parent, 2, action="other-action", attempt="other-18", run_id=18), principal=owner)
+    late, other = journal.decision_source_evidence(
+        registration, replace(coverage.identity, object_id=18), principal=owner)
+    assert late.lineage.code == "ATTEMPT_ACTIVATION_UNVERIFIED"
+    with pytest.raises(r.RuntimeHold, match="^DECISION_DEMAND_CONFLICT$"):
+        journal.record_decision_demand(registration, replace(demand, coverage=(late.coverage,)), principal=owner)
+    revised = replace(demand, revision="rev-2", coverage=(late.coverage,))
+    journal.record_decision_demand(registration, revised, principal=owner)
+    with pytest.raises(r.RuntimeHold, match="^DECISION_SOURCE_CUSTODY_UNRESOLVED$"):
+        journal.record_decision_plan(registration, replace(proposal, decision_id=revised.decision_id), principal=owner)
+    independent = replace(demand, execution_id=other_parent, coverage=(other.coverage,))
+    journal.record_decision_demand(registration, independent, principal=owner)
+    result = journal.record_decision_plan(registration, replace(proposal, decision_id=independent.decision_id),
+                                          principal=owner)
+    assert result.operation.state == "PENDING_INTENT"
+    old, = journal.decision_source_evidence(registration, coverage.identity, principal=owner)
+    assert old.custody == "UNKNOWN"
+    with pytest.raises(r.RuntimeHold, match="^SUPERVISOR_DELIVERY_UNRESOLVED$"):
+        journal.enrolled_origin(registration, owner, for_retirement=True)
+
+
+def test_decision_additive_schema_and_read_only_consumers(ingress):
+    journal, registration, owner, demand, _, _ = decision_fixture(ingress, runs=(17,))
+    before = journal.path.read_bytes()
+    assert journal.decision_demand(registration, demand.decision_id, principal=owner) is None
+    assert journal.enrolled_origin(registration, owner, for_upgrade=True) is None
+    assert journal.path.read_bytes() == before
+    journal.record_decision_demand(registration, demand, principal=owner)
+    assert journal.enrolled_origin(registration, owner, for_upgrade=True) is None
+    assert journal.enrolled_origin(registration, owner, for_retirement=True) is None
+    with closing(sqlite3.connect(journal.path)) as db, db:
+        db.execute("DROP TABLE decision_checkpoints")
+    corrupt = journal.path.read_bytes()
+    for read in (
+        lambda: journal.decision_demand(registration, demand.decision_id, principal=owner),
+        lambda: journal.enrolled_origin(registration, owner, for_upgrade=True),
+        lambda: journal.enrolled_origin(registration, owner, for_retirement=True),
+        lambda: journal.record_decision_demand(registration, demand, principal=owner),
+    ):
+        with pytest.raises(r.RuntimeHold, match="^JOURNAL_SCHEMA_INCOMPATIBLE$"):
+            read()
+    assert journal.path.read_bytes() == corrupt
+
+
+@pytest.mark.parametrize("custody", ["RECEIVER_RESERVED", "EFFECT_RESERVED", "UNKNOWN"])
+def test_decision_outbox_existing_custody_stays_frozen(ingress, custody):
+    journal, registration, owner, demand, operation, _ = decision_fixture(ingress, runs=(17,))
+    journal.record_decision_demand(registration, demand, principal=owner)
+    proposal = r.DecisionProposal(demand.decision_id, 1, digest("custody fixture"), next_operation=operation)
+    pending = journal.record_decision_plan(registration, proposal, principal=owner)
+    # Seed possible existing custody to exercise the read/retirement contract.
+    # Only PENDING_INTENT can be created by the public U1b planning seam.
+    with closing(sqlite3.connect(journal.path)) as db, db:
+        db.execute("UPDATE decision_outbox SET state=? WHERE operation_id=?", (custody, operation.operation_id))
+    saved = journal.record_decision_plan(registration, proposal, principal=owner)
+    assert saved == replace(pending, operation=replace(pending.operation, state=custody))
+    assert saved.authority == "PENDING_AUTHORITY"
+    for mode in ({"for_upgrade": True}, {"for_retirement": True}):
+        with pytest.raises(r.RuntimeHold, match="^DECISION_OPERATION_CUSTODY_UNRESOLVED$"):
+            journal.enrolled_origin(registration, owner, **mode)
+
+
 def register_execution_completion(i, *, run_id, actions):
     _, report = github_candidate()
     report.update(actions=actions, total=len(actions), github_workflow_run_id=str(run_id))
