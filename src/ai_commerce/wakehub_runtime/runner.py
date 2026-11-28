@@ -273,6 +273,78 @@ class SourceEvent:
                      "SOURCE_EVENT_INVALID")
 
 
+_EF02_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
+
+
+@dataclass(frozen=True, repr=False)
+class ExecutionRequest:
+    """Exact contract explicitly submitted by the private journal owner."""
+    key: str
+    objective: str
+    consumer: str
+    operation_slot: str
+
+    def __post_init__(self) -> None:
+        _require(all(_reference(value) and value.isascii() for value in (self.key, self.consumer, self.operation_slot))
+                 and type(self.objective) is str and 0 < len(self.objective) <= 32768
+                 and not any(char == "\0" or 0xD800 <= ord(char) <= 0xDFFF for char in self.objective),
+                 "EXECUTION_REQUEST_INVALID")
+
+
+@dataclass(frozen=True)
+class ExecutionAlias:
+    """Typed external selector. Parent selectors can label several actions."""
+    kind: Literal["github_issue", "ef02_batch", "ef02_action", "ef02_attempt",
+                  "github_run", "github_run_attempt"]
+    parts: tuple[str | int, ...]
+
+    def __post_init__(self) -> None:
+        sizes = {"github_issue": 2, "ef02_batch": 2, "ef02_action": 3, "ef02_attempt": 4,
+                 "github_run": 2, "github_run_attempt": 3}
+        _require(type(self.kind) is str and type(self.parts) is tuple
+                 and len(self.parts) == sizes.get(self.kind), "EXECUTION_ALIAS_INVALID")
+        if self.kind == "github_issue":
+            _require(all(_github_id(value) for value in self.parts), "EXECUTION_ALIAS_INVALID")
+            return
+        repository, *ids = self.parts
+        _require(type(repository) is str and len(repository) <= 201
+                 and repository == repository.lower() and _REPOSITORY.fullmatch(repository) is not None
+                 and not {".", ".."}.intersection(repository.split("/")), "EXECUTION_ALIAS_INVALID")
+        valid = (all(type(value) is str and _EF02_ID.fullmatch(value) for value in ids)
+                 if self.kind.startswith("ef02_") else all(_github_id(value) for value in ids))
+        _require(valid, "EXECUTION_ALIAS_INVALID")
+
+
+@dataclass(frozen=True)
+class ExecutionAttempt:
+    """Owner observation binding one logical attempt to one EF02 action and run attempt."""
+    execution_id: str
+    number: int
+    alias: ExecutionAlias
+    run: ExecutionAlias
+
+    def __post_init__(self) -> None:
+        _require(type(self.execution_id) is str and re.fullmatch(r"[0-9a-f]{32}", self.execution_id)
+                 and _github_id(self.number)
+                 and type(self.alias) is ExecutionAlias and self.alias.kind == "ef02_attempt"
+                 and type(self.run) is ExecutionAlias and self.run.kind == "github_run_attempt"
+                 and self.alias.parts[0] == self.run.parts[0], "EXECUTION_ATTEMPT_INVALID")
+
+
+@dataclass(frozen=True)
+class ExecutionLineage:
+    alias: ExecutionAlias
+    code: Literal["OWNER_REQUEST_PRODUCER_UNAVAILABLE", "EXECUTION_ALIAS_CONFLICT",
+                  "ATTEMPT_ACTIVATION_UNVERIFIED"]
+    execution_id: str | None = None
+    attempt_number: int | None = None
+    parents: tuple[ExecutionAlias, ...] = ()
+
+    @property
+    def status(self) -> Literal["PENDING", "HOLD"]:
+        return "HOLD" if self.code == "EXECUTION_ALIAS_CONFLICT" else "PENDING"
+
+
 class EventSource(Protocol):
     def next_event(self) -> Event | SourceEvent | None: ...
 
@@ -1398,7 +1470,39 @@ _ORIGIN_TABLE = ("CREATE TABLE local_origin (singleton INTEGER PRIMARY KEY CHECK
                  "record TEXT NOT NULL)")
 _STANDING_CURSOR_TABLE = ("CREATE TABLE standing_ef02_cursor "
                           "(singleton INTEGER PRIMARY KEY CHECK(singleton=1), record TEXT NOT NULL)")
+# Additive to both journal versions. Their version still describes Chrome
+# lifecycle state. This group is created atomically on the first lineage write.
+_EXECUTION_TABLES = {
+    "execution_requests": "CREATE TABLE execution_requests (request_key TEXT PRIMARY KEY, "
+                          "execution_id TEXT NOT NULL UNIQUE, contract TEXT NOT NULL)",
+    "execution_attempts": "CREATE TABLE execution_attempts ("
+                          "execution_id TEXT NOT NULL REFERENCES execution_requests(execution_id), "
+                          "number INTEGER NOT NULL CHECK(number > 0), repository TEXT NOT NULL, "
+                          "batch_id TEXT NOT NULL, action_id TEXT NOT NULL, attempt_id TEXT NOT NULL, "
+                          "run_id INTEGER NOT NULL, run_attempt INTEGER NOT NULL, "
+                          "PRIMARY KEY(execution_id, number), "
+                          "UNIQUE(repository, batch_id, action_id, attempt_id), "
+                          "UNIQUE(repository, batch_id, action_id, run_id, run_attempt))",
+    "execution_source_events": "CREATE TABLE execution_source_events ("
+                               "source_key TEXT PRIMARY KEY REFERENCES source_identities(source_key), "
+                               "source_event TEXT NOT NULL)",
+}
 _APP_ID = 0x57485231
+
+
+def _has_execution_tables(schemas: dict) -> bool:
+    present = {name: schemas[name] for name in _EXECUTION_TABLES if name in schemas}
+    _require(not present or present == _EXECUTION_TABLES, "JOURNAL_SCHEMA_INCOMPATIBLE")
+    return bool(present)
+
+
+def _execution_aliases(identity: SourceIdentity, source_event: dict) -> tuple[ExecutionAlias, ...]:
+    if identity.kind == _ISSUE:
+        _require(source_event == {}, "EXECUTION_LINEAGE_INVALID")
+        return (ExecutionAlias("github_issue", (identity.repository_id, identity.object_id)),)
+    batch = (identity.repository, source_event["batch_id"])
+    return tuple(ExecutionAlias("ef02_attempt", (*batch, action["action_id"], action["attempt_id"]))
+                 for action in source_event["actions"])
 
 
 def _validate_standing_cursor(value: object) -> None:
@@ -1723,10 +1827,47 @@ def _validate_records(data: dict, registration: Registration) -> None:
 
 
 class _SQLiteTransaction:
-    def __init__(self, connection, journal, registration, owner, source_table):
+    def __init__(self, connection, journal, registration, owner, source_table, execution_tables):
         self.connection, self.journal = connection, journal
         self.registration, self.owner = registration, owner
         self.source_table = source_table
+        self.execution_tables = execution_tables
+
+    def stage_execution_source(self, data: dict, event: SourceEvent, verified: dict | None) -> bool:
+        # D1's validated selector-only event keeps the projection checkable
+        # against the existing payload commitment after reopening.
+        identity = event.identity
+        if identity.kind == _EF02:
+            _require(type(verified) is dict and digest(verified) == event.payload_sha256, "SOURCE_PROOF_MISSING")
+        raw = json.dumps({} if verified is None else verified, sort_keys=True)
+        if self.execution_tables:
+            saved = self.connection.execute("SELECT source_event FROM execution_source_events WHERE source_key=?",
+                                            (identity.key,)).fetchone()
+            if saved is not None:
+                _require(saved == (raw,), "EXECUTION_LINEAGE_INVALID")
+                return False
+        data["new_execution_source"] = (identity.key, raw)
+        return True
+
+    def _create_execution_tables(self) -> None:
+        if not self.execution_tables:
+            for sql in _EXECUTION_TABLES.values():
+                self.connection.execute(sql)
+
+    @contextmanager
+    def execution_write(self):
+        self.journal._owner(self.owner)
+        db = self.connection
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            self._create_execution_tables()
+            yield db
+            self.journal._owner(self.owner)
+            db.commit()
+            self.execution_tables = True
+        except BaseException:
+            db.rollback()
+            raise
 
     def write(self, data: dict) -> None:
         _validate_records(data, self.registration)
@@ -1746,10 +1887,17 @@ class _SQLiteTransaction:
             for key, (event_key, identity) in sources.items():
                 db.execute("INSERT INTO source_identities VALUES (?, ?, ?) ON CONFLICT(source_key) DO NOTHING",
                            (key, event_key, json.dumps(identity, sort_keys=True)))
+            new_source = data.get("new_execution_source")
+            if new_source is not None:
+                self._create_execution_tables()
+                db.execute("INSERT INTO execution_source_events VALUES (?, ?)", new_source)
             # Includes the rollback sidecar created by SQLite, before commit.
             self.journal._owner(self.owner)
             db.commit()  # FULL/EXTRA synchronous; no effect may precede this commit.
             self.source_table = self.source_table or bool(sources)
+            if new_source is not None:
+                self.execution_tables = True
+                del data["new_execution_source"]
         except BaseException:
             db.rollback()
             raise
@@ -1845,6 +1993,129 @@ class Journal:
             data["events"][key] = record
         _validate_records(data, registration)
 
+    def admit_execution(self, registration: Registration, request: ExecutionRequest, *, principal: str) -> str:
+        """Allocate one opaque ID in an enrolled journal for an explicit owner request."""
+        _require(type(request) is ExecutionRequest, "EXECUTION_REQUEST_INVALID")
+        _require(_reference(principal), "EXECUTION_OWNER_REQUIRED")
+        contract = json.dumps((request.objective, request.consumer, request.operation_slot))
+        with self.locked(registration, execution_owner=principal) as (txn, _), txn.execution_write() as db:
+            row = db.execute("SELECT execution_id, contract FROM execution_requests WHERE request_key=?",
+                             (request.key,)).fetchone()
+            if row is not None:
+                execution_id, saved = row
+                _require(type(execution_id) is str and re.fullmatch(r"[0-9a-f]{32}", execution_id),
+                         "EXECUTION_REGISTRY_INVALID")
+                _require(saved == contract, "EXECUTION_REQUEST_CONFLICT")
+                return execution_id
+            execution_id = token_hex(16)
+            db.execute("INSERT INTO execution_requests VALUES (?, ?, ?)", (request.key, execution_id, contract))
+            return execution_id
+
+    def record_execution_attempt(self, registration: Registration, attempt: ExecutionAttempt, *,
+                                 principal: str) -> None:
+        """Record an observation for an admitted request without selecting an active attempt."""
+        _require(type(attempt) is ExecutionAttempt, "EXECUTION_ATTEMPT_INVALID")
+        _require(_reference(principal), "EXECUTION_OWNER_REQUIRED")
+        execution_id, number = attempt.execution_id, attempt.number
+        repository, batch, action, attempt_id = attempt.alias.parts
+        run_id, run_attempt = attempt.run.parts[1:]
+        binding = (repository, batch, action, attempt_id, run_id, run_attempt)
+        with self.locked(registration, execution_owner=principal) as (txn, _), txn.execution_write() as db:
+            _require(db.execute("SELECT 1 FROM execution_requests WHERE execution_id=?",
+                                (execution_id,)).fetchone() is not None, "EXECUTION_REQUEST_UNKNOWN")
+            for owner_id, ordinal, old_attempt, old_run, old_run_attempt in db.execute(
+                    "SELECT execution_id, number, attempt_id, run_id, run_attempt FROM execution_attempts "
+                    "WHERE repository=? AND batch_id=? AND action_id=?", (repository, batch, action)):
+                _require(owner_id == execution_id, "EXECUTION_ALIAS_CONFLICT")
+                if old_attempt == attempt_id or (old_run, old_run_attempt) == (run_id, run_attempt):
+                    _require((ordinal, old_attempt, old_run, old_run_attempt) ==
+                             (number, attempt_id, run_id, run_attempt), "EXECUTION_ALIAS_CONFLICT")
+            saved = db.execute("SELECT repository, batch_id, action_id, attempt_id, run_id, run_attempt "
+                               "FROM execution_attempts WHERE execution_id=? AND number=?",
+                               (execution_id, number)).fetchone()
+            _require(saved in (None, binding), "EXECUTION_ATTEMPT_CONFLICT")
+            if saved is None:
+                db.execute("INSERT INTO execution_attempts VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                           (execution_id, number, *binding))
+
+    def execution_lineage(self, registration: Registration, identity: SourceIdentity, *,
+                          principal: str) -> tuple[ExecutionLineage, ...]:
+        """Read authenticated event selectors and their observed attempt associations."""
+        _require(type(identity) is SourceIdentity, "SOURCE_IDENTITY_INVALID")
+        with _private_access(self.path, self.repository_root) as (owner, _):
+            _require(owner == principal, "JOURNAL_OWNER_DRIFT")
+            self._owner(owner)
+            if not self.path.exists():
+                return ()
+            with closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=0)) as db:
+                db.execute("PRAGMA trusted_schema=OFF")
+                db.execute("BEGIN")
+                _require(db.execute("PRAGMA user_version").fetchone() in ((2,), (3,))
+                         and db.execute("PRAGMA application_id").fetchone() == (_APP_ID,),
+                         "JOURNAL_SCHEMA_INCOMPATIBLE")
+                schemas = dict(db.execute("SELECT name, sql FROM sqlite_master WHERE type='table'"))
+                _require(schemas.get("identity") == _TABLES["identity"], "JOURNAL_SCHEMA_INCOMPATIBLE")
+                self._check_registration(db, owner, registration)
+                if not _has_execution_tables(schemas):
+                    return ()
+                proof = db.execute("SELECT source_event FROM execution_source_events WHERE source_key=?",
+                                   (identity.key,)).fetchone()
+                if proof is None:
+                    return ()
+                _require(schemas.get("source_identities") == _SOURCE_TABLE
+                         and schemas.get("events") == _TABLES["events"], "JOURNAL_SCHEMA_INCOMPATIBLE")
+                aliases = self._read_execution_aliases(db, identity, registration, proof[0])
+                if identity.kind == _ISSUE:
+                    return (ExecutionLineage(aliases[0], "OWNER_REQUEST_PRODUCER_UNAVAILABLE"),)
+                return tuple(self._correlate_execution_alias(db, identity, alias) for alias in aliases)
+
+    @staticmethod
+    def _read_execution_aliases(db, identity: SourceIdentity, registration: Registration,
+                                proof: str) -> tuple[ExecutionAlias, ...]:
+        row = db.execute("SELECT identity, event_key, record FROM source_identities JOIN events USING(event_key) "
+                         "WHERE source_key=?", (identity.key,)).fetchone()
+        _require(row is not None, "EXECUTION_LINEAGE_INVALID")
+        try:
+            stored = SourceIdentity(**_decode_unique(row[0]))
+            raw = _decode_unique(row[2])["event"]
+            source = _decode_unique(proof)
+            _require(stored.key == identity.key and type(source) is dict, "EXECUTION_LINEAGE_INVALID")
+            if identity.kind == _ISSUE:
+                _require(row[1] == stored.key and _issue_record_event(raw, registration).identity == stored,
+                         "EXECUTION_LINEAGE_INVALID")
+            else:
+                event = Event(**raw)
+                _require(event.key(registration) == row[1] and event.evidence_type == "GITHUB_AUTHENTICATED"
+                         and (source["repository"], source["run_id"], source["run_attempt"]) ==
+                         (stored.repository, stored.object_id, stored.attempt)
+                         and event.event_id == source["event_id"] and event.attempt == stored.attempt
+                         and digest(source) == event.payload_sha256, "EXECUTION_LINEAGE_INVALID")
+            return _execution_aliases(stored, source)
+        except (TypeError, KeyError, ValueError):
+            raise RuntimeHold("EXECUTION_LINEAGE_INVALID") from None
+
+    @staticmethod
+    def _correlate_execution_alias(db, identity: SourceIdentity, alias: ExecutionAlias) -> ExecutionLineage:
+        run = (identity.repository, identity.object_id)
+        parents = (ExecutionAlias("ef02_batch", alias.parts[:2]), ExecutionAlias("ef02_action", alias.parts[:3]),
+                   ExecutionAlias("github_run", run), ExecutionAlias("github_run_attempt", (*run, identity.attempt)))
+        rows = db.execute(
+            "SELECT a.execution_id, a.number, a.attempt_id, a.run_id, a.run_attempt "
+            "FROM execution_attempts a JOIN execution_requests USING(execution_id) "
+            "WHERE repository=? AND batch_id=? AND action_id=? "
+            "AND (attempt_id=? OR (run_id=? AND run_attempt=?))",
+            (*alias.parts, identity.object_id, identity.attempt)).fetchall()
+        if not rows:
+            return ExecutionLineage(alias, "OWNER_REQUEST_PRODUCER_UNAVAILABLE", parents=parents)
+        if len(rows) != 1 or rows[0][2:] != (alias.parts[3], identity.object_id, identity.attempt):
+            return ExecutionLineage(alias, "EXECUTION_ALIAS_CONFLICT", parents=parents)
+        execution_id, number, _, _, _ = rows[0]
+        _require(type(execution_id) is str and re.fullmatch(r"[0-9a-f]{32}", execution_id)
+                 and _github_id(number), "EXECUTION_REGISTRY_INVALID")
+        # Completion authenticates the source selectors. U1a lacks independent proof of scoped
+        # admission and activation and, for a successor, prior NO_EFFECT and new authorization.
+        return ExecutionLineage(alias, "ATTEMPT_ACTIVATION_UNVERIFIED", execution_id, number, parents)
+
     def enrolled_origin(self, registration: Registration, principal: str, *, for_upgrade: bool = False,
                         for_retirement: bool = False) -> dict | None:
         """Read the exact existing enrollment without creating, migrating or recovering state."""
@@ -1863,9 +2134,8 @@ class Journal:
                 _require(db.execute("PRAGMA user_version").fetchone() in ((2,), (3,))
                          and db.execute("PRAGMA application_id").fetchone() == (_APP_ID,),
                          "JOURNAL_SCHEMA_INCOMPATIBLE")
-                schemas = dict(db.execute("SELECT name, sql FROM sqlite_master WHERE type='table' "
-                                          "AND name IN ('identity', 'local_origin', 'events', 'chrome_lifecycle', "
-                                          "'source_identities')"))
+                schemas = dict(db.execute("SELECT name, sql FROM sqlite_master WHERE type='table'"))
+                _has_execution_tables(schemas)
                 _require(schemas.get("identity") == _TABLES["identity"], "JOURNAL_SCHEMA_INCOMPATIBLE")
                 self._check_registration(db, owner, registration)
                 if "local_origin" not in schemas and not (for_upgrade or for_retirement):
@@ -1920,25 +2190,35 @@ class Journal:
                 return origin if origin is not None and origin["phase"] == "ENROLLED" else None
 
     @contextmanager
-    def locked(self, registration: Registration):
+    def locked(self, registration: Registration, *, execution_owner: str | None = None):
         db, lock_fd, unlock = None, None, None
         try:
             with _private_access(self.path, self.repository_root) as (owner, files):
                 self._owner(owner)
+                if execution_owner is not None:
+                    _require(registration.evidence_type == "GITHUB_AUTHENTICATED", "EXECUTION_OWNER_REQUIRED")
+                    _require(execution_owner == owner, "JOURNAL_OWNER_DRIFT")
+                    _require(self.path.exists(), "JOURNAL_PROOF_MISSING")
                 lock_existed = self.path.with_name(self.path.name + ".lock").exists()
                 lock_fd = files.open(self.path.name + ".lock", os.O_RDWR | os.O_CREAT)
-                try:
-                    if os.name == "nt":
-                        import msvcrt
-                        msvcrt.locking(lock_fd, msvcrt.LK_NBLCK, 1)
-                        unlock = lambda: (os.lseek(lock_fd, 0, os.SEEK_SET),
-                                          msvcrt.locking(lock_fd, msvcrt.LK_UNLCK, 1))
-                    else:
-                        import fcntl
-                        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        unlock = lambda: fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                except OSError:
-                    raise RuntimeHold("JOURNAL_BUSY") from None
+                deadline = monotonic() + (5 if execution_owner is not None else 0)
+                while True:
+                    try:
+                        if os.name == "nt":
+                            import msvcrt
+                            os.lseek(lock_fd, 0, os.SEEK_SET)
+                            msvcrt.locking(lock_fd, msvcrt.LK_NBLCK, 1)
+                            unlock = lambda: (os.lseek(lock_fd, 0, os.SEEK_SET),
+                                              msvcrt.locking(lock_fd, msvcrt.LK_UNLCK, 1))
+                        else:
+                            import fcntl
+                            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            unlock = lambda: fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                        break
+                    except OSError:
+                        if monotonic() >= deadline:
+                            raise RuntimeHold("JOURNAL_BUSY") from None
+                        time.sleep(0.01)
                 self._owner(owner)
                 new = not self.path.exists()
                 if new:
@@ -1958,7 +2238,8 @@ class Journal:
                                      isolation_level=None)
                 db.execute("PRAGMA trusted_schema=OFF")
                 _require(db.execute("PRAGMA quick_check").fetchall() == [("ok",)], "JOURNAL_CORRUPT")
-                version, source_table, origin_table, cursor_table = 2, False, False, False
+                version = 2
+                source_table = origin_table = cursor_table = execution_tables = False
                 if not new:
                     version, = db.execute("PRAGMA user_version").fetchone()
                     tables = dict(_TABLES, chrome_lifecycle=_CHROME_TABLE) if version == 3 else _TABLES
@@ -1973,6 +2254,10 @@ class Journal:
                     cursor_table = ("table", "standing_ef02_cursor", _STANDING_CURSOR_TABLE) in stored_tables
                     if cursor_table:
                         tables = dict(tables, standing_ef02_cursor=_STANDING_CURSOR_TABLE)
+                    execution_tables = _has_execution_tables({name: sql for kind, name, sql in stored_tables
+                                                             if kind == "table"})
+                    if execution_tables:
+                        tables = dict(tables, **_EXECUTION_TABLES)
                     _require(version in (2, 3)
                              and db.execute("PRAGMA application_id").fetchone() == (_APP_ID,)
                              and stored_tables == [("table", name, sql) for name, sql in sorted(tables.items())],
@@ -2016,7 +2301,7 @@ class Journal:
                     _require(len(rows) == 1 and rows[0][0] == 1, "CHROME_JOURNAL_INVALID")
                     data["chrome"] = _decode_unique(rows[0][1])
                     _validate_chrome(data["chrome"])
-                yield _SQLiteTransaction(db, self, registration, owner, source_table), data
+                yield _SQLiteTransaction(db, self, registration, owner, source_table, execution_tables), data
                 self._owner(owner)
         except sqlite3.DatabaseError as exc:
             code = "JOURNAL_BUSY" if isinstance(exc, sqlite3.OperationalError) and \
@@ -2162,7 +2447,16 @@ class Runner:
                     replayed = False
                 if envelope is not None and previous is None:
                     sources[identity.key] = (key, asdict(identity))
-                if not replayed or (envelope is not None and previous is None):
+                new_lineage = False
+                authority = self.grant_verifier
+                if envelope is not None and self.registration.evidence_type == "GITHUB_AUTHENTICATED":
+                    if issue:
+                        new_lineage = txn.stage_execution_source(data, envelope, None)
+                    elif (type(authority) in (_RegisteredWakeAuthority, _StandingWakeAuthority)
+                          and authority.source is self.source and authority.principal == txn.owner
+                          and type(self.source.authority) is GitHubRestArtifactAuthority):
+                        new_lineage = txn.stage_execution_source(data, envelope, self.source.verified_event)
+                if not replayed or (envelope is not None and previous is None) or new_lineage:
                     txn.write(data)
                 if not standing:
                     self._recover_reservations(txn, data)
