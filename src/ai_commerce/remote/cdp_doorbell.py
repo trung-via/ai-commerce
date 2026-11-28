@@ -149,6 +149,8 @@ const turnNodes = () => document.querySelectorAll('[data-message-id], [data-turn
 const turnRefs = () => {
  const nodes = turnNodes();
  if (nodes.length > 4096) return false;
+ if (args.project && (nodes.length || document.querySelector(
+    'main [data-message-author-role], main [data-user-message-bubble]'))) return false;
  const refs = new Set();
  for (const node of nodes) {
    for (const attr of ['data-message-id', 'data-turn-id']) {
@@ -161,7 +163,7 @@ const turnRefs = () => {
 const inspect = (expectText = false) => {
  if (!sameDocument() || !sameRoute()) return 'TARGET_PAGE_CHANGED';
  if (!accountMatches()) return 'ACCOUNT_UNPROVEN';
- if (surfaceBlocked()) return 'SURFACE_UNPROVEN';
+ if (surfaceBlocked() || (args.project && document.readyState !== 'complete')) return 'SURFACE_UNPROVEN';
  const boxes = visible(composerSel);
  if (boxes.length !== 1 || boxes[0].getAttribute('aria-disabled') === 'true')
    return 'SURFACE_UNPROVEN';
@@ -197,13 +199,13 @@ _CHECK = "(args) => { " + _GUARD + """
  if (matches().length) return 'OUTBOUND_ALREADY_PRESENT';
  return 'READY';
 }"""
-_INSERT = "(args) => { " + _GUARD + """
+_INSERT_BODY = """
  const result = inspect();
- if (typeof result === 'string' || matches().length) return false;
+ if (typeof result === 'string' || matches().length || (args.project && !turnRefs())) return false;
  const box=result.box;
  box.focus();
  if (document.activeElement !== box || box.textContent !== '') return false;
- if (args.documentClock && (inspect().box !== box || matches().length)) return false;
+ if (args.documentClock && (inspect().box !== box || matches().length || (args.project && !turnRefs()))) return false;
  const select=window.getSelection(), range=document.createRange();
  if(!select) return false;
  range.selectNodeContents(box); range.collapse(true);
@@ -214,13 +216,14 @@ _INSERT = "(args) => { " + _GUARD + """
    bubbles:true, composed:true, inputType:'insertText', data:args.text
  }));
  return equivalent(box);
-}"""
+"""
+_INSERT = "(args) => { " + _GUARD + _INSERT_BODY + "}"
 _READY = "(args) => { " + _GUARD + """
  const result=inspect(true);
  if(typeof result === 'string' || matches().length) return false;
  return result.buttons.length === 1 && sendEnabled(result.buttons[0]);
 }"""
-_CLICK = "(args) => { " + _GUARD + """
+_CLICK_BODY = """
  const result=inspect(true);
  if(typeof result === 'string' || matches().length ||
     result.buttons.length !== 1) return false;
@@ -235,6 +238,18 @@ _CLICK = "(args) => { " + _GUARD + """
    return refs;
  }
  button.click(); return true;
+"""
+_CLICK = "(args) => { " + _GUARD + _CLICK_BODY + "}"
+_PROJECT_AGY_ACTION = "(args) => { " + _GUARD + """
+ if (!Number.isSafeInteger(args.expires_ms) || Date.now() >= args.expires_ms ||
+     !args.project || !args.documentClock || !args.account_id) return false;
+ if (args.action === 'stage' && turnRefs() && sameRoute() && sameDocument() && accountMatches()) {
+""" + _INSERT_BODY + """
+ }
+ if (args.action === 'send') {
+""" + _CLICK_BODY + """
+ }
+ return false;
 }"""
 _PROVE = "(args) => { " + _GUARD + """
  if (!sameDocument() || !sameRoute() || !accountMatches() || surfaceBlocked()) return false;
@@ -264,7 +279,9 @@ _AGY_SURFACE_READY = "(args) => { " + _GUARD + """
 _EXISTING_USER_TURN = "(args) => { " + _GUARD + """
  if (!args.documentClock || document.readyState !== 'complete' ||
      document.querySelectorAll('*').length > 20000 ||
-     typeof inspect() === 'string' || visible(
+     (args.project ? (!sameDocument() || !sameRoute() || !accountMatches() || surfaceBlocked() ||
+       ![...document.querySelectorAll('nav a[href], aside a[href]')].some(a => a.href === args.url)) :
+       typeof inspect() === 'string') || visible(
        'input[autocomplete="one-time-code"], input[type="password"], form[action^="/auth/"], ' +
        'main[aria-busy="true"], main [role="progressbar"]'
      ).length) return false;
@@ -279,7 +296,7 @@ _EXISTING_USER_TURN = "(args) => { " + _GUARD + """
    // Collapsed lines are a competing candidate, never sufficient proof.
    return raw === args.text || raw === collapsed || equivalent(el);
  });
- if (found.length !== 1) return false;
+ if (found.length !== 1) return args.project && found.length > 1 ? 'AMBIGUOUS PROJECT TURN' : false;
  const turn = found[0];
  if (!turn.matches(user) || turn.parentElement?.closest(role) ||
      turn.querySelector(role) || !turn.getClientRects().length ||
@@ -305,8 +322,14 @@ _EXISTING_USER_TURN = "(args) => { " + _GUARD + """
      args.priorRefs.includes(ref))) return false;
  const owners = turnNodes();
  if (owners.length > 4096 || [...owners].some(el => el !== owner &&
-     ids.some(attr => refs.includes(el.getAttribute(attr))))) return false;
+     ids.some(attr => refs.includes(el.getAttribute(attr))))) return args.project ? 'AMBIGUOUS PROJECT TURN' : false;
  return refs[0];
+}"""
+
+_PROJECT_COMPETING_TURN = "(args) => { " + _GUARD + """
+ return document.readyState !== 'complete' || document.querySelectorAll('*').length > 20000 ||
+   matches().length > 0 || [...document.querySelectorAll('main [data-message-author-role="user"]')].some(
+     turn => turn.textContent.replace(/\\r\\n/g,'\\n') === args.text.replace(/\\n/g,''));
 }"""
 
 _OBSERVER_CHECK = "(args) => { " + _GUARD + """
@@ -1113,8 +1136,9 @@ def diagnose_authenticated_wake(
 @dataclass(frozen=True, repr=False)
 class LocalUISendResult:
     code: str
-    staged: bool = False
+    staged: bool = False  # Project delivery sets this once Send may have been invoked.
     turn_ref: str | None = None
+    chat_url: str | None = None
 
 
 @dataclass(frozen=True, repr=False)
@@ -1122,6 +1146,27 @@ class LocalUISurface:
     document: str
     clock: float
     prior_refs: tuple[str, ...]
+
+
+@dataclass(frozen=True, repr=False)
+class ProjectSelection:
+    project_id: str
+    account_id: str
+
+    def __post_init__(self) -> None:
+        if (type(self.project_id) is not str or not re.fullmatch(r"g-p-[A-Za-z0-9_-]{1,128}", self.project_id)
+                or type(self.account_id) is not str or not re.fullmatch(r"[A-Za-z0-9_.:@-]{1,256}", self.account_id)):
+            raise ValueError("PROJECT_SELECTION_INVALID")
+
+    @property
+    def project_url(self) -> str:
+        return f"https://chatgpt.com/g/{self.project_id}/project"
+
+    def chat_id(self, url: str | None) -> str | None:
+        match = _CHAT.fullmatch(url) if type(url) is str else None
+        if match is not None and url.startswith(f"https://chatgpt.com/g/{self.project_id}/c/"):
+            return match[1]
+        return None
 
 
 class LocalChromeDoorbellAdapter:
@@ -1209,6 +1254,176 @@ class LocalChromeDoorbellAdapter:
         return self._registered_ui(binding, event_id, marker_digest, revalidate,
                                    capture=capture, account_id=account_id)
 
+    def project_decision_ui(self, *, binding: ResolvedBinding, selection: ProjectSelection, message: str,
+                            revalidate: Callable[[], None], capture: Callable[[LocalUISurface], None] | None = None,
+                            before_open: Callable[[], None] | None = None,
+                            bind_surface: Callable[[LocalUISurface], None] | None = None,
+                            before_stage: Callable[[], None] | None = None, resume_draft: bool = False,
+                            before_send: Callable[[], None] | None = None,
+                            document: str | None = None, observe: bool = False,
+                            known_url: str | None = None, prior_refs: tuple[str, ...] = (),
+                            unavailable_documents: frozenset[str] = frozenset()) -> LocalUISendResult:
+        """Bind New Chat at its Project surface and observe the first real conversation after Send."""
+        if (type(binding) is not ResolvedBinding or type(selection) is not ProjectSelection
+                or binding.cdp_endpoint != "http://127.0.0.1:9444" or binding.chat_url != selection.project_url
+                or not _is_windows()):
+            return LocalUISendResult("PROJECT_TARGET_UNVERIFIED")
+        if (type(message) is not str or not message.isascii() or len(message) > 8192
+                or not message.startswith("[AI COMMERCE PROJECT DECISION WAKE]\n")
+                or sum((capture is not None, before_send is not None, observe)) != 1
+                or (capture is None and document is None)
+                or (before_open is not None and (capture is None or document is not None or not self.allow_submit))
+                or (bind_surface is not None and (capture is None or document is not None))
+                or (before_stage is not None and before_send is None)
+                or (known_url is not None and (not observe or selection.chat_id(known_url) is None))
+                or (before_send is not None and not self.allow_submit)):
+            return LocalUISendResult("PROJECT_DOORBELL_INVALID")
+        start_url = selection.project_url
+        args = {**_ARGS, "url": start_url, "text": message, "account_id": selection.account_id,
+                "project": True, "standbyRefs": [], "priorRefs": list(prior_refs)}
+        possible_send = False
+        try:
+            revalidate()
+            with self.inventory._browser(binding.cdp_endpoint) as browser:
+                if len(browser.contexts) != 1:
+                    return LocalUISendResult("EXACT_CHAT_CONTEXT_AMBIGUOUS")
+                context = browser.contexts[0]
+
+                def witness(page, url):
+                    clock = page.evaluate(_DOCUMENT_CLOCK)
+                    if type(clock) not in (float, int) or not 0 < clock < 2**53:
+                        raise ValueError("TARGET_PAGE_CHANGED")
+                    commitment = self._surface_commitment(context, page, clock, expected_url=url)
+                    if page.url != url or browser.contexts != [context]:
+                        raise ValueError("TARGET_PAGE_CHANGED")
+                    return commitment, clock
+
+                def new_chat_candidates():
+                    candidates = []
+                    for candidate in context.pages:
+                        if candidate.url == start_url:
+                            identity, clock = witness(candidate, start_url)
+                            if identity not in unavailable_documents and (document is None or identity == document):
+                                candidates.append((candidate, identity, clock))
+                    return candidates
+
+                def correlate():
+                    revalidate()
+                    pages = [(page, page.url) for page in context.pages]
+                    matches = []
+                    server_pages = [(page, url) for page, url in pages if selection.chat_id(url) is not None]
+                    if len(server_pages) > 64:
+                        raise ValueError("PROJECT_SERVER_ASSOCIATION_AMBIGUOUS")
+                    for page, url in server_pages:
+                        identity, clock = witness(page, url)
+                        read_args = {**args, "url": url, "documentClock": clock}
+                        if identity != document or (known_url is not None and url != known_url):
+                            if (page.evaluate(_PROJECT_COMPETING_TURN, read_args) is not False or
+                                    any(other is not page and other_url == url for other, other_url in server_pages)):
+                                raise ValueError("PROJECT_SERVER_ASSOCIATION_AMBIGUOUS")
+                            continue
+                        ref = page.evaluate(_EXISTING_USER_TURN, read_args)
+                        if ref == "AMBIGUOUS PROJECT TURN":
+                            raise ValueError("PROJECT_SERVER_ASSOCIATION_AMBIGUOUS")
+                        if (type(ref) is str and _UI_TURN_REF.fullmatch(ref) and ref not in prior_refs and
+                                witness(page, url) == (identity, clock)):
+                            matches.append((url, ref))
+                    revalidate()
+                    if pages != [(page, page.url) for page in context.pages] or browser.contexts != [context]:
+                        return None
+                    if len(matches) > 1:
+                        raise ValueError("PROJECT_SERVER_ASSOCIATION_AMBIGUOUS")
+                    return matches[0] if matches else None
+
+                def observe_turn(code, *, wait):
+                    deadline = time.monotonic() + (5 if wait else 0)
+                    observed = None
+                    while True:
+                        result = correlate()
+                        if result is not None:
+                            if observed is not None and observed != result:
+                                return LocalUISendResult("PROJECT_SERVER_ASSOCIATION_AMBIGUOUS", staged=possible_send)
+                            observed = result
+                            if wait:
+                                time.sleep(0.1)
+                            confirmed = correlate()
+                            if confirmed == result:
+                                return LocalUISendResult(code, staged=possible_send, chat_url=result[0], turn_ref=result[1])
+                            if confirmed is not None:
+                                return LocalUISendResult("PROJECT_SERVER_ASSOCIATION_AMBIGUOUS", staged=possible_send)
+                        if time.monotonic() >= deadline:
+                            return LocalUISendResult("PROJECT_USER_TURN_UNVERIFIED", staged=possible_send)
+                        time.sleep(0.1)
+
+                if observe:
+                    return observe_turn(LOCAL_UI_EXISTING_TURN_RECONCILED, wait=False)
+
+                matching = new_chat_candidates()
+                if not matching and before_open is not None:
+                    revalidate()
+                    if browser.contexts != [context] or new_chat_candidates():
+                        return LocalUISendResult("TARGET_PAGE_CHANGED")
+                    before_open()
+                    page = context.new_page()
+                    if page.url != "about:blank" or browser.contexts != [context]:
+                        return LocalUISendResult("TARGET_PAGE_CHANGED")
+                    revalidate()
+                    page.goto(start_url, wait_until="domcontentloaded", timeout=10000)
+                    matching = new_chat_candidates()
+                    if len(matching) != 1 or matching[0][0] is not page:
+                        return LocalUISendResult("PROJECT_SURFACE_UNVERIFIED")
+                if len(matching) != 1:
+                    return LocalUISendResult("PROJECT_SURFACE_AMBIGUOUS" if matching else "PROJECT_SURFACE_UNVERIFIED")
+                page, identity, clock = matching[0]
+                args["documentClock"] = clock
+
+                def guard():
+                    revalidate()
+                    if new_chat_candidates() != [(page, identity, clock)]:
+                        raise ValueError("TARGET_PAGE_CHANGED")
+
+                guard()
+                ready = page.evaluate(_CHECK, args)
+                # Recover a draft only on the document already pinned before staging, and only for the exact payload.
+                if bind_surface is not None and ready in ("READY", "DRAFT_PRESENT", "GENERATION_ACTIVE",
+                                                          "SURFACE_UNPROVEN"):
+                    guard()
+                    bind_surface(LocalUISurface(identity, clock, ()))
+                staged = resume_draft and document is not None and ready == "DRAFT_PRESENT" and (
+                    page.evaluate(_READY, args) is True)
+                if ready != "READY" and not staged:
+                    return LocalUISendResult(ready if ready in {"ACCOUNT_UNPROVEN", "DRAFT_PRESENT", "GENERATION_ACTIVE",
+                                                               "TARGET_PAGE_CHANGED"} else "PROJECT_SURFACE_UNVERIFIED")
+                if page.evaluate(_PRE_STAGE_REFS, args) != []:
+                    return LocalUISendResult("PROJECT_FRESH_SURFACE_UNVERIFIED")
+                guard()
+                if capture is not None:
+                    capture(LocalUISurface(identity, clock, ()))
+                    return LocalUISendResult("READY")
+                if not staged:
+                    if before_stage is not None:
+                        before_stage()
+                        guard()
+                    if page.evaluate(_INSERT, args) is not True:
+                        return LocalUISendResult("INSERT_BLOCKED")
+                page.wait_for_function(_READY, arg=args, timeout=3000, polling=100)
+                guard()
+                before_send()
+                guard()
+                possible_send = True
+                click = page.evaluate(_CLICK, args)
+                if click is False:
+                    possible_send = False  # The page script returned before invoking Send.
+                    return LocalUISendResult("SEND_BLOCKED")
+                if click != []:
+                    return LocalUISendResult("PROJECT_SEND_UNVERIFIED", staged=True)
+                return observe_turn(LOCAL_UI_OWNER_AUTHORIZED_TURN_OBSERVED, wait=True)
+        except Exception as exc:
+            code = str(exc)
+            if not isinstance(exc, ValueError) or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,95}", code):
+                code = "PROJECT_CDP_UNAVAILABLE"
+            return LocalUISendResult(code, staged=possible_send)
+
     def _registered_ui(self, binding, event_id, marker_digest, revalidate, *,
                        before_stage=None, excluded_refs=None, capture=None, document=None,
                        account_id=None, standby_refs=None) -> LocalUISendResult:
@@ -1238,7 +1453,7 @@ class LocalChromeDoorbellAdapter:
                              account_id=account_id, standby_refs=standby_refs)
 
     @staticmethod
-    def _surface_commitment(context, page, clock: float) -> str:
+    def _surface_commitment(context, page, clock: float, *, expected_url: str | None = None) -> str:
         session = context.new_cdp_session(page)
         try:
             info = session.send("Target.getTargetInfo")["targetInfo"]
@@ -1246,7 +1461,8 @@ class LocalChromeDoorbellAdapter:
             session.detach()
         target, context_id = info.get("targetId"), info.get("browserContextId")
         if (info.get("type") != "page" or any(type(ref) is not str or
-                not re.fullmatch(r"[a-fA-F0-9]{32}", ref) for ref in (target, context_id))):
+                not re.fullmatch(r"[a-fA-F0-9]{32}", ref) for ref in (target, context_id)) or
+                (expected_url is not None and info.get("url") != expected_url)):
             raise ValueError("EXACT_CHAT_CDP_TARGET_UNPROVEN")
         return hashlib.sha256(f"{context_id}:{target}:{float(clock).hex()}".encode("ascii")).hexdigest()
 
@@ -1297,6 +1513,9 @@ class LocalChromeDoorbellAdapter:
                         if (page.url != binding.chat_url or len(current_contexts) != 1
                                 or current_contexts[0] is not context or len(current_tabs) != 1
                                 or current_tabs[0] is not page or page.evaluate(_DOCUMENT_CLOCK) != clock):
+                            raise ValueError("TARGET_PAGE_CHANGED")
+                        if (document is not None and excluded_refs is None
+                                and self._surface_commitment(context, page, clock) != document):
                             raise ValueError("TARGET_PAGE_CHANGED")
 
                 def guard():
