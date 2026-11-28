@@ -2159,7 +2159,7 @@ const script = fs.readFileSync(process.argv[2],'utf8');
         with self.assertRaises(hostops.Denied):
             hostops.parse_event(event("write", "git_reset", params), "write")
 
-    def test_git_sync_never_fetches_on_wrong_branch_origin_or_dirty_state(self):
+    def test_git_sync_never_fetches_on_wrong_branch_origin_or_local_sha(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             old_root = hostops.ROOTS["workspace"]
@@ -2177,14 +2177,6 @@ const script = fs.readFileSync(process.argv[2],'utf8');
                     str(root), "main\n", "https://untrusted.invalid/repo"
                 ]), patch.object(hostops, "_git_write") as write:
                     with self.assertRaisesRegex(hostops.Denied, "GIT_SYNC_ORIGIN_DENIED"):
-                        hostops.perform(req)
-                    write.assert_not_called()
-                with patch.object(hostops, "_git", side_effect=[
-                    str(root), "main\n",
-                    "https://github.com/trung-via/ai-commerce.git",
-                    "a" * 40, "?? newfile.txt\n"
-                ]), patch.object(hostops, "_git_write") as write:
-                    with self.assertRaisesRegex(hostops.Denied, "GIT_SYNC_DIRTY_WORKTREE"):
                         hostops.perform(req)
                     write.assert_not_called()
                 with patch.object(hostops, "_git", side_effect=[
@@ -2214,12 +2206,16 @@ const script = fs.readFileSync(process.argv[2],'utf8');
         self._run_git("-C", producer, "config", "user.name", "HostOps test")
         self._run_git("-C", producer, "config", "user.email", "hostops-test@example.invalid")
         (producer / "README.md").write_text("v1\n", encoding="utf-8")
-        self._run_git("-C", producer, "add", "README.md")
+        (producer / ".gitignore").write_text("*.ignored\n__pycache__/\n", encoding="utf-8")
+        self._run_git("-C", producer, "add", "README.md", ".gitignore")
         self._run_git("-C", producer, "commit", "-m", "v1")
         self._run_git("-C", producer, "push", "origin", "main")
         self._run_git("clone", bare, local)
         local_before = self._run_git("-C", local, "rev-parse", "HEAD")
         (producer / "README.md").write_text("v2\n", encoding="utf-8")
+        (producer / "notes").mkdir()
+        (producer / "notes" / "from-main.txt").write_text("incoming\n", encoding="utf-8")
+        self._run_git("-C", producer, "add", "notes/from-main.txt")
         self._run_git("-C", producer, "commit", "-am", "v2")
         self._run_git("-C", producer, "push", "origin", "main")
         target = self._run_git("-C", producer, "rev-parse", "HEAD")
@@ -2228,13 +2224,24 @@ const script = fs.readFileSync(process.argv[2],'utf8');
     def test_git_sync_real_offline_fast_forward_and_no_replay(self):
         with tempfile.TemporaryDirectory() as tmp:
             bare, _, local, before, target = self._new_local_git_fixture(Path(tmp))
+            operator_files = {
+                "notes/local.bin": b"\x00\x80\xff\n",
+                "notes/local.ignored": b"ignored operator data\r\n",
+                "src/pkg/__pycache__/module.pyc": b"\x00cached bytecode",
+            }
+            for name, data in operator_files.items():
+                path = local / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
             params = {"expected_local_sha": before, "target_sha": target}
             req = hostops.parse_event(event("write", "git_sync_main", params), "write")
             old_root = hostops.ROOTS["workspace"]
             hostops.ROOTS["workspace"] = local
             try:
                 with patch.object(hostops, "TRUSTED_ORIGIN_URLS",
-                                  frozenset([str(bare)])):
+                                  frozenset([str(bare)])), patch.object(
+                    hostops, "_git_write", wraps=hostops._git_write
+                ) as write:
                     result = hostops.perform(req)
                     self.assertEqual(result["git_before_sha"], before)
                     self.assertEqual(result["git_after_sha"], target)
@@ -2243,10 +2250,73 @@ const script = fs.readFileSync(process.argv[2],'utf8');
                     self.assertEqual(
                         self._run_git("-C", local, "rev-parse", "HEAD"), target)
                     self.assertEqual((local / "README.md").read_text(), "v2\n")
+                    self.assertEqual((local / "notes/from-main.txt").read_text(), "incoming\n")
+                    for name, data in operator_files.items():
+                        self.assertEqual((local / name).read_bytes(), data)
+                    write.assert_called_with("merge", "--ff-only", "--no-edit", "--no-autostash",
+                                             "--no-overwrite-ignore", target)
                     with self.assertRaisesRegex(hostops.Denied, "GIT_SYNC_LOCAL_SHA_DRIFT"):
                         hostops.perform(req)
             finally:
                 hostops.ROOTS["workspace"] = old_root
+
+    def test_git_sync_holds_tracked_edits_and_runtime_source_before_fetch(self):
+        for name, staged in (("README.md", False), ("README.md", True),
+                             ("src/local.py", False), ("src/local.ignored", False)):
+            with self.subTest(name=name, staged=staged), tempfile.TemporaryDirectory() as tmp:
+                bare, _, local, before, target = self._new_local_git_fixture(Path(tmp))
+                path = local / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"local modification\n")
+                if staged:
+                    self._run_git("-C", local, "add", name)
+                status = self._run_git("-C", local, "status", "--porcelain", "--ignored")
+                req = hostops.parse_event(event("write", "git_sync_main", {
+                    "expected_local_sha": before, "target_sha": target,
+                }), "write")
+                with patch.dict(hostops.ROOTS, workspace=local), patch.object(
+                    hostops, "TRUSTED_ORIGIN_URLS", frozenset([str(bare)])
+                ), patch.object(hostops, "_git_write") as write:
+                    with self.assertRaisesRegex(hostops.Denied, "GIT_SYNC_DIRTY_WORKTREE"):
+                        hostops.perform(req)
+                    write.assert_not_called()
+                self.assertEqual(self._run_git("-C", local, "rev-parse", "HEAD"), before)
+                self.assertEqual(self._run_git("-C", local, "status", "--porcelain", "--ignored"), status)
+                self.assertEqual(path.read_bytes(), b"local modification\n")
+
+    def test_git_sync_holds_incoming_conflicts_and_preserves_operator_bytes(self):
+        cases = [
+            ("local.bin", "local.bin"),
+            ("local.ignored", "local.ignored"),
+            ("local.bin", "local.bin/incoming.txt"),
+            ("local.ignored/keep.bin", "local.ignored"),
+        ]
+        if os.name == "nt":
+            cases += [("Local.bin", "local.bin"), ("Local.ignored/keep.bin", "local.ignored")]
+        for existing, incoming in cases:
+            with self.subTest(existing=existing, incoming=incoming), tempfile.TemporaryDirectory() as tmp:
+                bare, producer, local, before, _ = self._new_local_git_fixture(Path(tmp))
+                protected = local / existing
+                protected.parent.mkdir(parents=True, exist_ok=True)
+                protected.write_bytes(b"\x00\x80operator data\xff")
+                added = producer / incoming
+                added.parent.mkdir(parents=True, exist_ok=True)
+                added.write_bytes(b"incoming data\n")
+                self._run_git("-C", producer, "add", "-f", incoming)
+                self._run_git("-C", producer, "commit", "-m", "incoming conflict")
+                self._run_git("-C", producer, "push", "origin", "main")
+                target = self._run_git("-C", producer, "rev-parse", "HEAD")
+                req = hostops.parse_event(event("write", "git_sync_main", {
+                    "expected_local_sha": before, "target_sha": target,
+                }), "write")
+                with patch.dict(hostops.ROOTS, workspace=local), patch.object(
+                    hostops, "TRUSTED_ORIGIN_URLS", frozenset([str(bare)])
+                ):
+                    with self.assertRaisesRegex(hostops.Denied, "^GIT_SYNC_FAILED_CHECK_HEAD_NO_RETRY$"):
+                        hostops.perform(req)
+                self.assertEqual(self._run_git("-C", local, "rev-parse", "HEAD"), before)
+                self.assertEqual((local / "README.md").read_text(), "v1\n")
+                self.assertEqual(protected.read_bytes(), b"\x00\x80operator data\xff")
 
     def test_git_sync_target_drift_does_not_change_worktree(self):
         with tempfile.TemporaryDirectory() as tmp:

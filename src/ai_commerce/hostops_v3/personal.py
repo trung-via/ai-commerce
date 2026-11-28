@@ -311,19 +311,19 @@ def _get_path(root_id, relative, *, write=False):
     return target
 
 
-def _git(*args):
+def _git(*args, binary=False):
     root = ROOTS["workspace"]
     if not root.is_dir():
         deny("ROOT_NOT_ENROLLED")
     # Avoid git refreshing/writing index and do not run arbitrary issue commands.
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), *args], capture_output=True, text=True,
+            ["git", "-C", str(root), *args], capture_output=True, text=not binary,
             timeout=12, check=False, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
         )
     except (OSError, subprocess.TimeoutExpired):
         deny("GIT_READ_UNAVAILABLE")
-    if result.returncode:
+    if result.returncode or (binary and result.stderr):
         deny("GIT_READ_FAILED")
     return result.stdout
 
@@ -352,6 +352,64 @@ def _git_write(*args):
     return result.stdout
 
 
+def _sync_untracked_paths(root, dirty_code):
+    status = _git("status", "--porcelain=v1", "-z", "--untracked-files=all",
+                  "--ignored=traditional", "--ignore-submodules=none", binary=True)
+    untracked = []
+    for entry in status.split(b"\0")[:-1]:
+        if not entry.startswith((b"?? ", b"!! ")):
+            deny(dirty_code)
+        path = Path(os.fsdecode(entry[3:]))
+        top, *rest = path.parts
+        if top == "src" or (os.name == "nt" and top.upper() == "SRC"):
+            # Match the runtime checkout's allowance for ignored Python artifacts.
+            if entry.startswith(b"?? ") or not (
+                "__pycache__" in rest[:-1]
+                or (len(rest) == 2 and rest[0] == "ai_commerce.egg-info"
+                    and rest[1] in _CHECKOUT_EGG_INFO_FILES)
+            ):
+                deny(dirty_code)
+            if any(_is_reparse(root / part) for part in (path, *path.parents)):
+                deny(dirty_code)
+        untracked.append(path)
+    # Skip-worktree and assume-unchanged entries can hide tracked edits from status.
+    index = _git("ls-files", "-v", "-z", binary=True)
+    if any(not entry.startswith(b"H ") for entry in index.split(b"\0")[:-1]):
+        deny(dirty_code)
+    return untracked
+
+
+def _sync_check_windows_aliases(root, before, target, untracked):
+    if os.name != "nt" or not untracked:
+        return
+
+    def identity(path, *, incoming_parent=False):
+        try:
+            info = (root / path).lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        if not info.st_ino:
+            deny("GIT_SYNC_DIRTY_AFTER_FETCH")
+        if incoming_parent and info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            deny("GIT_SYNC_FAILED_CHECK_HEAD_NO_RETRY")
+        return info.st_dev, info.st_ino
+
+    # Use filesystem identities for Windows aliases, independently of Git's
+    # case settings. An existing directory can still accept a distinct child.
+    leaves = {identity(path) for path in untracked}
+    parents = {identity(parent) for path in untracked for parent in path.parents[:-1]}
+    if None in leaves or None in parents:
+        deny("GIT_SYNC_DIRTY_AFTER_FETCH")
+    protected = leaves | parents
+    changed = _git("diff", "--name-only", "--no-ext-diff", "--no-renames", "--diff-filter=AMT",
+                   "-z", before, target, "--", binary=True)
+    for entry in changed.split(b"\0")[:-1]:
+        path = Path(os.fsdecode(entry))
+        if (any(identity(parent, incoming_parent=True) in leaves for parent in reversed(path.parents[:-1]))
+                or identity(path) in protected):
+            deny("GIT_SYNC_FAILED_CHECK_HEAD_NO_RETRY")
+
+
 def _sync_main(params):
     """One attended fast-forward, pinned to observed local and remote commits."""
     root = ROOTS["workspace"]
@@ -368,16 +426,14 @@ def _sync_main(params):
     before = _git("rev-parse", "HEAD").strip()
     if before != params["expected_local_sha"]:
         deny("GIT_SYNC_LOCAL_SHA_DRIFT")
-    if _git("status", "--porcelain=v1", "--untracked-files=normal").strip():
-        deny("GIT_SYNC_DIRTY_WORKTREE")
+    _sync_untracked_paths(root, "GIT_SYNC_DIRTY_WORKTREE")
     # Fetch changes only remote-tracking refs, not tracked workspace files.
     _git_write("fetch", "--no-tags", "origin",
                "refs/heads/main:refs/remotes/origin/main")
     if (_git("symbolic-ref", "--quiet", "--short", "HEAD").strip() != "main" or
             _git("rev-parse", "HEAD").strip() != before):
         deny("GIT_SYNC_WORKTREE_DRIFT")
-    if _git("status", "--porcelain=v1", "--untracked-files=normal").strip():
-        deny("GIT_SYNC_DIRTY_AFTER_FETCH")
+    untracked = _sync_untracked_paths(root, "GIT_SYNC_DIRTY_AFTER_FETCH")
     remote = _git("rev-parse", "refs/remotes/origin/main").strip()
     if remote != params["target_sha"]:
         deny("GIT_SYNC_TARGET_MOVED")
@@ -386,13 +442,25 @@ def _sync_main(params):
     except Denied:
         deny("GIT_SYNC_NON_FAST_FORWARD")
     if before != remote:
-        _git_write("merge", "--ff-only", "--no-edit",
-                   "refs/remotes/origin/main")
+        _sync_check_windows_aliases(root, before, remote, untracked)
+        if (_git("symbolic-ref", "--quiet", "--short", "HEAD").strip() != "main" or
+                _git("rev-parse", "HEAD").strip() != before):
+            deny("GIT_SYNC_WORKTREE_DRIFT")
+        try:
+            _git_write("merge", "--ff-only", "--no-edit", "--no-autostash",
+                       "--no-overwrite-ignore", remote)
+        except Denied:
+            try:
+                observed = _git("rev-parse", "HEAD").strip()
+            except (Denied, UnicodeError):
+                deny("GIT_SYNC_UNKNOWN_CHECK_HEAD_NO_RETRY")
+            if observed != before:
+                deny("GIT_SYNC_UNKNOWN_CHECK_HEAD_NO_RETRY")
+            raise
     after = _git("rev-parse", "HEAD").strip()
     if after != remote:
         deny("GIT_SYNC_UNKNOWN_CHECK_HEAD_NO_RETRY")
-    if _git("status", "--porcelain=v1", "--untracked-files=normal").strip():
-        deny("GIT_SYNC_POST_MERGE_DIRTY_CHECK_HEAD")
+    _sync_untracked_paths(root, "GIT_SYNC_POST_MERGE_DIRTY_CHECK_HEAD")
     return {
         "status": "OBSERVED", "operation": "git_sync_main",
         "git_before_sha": before, "git_after_sha": after,
