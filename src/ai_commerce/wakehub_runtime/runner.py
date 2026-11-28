@@ -276,6 +276,11 @@ class SourceEvent:
 _EF02_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 
 
+def _execution_objective(value: object) -> bool:
+    return (type(value) is str and 0 < len(value) <= 32768
+            and not any(char == "\0" or 0xD800 <= ord(char) <= 0xDFFF for char in value))
+
+
 @dataclass(frozen=True, repr=False)
 class ExecutionRequest:
     """Exact contract explicitly submitted by the private journal owner."""
@@ -286,9 +291,7 @@ class ExecutionRequest:
 
     def __post_init__(self) -> None:
         _require(all(_reference(value) and value.isascii() for value in (self.key, self.consumer, self.operation_slot))
-                 and type(self.objective) is str and 0 < len(self.objective) <= 32768
-                 and not any(char == "\0" or 0xD800 <= ord(char) <= 0xDFFF for char in self.objective),
-                 "EXECUTION_REQUEST_INVALID")
+                 and _execution_objective(self.objective), "EXECUTION_REQUEST_INVALID")
 
 
 @dataclass(frozen=True)
@@ -343,6 +346,156 @@ class ExecutionLineage:
     @property
     def status(self) -> Literal["PENDING", "HOLD"]:
         return "HOLD" if self.code == "EXECUTION_ALIAS_CONFLICT" else "PENDING"
+
+
+def _execution_id(value: object) -> bool:
+    return type(value) is str and re.fullmatch(r"[0-9a-f]{32}", value) is not None
+
+
+def _decision_ref(value: object) -> bool:
+    return _reference(value) and len(value) <= 256 and value.isascii()
+
+
+@dataclass(frozen=True)
+class DecisionCoverage:
+    identity: SourceIdentity
+    event_key: str
+    selector: ExecutionAlias
+    payload_sha256: str
+
+    def __post_init__(self) -> None:
+        _require(type(self.identity) is SourceIdentity and type(self.selector) is ExecutionAlias
+                 and self.selector.kind == ("ef02_attempt" if self.identity.kind == _EF02 else "github_issue")
+                 and _chrome_digest(self.event_key) and _chrome_digest(self.payload_sha256),
+                 "DECISION_COVERAGE_INVALID")
+
+    @classmethod
+    def _from_record(cls, raw: dict) -> DecisionCoverage:
+        alias = raw["selector"]
+        return cls(SourceIdentity(**raw["identity"]), raw["event_key"],
+                   ExecutionAlias(alias["kind"], tuple(alias["parts"])), raw["payload_sha256"])
+
+
+@dataclass(frozen=True)
+class DecisionSourceEvidence:
+    coverage: DecisionCoverage
+    lineage: ExecutionLineage
+    custody: Literal["EFFECT_RESERVED", "OBSERVED_COMPLETION", "UNKNOWN"] | None
+
+
+@dataclass(frozen=True, repr=False)
+class DecisionDemand:
+    """One admitted Execution's bounded obligation at an explicit scope revision."""
+
+    execution_id: str
+    consumer: str
+    obligation: str
+    revision: str
+    coverage: tuple[DecisionCoverage, ...]
+    classification: Literal["UNCLASSIFIED", "RECORD_ONLY", "DECISION_NEEDED"] = "UNCLASSIFIED"
+
+    def __post_init__(self) -> None:
+        _require(_execution_id(self.execution_id)
+                 and all(_decision_ref(v) for v in (self.consumer, self.obligation, self.revision))
+                 and type(self.coverage) is tuple and 1 <= len(self.coverage) <= 32
+                 and all(type(item) is DecisionCoverage for item in self.coverage)
+                 and self.classification in ("UNCLASSIFIED", "RECORD_ONLY", "DECISION_NEEDED"),
+                 "DECISION_DEMAND_INVALID")
+        canonical = tuple(sorted(set(self.coverage), key=lambda item: json.dumps(asdict(item), sort_keys=True)))
+        object.__setattr__(self, "coverage", canonical)
+
+    @property
+    def obligation_key(self) -> str:
+        return digest(["wakehub-obligation.v1", self.execution_id, self.consumer, self.obligation])
+
+    @property
+    def decision_id(self) -> str:
+        return digest(["wakehub-decision.v1", self.obligation_key, self.revision])
+
+
+@dataclass(frozen=True)
+class EffectIdentity:
+    """Exact consumer-described resource/scope coordinates for collision checks."""
+
+    namespace: str
+    resource: str
+    scope: str
+
+    def __post_init__(self) -> None:
+        _require(all(_decision_ref(v) for v in (self.namespace, self.resource, self.scope)),
+                 "DECISION_EFFECT_SCOPE_INVALID")
+
+
+@dataclass(frozen=True, repr=False)
+class NextOperation:
+    consumer: str
+    scope: str
+    slot: str
+    objective: str
+    effect: EffectIdentity | None = None
+
+    def __post_init__(self) -> None:
+        _require(all(_decision_ref(v) for v in (self.consumer, self.scope, self.slot))
+                 and _execution_objective(self.objective)
+                 and (self.effect is None or type(self.effect) is EffectIdentity),
+                 "DECISION_OPERATION_INVALID")
+
+    @property
+    def operation_id(self) -> str:
+        return digest(["wakehub-operation.v1", self.consumer, self.scope, self.slot])
+
+    @property
+    def request(self) -> ExecutionRequest:
+        return ExecutionRequest("decision-operation:" + self.operation_id, self.objective, self.consumer, self.slot)
+
+
+@dataclass(frozen=True, repr=False)
+class DecisionProposal:
+    decision_id: str
+    version: int
+    proposal_sha256: str
+    expected_checkpoint: str | None = None
+    next_operation: NextOperation | None = None
+
+    def __post_init__(self) -> None:
+        _require(_chrome_digest(self.decision_id) and _github_id(self.version)
+                 and _chrome_digest(self.proposal_sha256)
+                 and (self.expected_checkpoint is None or _chrome_digest(self.expected_checkpoint))
+                 and (self.next_operation is None or type(self.next_operation) is NextOperation),
+                 "DECISION_PROPOSAL_INVALID")
+
+
+@dataclass(frozen=True)
+class OperationIntent:
+    """Stored custody state. U1b can create only PENDING_INTENT."""
+
+    operation: NextOperation
+    execution_id: str
+    state: Literal["PENDING_INTENT", "RECEIVER_RESERVED", "EFFECT_RESERVED", "OBSERVED_COMPLETION", "UNKNOWN"]
+    effect_scope_status: Literal["EXACT_EFFECT_IDENTITY_RECORDED", "EFFECT_OVERLAP_UNPROVEN"]
+
+    @property
+    def operation_id(self) -> str:
+        return self.operation.operation_id
+
+
+@dataclass(frozen=True)
+class DecisionPlan:
+    decision_id: str
+    version: int
+    proposal_sha256: str
+    decision_sha256: str
+    checkpoint: str
+    previous_checkpoint: str | None
+    operation: OperationIntent | None
+
+    @property
+    def authority(self) -> Literal["PENDING_AUTHORITY"]:
+        return "PENDING_AUTHORITY"
+
+    @property
+    def missing_capabilities(self) -> tuple[str, str]:
+        return ("BRAIN_DECISION_INGRESS_UNAVAILABLE", "ATTEMPT_ACTIVATION_UNVERIFIED")
 
 
 class EventSource(Protocol):
@@ -1487,13 +1640,40 @@ _EXECUTION_TABLES = {
                                "source_key TEXT PRIMARY KEY REFERENCES source_identities(source_key), "
                                "source_event TEXT NOT NULL)",
 }
+# Created together at the first owner decision write. The authenticated
+# evidence remains in the existing source tables.
+_DECISION_TABLES = {
+    "decision_demands": "CREATE TABLE decision_demands (decision_id TEXT PRIMARY KEY, obligation_key TEXT NOT NULL, "
+                        "contract TEXT NOT NULL)",
+    "decision_outbox": "CREATE TABLE decision_outbox (operation_id TEXT PRIMARY KEY, "
+                       "execution_id TEXT NOT NULL UNIQUE REFERENCES execution_requests(execution_id), "
+                       "effect_key TEXT UNIQUE, contract TEXT NOT NULL, state TEXT NOT NULL "
+                       "CHECK(state IN ('PENDING_INTENT', 'RECEIVER_RESERVED', 'EFFECT_RESERVED', "
+                       "'OBSERVED_COMPLETION', 'UNKNOWN')))",
+    "decision_proposals": "CREATE TABLE decision_proposals ("
+                          "decision_id TEXT NOT NULL REFERENCES decision_demands(decision_id), "
+                          "version INTEGER NOT NULL CHECK(version > 0), checkpoint TEXT NOT NULL UNIQUE, "
+                          "previous_checkpoint TEXT REFERENCES decision_proposals(checkpoint), "
+                          "proposal_sha256 TEXT NOT NULL, decision_sha256 TEXT NOT NULL, "
+                          "operation_id TEXT REFERENCES decision_outbox(operation_id), PRIMARY KEY(decision_id, version))",
+    "decision_checkpoints": "CREATE TABLE decision_checkpoints (obligation_key TEXT PRIMARY KEY, "
+                            "checkpoint TEXT NOT NULL REFERENCES decision_proposals(checkpoint))",
+}
 _APP_ID = 0x57485231
 
 
-def _has_execution_tables(schemas: dict) -> bool:
-    present = {name: schemas[name] for name in _EXECUTION_TABLES if name in schemas}
-    _require(not present or present == _EXECUTION_TABLES, "JOURNAL_SCHEMA_INCOMPATIBLE")
+def _has_table_group(schemas: dict, expected: dict) -> bool:
+    present = {name: schemas[name] for name in expected if name in schemas}
+    _require(not present or present == expected, "JOURNAL_SCHEMA_INCOMPATIBLE")
     return bool(present)
+
+
+def _extension_tables(schemas: dict) -> tuple[bool, bool]:
+    execution = _has_table_group(schemas, _EXECUTION_TABLES)
+    decisions = _has_table_group(schemas, _DECISION_TABLES)
+    _require(not decisions or (execution and schemas.get("source_identities") == _SOURCE_TABLE
+                               and schemas.get("events") == _TABLES["events"]), "JOURNAL_SCHEMA_INCOMPATIBLE")
+    return execution, decisions
 
 
 def _execution_aliases(identity: SourceIdentity, source_event: dict) -> tuple[ExecutionAlias, ...]:
@@ -1827,11 +2007,12 @@ def _validate_records(data: dict, registration: Registration) -> None:
 
 
 class _SQLiteTransaction:
-    def __init__(self, connection, journal, registration, owner, source_table, execution_tables):
+    def __init__(self, connection, journal, registration, owner, source_table, execution_tables, decision_tables):
         self.connection, self.journal = connection, journal
         self.registration, self.owner = registration, owner
         self.source_table = source_table
         self.execution_tables = execution_tables
+        self.decision_tables = decision_tables
 
     def stage_execution_source(self, data: dict, event: SourceEvent, verified: dict | None) -> bool:
         # D1's validated selector-only event keeps the projection checkable
@@ -1855,16 +2036,20 @@ class _SQLiteTransaction:
                 self.connection.execute(sql)
 
     @contextmanager
-    def execution_write(self):
+    def execution_write(self, *, decisions: bool = False):
         self.journal._owner(self.owner)
         db = self.connection
         try:
             db.execute("BEGIN IMMEDIATE")
             self._create_execution_tables()
+            if decisions and not self.decision_tables:
+                for sql in _DECISION_TABLES.values():
+                    db.execute(sql)
             yield db
             self.journal._owner(self.owner)
             db.commit()
             self.execution_tables = True
+            self.decision_tables = self.decision_tables or decisions
         except BaseException:
             db.rollback()
             raise
@@ -1997,19 +2182,26 @@ class Journal:
         """Allocate one opaque ID in an enrolled journal for an explicit owner request."""
         _require(type(request) is ExecutionRequest, "EXECUTION_REQUEST_INVALID")
         _require(_reference(principal), "EXECUTION_OWNER_REQUIRED")
-        contract = json.dumps((request.objective, request.consumer, request.operation_slot))
         with self.locked(registration, execution_owner=principal) as (txn, _), txn.execution_write() as db:
             row = db.execute("SELECT execution_id, contract FROM execution_requests WHERE request_key=?",
                              (request.key,)).fetchone()
             if row is not None:
                 execution_id, saved = row
-                _require(type(execution_id) is str and re.fullmatch(r"[0-9a-f]{32}", execution_id),
-                         "EXECUTION_REGISTRY_INVALID")
-                _require(saved == contract, "EXECUTION_REQUEST_CONFLICT")
+                _require(_execution_id(execution_id), "EXECUTION_REGISTRY_INVALID")
+                _require(saved == self._execution_contract(request), "EXECUTION_REQUEST_CONFLICT")
                 return execution_id
-            execution_id = token_hex(16)
-            db.execute("INSERT INTO execution_requests VALUES (?, ?, ?)", (request.key, execution_id, contract))
-            return execution_id
+            return self._insert_execution(db, request)
+
+    @staticmethod
+    def _execution_contract(request: ExecutionRequest) -> str:
+        return json.dumps((request.objective, request.consumer, request.operation_slot))
+
+    @classmethod
+    def _insert_execution(cls, db, request: ExecutionRequest) -> str:
+        execution_id = token_hex(16)
+        db.execute("INSERT INTO execution_requests VALUES (?, ?, ?)",
+                   (request.key, execution_id, cls._execution_contract(request)))
+        return execution_id
 
     def record_execution_attempt(self, registration: Registration, attempt: ExecutionAttempt, *,
                                  principal: str) -> None:
@@ -2041,45 +2233,81 @@ class Journal:
     def execution_lineage(self, registration: Registration, identity: SourceIdentity, *,
                           principal: str) -> tuple[ExecutionLineage, ...]:
         """Read authenticated event selectors and their observed attempt associations."""
+        return tuple(item.lineage for item in self.decision_source_evidence(registration, identity, principal=principal))
+
+    def decision_source_evidence(self, registration: Registration, identity: SourceIdentity, *,
+                                 principal: str) -> tuple[DecisionSourceEvidence, ...]:
+        """Read authenticated intake as evidence, before any obligation is classified."""
         _require(type(identity) is SourceIdentity, "SOURCE_IDENTITY_INVALID")
+        with self._registered_snapshot(registration, principal) as (db, execution, _):
+            return self._decision_evidence(db, identity, registration) if execution else ()
+
+    @contextmanager
+    def _registered_snapshot(self, registration: Registration, principal: str):
         with _private_access(self.path, self.repository_root) as (owner, _):
             _require(owner == principal, "JOURNAL_OWNER_DRIFT")
             self._owner(owner)
             if not self.path.exists():
-                return ()
+                yield None, False, False
+                return
             with closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=0)) as db:
                 db.execute("PRAGMA trusted_schema=OFF")
                 db.execute("BEGIN")
                 _require(db.execute("PRAGMA user_version").fetchone() in ((2,), (3,))
                          and db.execute("PRAGMA application_id").fetchone() == (_APP_ID,),
                          "JOURNAL_SCHEMA_INCOMPATIBLE")
-                schemas = dict(db.execute("SELECT name, sql FROM sqlite_master WHERE type='table'"))
+                schemas = dict(db.execute("SELECT name, CASE WHEN type='table' THEN sql END FROM sqlite_master"))
                 _require(schemas.get("identity") == _TABLES["identity"], "JOURNAL_SCHEMA_INCOMPATIBLE")
                 self._check_registration(db, owner, registration)
-                if not _has_execution_tables(schemas):
-                    return ()
-                proof = db.execute("SELECT source_event FROM execution_source_events WHERE source_key=?",
-                                   (identity.key,)).fetchone()
-                if proof is None:
-                    return ()
-                _require(schemas.get("source_identities") == _SOURCE_TABLE
-                         and schemas.get("events") == _TABLES["events"], "JOURNAL_SCHEMA_INCOMPATIBLE")
-                aliases = self._read_execution_aliases(db, identity, registration, proof[0])
-                if identity.kind == _ISSUE:
-                    return (ExecutionLineage(aliases[0], "OWNER_REQUEST_PRODUCER_UNAVAILABLE"),)
-                return tuple(self._correlate_execution_alias(db, identity, alias) for alias in aliases)
+                execution, decisions = _extension_tables(schemas)
+                if execution and db.execute("SELECT 1 FROM execution_source_events LIMIT 1").fetchone():
+                    _require(schemas.get("source_identities") == _SOURCE_TABLE
+                             and schemas.get("events") == _TABLES["events"], "JOURNAL_SCHEMA_INCOMPATIBLE")
+                yield db, execution, decisions
+
+    @classmethod
+    def _decision_evidence(cls, db, identity: SourceIdentity,
+                           registration: Registration, *,
+                           selector: ExecutionAlias | None = None) -> tuple[DecisionSourceEvidence, ...]:
+        proof = db.execute("SELECT source_event FROM execution_source_events WHERE source_key=?",
+                           (identity.key,)).fetchone()
+        if proof is None:
+            return ()
+        stored, event_key, record, aliases = cls._read_execution_source(db, identity, registration, proof[0])
+        status = record["status"]
+        custody = None
+        if status == "UNKNOWN_EFFECT":
+            custody = "UNKNOWN"
+        elif status == "RESERVED":
+            custody = "EFFECT_RESERVED"
+        elif _DELIVERY_STATES.intersection(record["history"]):
+            custody = "OBSERVED_COMPLETION"
+        return tuple(
+            DecisionSourceEvidence(
+                DecisionCoverage(stored, event_key, alias, record["event"]["payload_sha256"]),
+                ExecutionLineage(alias, "OWNER_REQUEST_PRODUCER_UNAVAILABLE") if stored.kind == _ISSUE
+                else cls._correlate_execution_alias(db, stored, alias), custody)
+            for alias in aliases if selector is None or alias == selector
+        )
 
     @staticmethod
-    def _read_execution_aliases(db, identity: SourceIdentity, registration: Registration,
-                                proof: str) -> tuple[ExecutionAlias, ...]:
+    def _read_execution_source(
+        db, identity: SourceIdentity, registration: Registration, proof: str,
+    ) -> tuple[SourceIdentity, str, dict, tuple[ExecutionAlias, ...]]:
         row = db.execute("SELECT identity, event_key, record FROM source_identities JOIN events USING(event_key) "
                          "WHERE source_key=?", (identity.key,)).fetchone()
         _require(row is not None, "EXECUTION_LINEAGE_INVALID")
         try:
             stored = SourceIdentity(**_decode_unique(row[0]))
-            raw = _decode_unique(row[2])["event"]
+            record = _decode_unique(row[2])
+            raw = record["event"]
             source = _decode_unique(proof)
-            _require(stored.key == identity.key and type(source) is dict, "EXECUTION_LINEAGE_INVALID")
+            history = record["history"]
+            _require(stored.key == identity.key and type(source) is dict
+                     and type(history) is list and 1 <= len(history) <= 6
+                     and history[0] == "PENDING" and record["status"] == history[-1]
+                     and all(next_state in _NEXT.get(state, set()) for state, next_state in zip(history, history[1:])),
+                     "EXECUTION_LINEAGE_INVALID")
             if identity.kind == _ISSUE:
                 _require(row[1] == stored.key and _issue_record_event(raw, registration).identity == stored,
                          "EXECUTION_LINEAGE_INVALID")
@@ -2090,7 +2318,7 @@ class Journal:
                          (stored.repository, stored.object_id, stored.attempt)
                          and event.event_id == source["event_id"] and event.attempt == stored.attempt
                          and digest(source) == event.payload_sha256, "EXECUTION_LINEAGE_INVALID")
-            return _execution_aliases(stored, source)
+            return stored, row[1], record, _execution_aliases(stored, source)
         except (TypeError, KeyError, ValueError):
             raise RuntimeHold("EXECUTION_LINEAGE_INVALID") from None
 
@@ -2110,11 +2338,208 @@ class Journal:
         if len(rows) != 1 or rows[0][2:] != (alias.parts[3], identity.object_id, identity.attempt):
             return ExecutionLineage(alias, "EXECUTION_ALIAS_CONFLICT", parents=parents)
         execution_id, number, _, _, _ = rows[0]
-        _require(type(execution_id) is str and re.fullmatch(r"[0-9a-f]{32}", execution_id)
-                 and _github_id(number), "EXECUTION_REGISTRY_INVALID")
+        _require(_execution_id(execution_id) and _github_id(number), "EXECUTION_REGISTRY_INVALID")
         # Completion authenticates the source selectors. U1a lacks independent proof of scoped
         # admission and activation and, for a successor, prior NO_EFFECT and new authorization.
         return ExecutionLineage(alias, "ATTEMPT_ACTIVATION_UNVERIFIED", execution_id, number, parents)
+
+    def record_decision_demand(self, registration: Registration, demand: DecisionDemand, *, principal: str) -> str:
+        """Bind explicit local owner classification to independently verified coverage."""
+        _require(type(demand) is DecisionDemand, "DECISION_DEMAND_INVALID")
+        _require(_reference(principal), "EXECUTION_OWNER_REQUIRED")
+        decision_id = demand.decision_id
+        with self.locked(registration, execution_owner=principal) as (txn, _), txn.execution_write(decisions=True) as db:
+            saved = self._read_decision_demand(db, decision_id)
+            if saved is not None:
+                _require(saved == demand, "DECISION_DEMAND_CONFLICT")
+                return decision_id
+            self._verify_decision_coverage(db, registration, demand)
+            db.execute("INSERT INTO decision_demands VALUES (?, ?, ?)",
+                       (decision_id, demand.obligation_key, json.dumps(asdict(demand), sort_keys=True)))
+            return decision_id
+
+    def decision_demand(self, registration: Registration, decision_id: str, *,
+                        principal: str) -> DecisionDemand | None:
+        _require(_chrome_digest(decision_id), "DECISION_DEMAND_INVALID")
+        with self._registered_snapshot(registration, principal) as (db, _, decisions):
+            return self._read_decision_demand(db, decision_id) if decisions else None
+
+    @staticmethod
+    def _read_decision_demand(db, decision_id: str) -> DecisionDemand | None:
+        row = db.execute("SELECT obligation_key, contract FROM decision_demands WHERE decision_id=?",
+                         (decision_id,)).fetchone()
+        if row is None:
+            return None
+        try:
+            fields = _decode_unique(row[1])
+            fields["coverage"] = tuple(DecisionCoverage._from_record(value) for value in fields["coverage"])
+            demand = DecisionDemand(**fields)
+            _require((demand.obligation_key, json.dumps(asdict(demand), sort_keys=True)) == row
+                     and demand.decision_id == decision_id, "DECISION_JOURNAL_INVALID")
+            return demand
+        except (TypeError, KeyError, ValueError):
+            raise RuntimeHold("DECISION_JOURNAL_INVALID") from None
+
+    @classmethod
+    def _verify_decision_coverage(cls, db, registration: Registration, demand: DecisionDemand) -> None:
+        row = db.execute("SELECT request_key, contract FROM execution_requests WHERE execution_id=?",
+                         (demand.execution_id,)).fetchone()
+        _require(row is not None, "EXECUTION_REQUEST_UNKNOWN")
+        try:
+            execution = ExecutionRequest(row[0], *_decode_unique(row[1]))
+            _require(cls._execution_contract(execution) == row[1], "EXECUTION_REGISTRY_INVALID")
+        except (TypeError, ValueError):
+            raise RuntimeHold("EXECUTION_REGISTRY_INVALID") from None
+        _require(execution.consumer == demand.consumer, "DECISION_EXECUTION_SCOPE_UNPROVEN")
+        for coverage in demand.coverage:
+            evidence = cls._decision_evidence(db, coverage.identity, registration, selector=coverage.selector)
+            matched = next((item for item in evidence if item.coverage == coverage), None)
+            _require(matched is not None, "DECISION_SOURCE_UNVERIFIED")
+            _require(matched.lineage.execution_id == demand.execution_id, "DECISION_EXECUTION_SCOPE_UNPROVEN")
+
+    @classmethod
+    def _check_decision_source_custody(cls, db, registration: Registration, demand: DecisionDemand) -> None:
+        # Coverage anchors the demand. Custody follows every exact bound attempt
+        # of the Execution. Wake evidence establishes the local delivery state.
+        unverified = False
+        for number, repository, batch, action, attempt, run, run_attempt in db.execute(
+                "SELECT number, repository, batch_id, action_id, attempt_id, run_id, run_attempt "
+                "FROM execution_attempts WHERE execution_id=?", (demand.execution_id,)):
+            try:
+                identity = SourceIdentity(_EF02, repository, run, run_attempt)
+                selector = ExecutionAlias("ef02_attempt", (repository, batch, action, attempt))
+                evidence = cls._decision_evidence(db, identity, registration, selector=selector)
+            except RuntimeHold:
+                unverified = True
+                continue
+            if (len(evidence) != 1 or (evidence[0].lineage.execution_id, evidence[0].lineage.attempt_number)
+                    != (demand.execution_id, number)):
+                unverified = True
+                continue
+            _require(evidence[0].custody not in ("EFFECT_RESERVED", "UNKNOWN"),
+                     "DECISION_SOURCE_CUSTODY_UNRESOLVED")
+        _require(not unverified, "DECISION_SOURCE_CUSTODY_UNVERIFIED")
+
+    def record_decision_plan(self, registration: Registration, proposal: DecisionProposal, *,
+                             principal: str) -> DecisionPlan:
+        """Advance the local planning checkpoint under CAS. Brain acceptance belongs to U2."""
+        _require(type(proposal) is DecisionProposal, "DECISION_PROPOSAL_INVALID")
+        _require(_reference(principal), "EXECUTION_OWNER_REQUIRED")
+        with self.locked(registration, execution_owner=principal) as (txn, _), txn.execution_write(decisions=True) as db:
+            demand = self._read_decision_demand(db, proposal.decision_id)
+            _require(demand is not None and demand.classification == "DECISION_NEEDED", "DECISION_NOT_REQUESTED")
+            decision_sha, checkpoint = self._decision_commitments(demand, proposal)
+            saved = self._read_decision_plan(db, demand, version=proposal.version)
+            if saved is not None:
+                _require(saved.checkpoint == checkpoint, "DECISION_PROPOSAL_CONFLICT")
+                return saved
+            latest = self._read_decision_plan(db, demand, version=None)
+            _require(proposal.expected_checkpoint == (latest.checkpoint if latest else None),
+                     "DECISION_CHECKPOINT_STALE")
+            previous_version, = db.execute("SELECT MAX(version) FROM decision_proposals WHERE decision_id=?",
+                                           (demand.decision_id,)).fetchone()
+            _require(proposal.version == (previous_version or 0) + 1, "DECISION_VERSION_OUT_OF_SEQUENCE")
+            self._verify_decision_coverage(db, registration, demand)
+            self._check_decision_source_custody(db, registration, demand)
+            operation = self._admit_decision_operation(db, proposal.next_operation) if proposal.next_operation else None
+            db.execute("INSERT INTO decision_proposals VALUES (?, ?, ?, ?, ?, ?, ?)",
+                       (demand.decision_id, proposal.version, checkpoint, proposal.expected_checkpoint,
+                        proposal.proposal_sha256, decision_sha, operation.operation_id if operation else None))
+            db.execute("INSERT INTO decision_checkpoints VALUES (?, ?) ON CONFLICT(obligation_key) "
+                       "DO UPDATE SET checkpoint=excluded.checkpoint", (demand.obligation_key, checkpoint))
+            return DecisionPlan(demand.decision_id, proposal.version, proposal.proposal_sha256, decision_sha, checkpoint,
+                                proposal.expected_checkpoint, operation)
+
+    def decision_plan(self, registration: Registration, decision_id: str, *, principal: str,
+                      version: int | None = None) -> DecisionPlan | None:
+        """Read an exact proposal version, or the current checkpoint for its obligation."""
+        _require(_chrome_digest(decision_id) and (version is None or _github_id(version)),
+                 "DECISION_PROPOSAL_INVALID")
+        with self._registered_snapshot(registration, principal) as (db, _, decisions):
+            demand = self._read_decision_demand(db, decision_id) if decisions else None
+            return self._read_decision_plan(db, demand, version=version) if demand is not None else None
+
+    @staticmethod
+    def _decision_commitments(demand: DecisionDemand, proposal: DecisionProposal) -> tuple[str, str]:
+        source_proof = bytes_digest(json.dumps(asdict(demand), sort_keys=True).encode("ascii"))
+        operation = (bytes_digest(json.dumps(asdict(proposal.next_operation), sort_keys=True).encode("ascii"))
+                     if proposal.next_operation else None)
+        decision_sha = digest(["wakehub-decision-proposal.v1", demand.decision_id, proposal.version,
+                               source_proof, proposal.proposal_sha256, operation])
+        return decision_sha, digest(["wakehub-planning-checkpoint.v1", proposal.expected_checkpoint, decision_sha])
+
+    @classmethod
+    def _read_decision_plan(cls, db, demand: DecisionDemand, *, version: int | None) -> DecisionPlan | None:
+        if version is None:
+            head = db.execute("SELECT checkpoint FROM decision_checkpoints WHERE obligation_key=?",
+                              (demand.obligation_key,)).fetchone()
+            if head is None:
+                return None
+            row = db.execute("SELECT * FROM decision_proposals WHERE checkpoint=?", head).fetchone()
+            _require(row is not None, "DECISION_JOURNAL_INVALID")
+        else:
+            row = db.execute("SELECT * FROM decision_proposals WHERE decision_id=? AND version=?",
+                             (demand.decision_id, version)).fetchone()
+            if row is None:
+                return None
+        decision_id, version, checkpoint, previous, proposal_sha, decision_sha, operation_id = row
+        saved = cls._read_decision_demand(db, decision_id)
+        _require(saved is not None and saved.obligation_key == demand.obligation_key
+                 and saved.classification == "DECISION_NEEDED", "DECISION_JOURNAL_INVALID")
+        if previous is not None:
+            _require(previous != checkpoint and db.execute(
+                "SELECT 1 FROM decision_proposals JOIN decision_demands USING(decision_id) "
+                "WHERE checkpoint=? AND obligation_key=?", (previous, saved.obligation_key)).fetchone() is not None,
+                "DECISION_JOURNAL_INVALID")
+        intent = cls._read_decision_operation(db, operation_id) if operation_id is not None else None
+        proposal = DecisionProposal(decision_id, version, proposal_sha, previous, intent.operation if intent else None)
+        _require(cls._decision_commitments(saved, proposal) == (decision_sha, checkpoint), "DECISION_JOURNAL_INVALID")
+        return DecisionPlan(decision_id, version, proposal_sha, decision_sha, checkpoint, previous, intent)
+
+    @staticmethod
+    def _effect_key(operation: NextOperation) -> str | None:
+        return digest(["wakehub-effect-scope.v1", asdict(operation.effect)]) if operation.effect else None
+
+    @classmethod
+    def _read_decision_operation(cls, db, operation_id: str) -> OperationIntent:
+        row = db.execute("SELECT execution_id, effect_key, decision_outbox.contract, state, request_key, "
+                         "execution_requests.contract FROM decision_outbox JOIN execution_requests USING(execution_id) "
+                         "WHERE operation_id=?", (operation_id,)).fetchone()
+        _require(row is not None, "DECISION_JOURNAL_INVALID")
+        execution_id, effect_key, contract, state, request_key, request_contract = row
+        try:
+            fields = _decode_unique(contract)
+            if fields["effect"] is not None:
+                fields["effect"] = EffectIdentity(**fields["effect"])
+            operation = NextOperation(**fields)
+            _require(operation_id == operation.operation_id and _execution_id(execution_id)
+                     and effect_key == cls._effect_key(operation) and request_key == operation.request.key
+                     and request_contract == cls._execution_contract(operation.request)
+                     and contract == json.dumps(asdict(operation), sort_keys=True)
+                     and state in ("PENDING_INTENT", "RECEIVER_RESERVED", "EFFECT_RESERVED", "OBSERVED_COMPLETION", "UNKNOWN"),
+                     "DECISION_JOURNAL_INVALID")
+        except (TypeError, KeyError, ValueError):
+            raise RuntimeHold("DECISION_JOURNAL_INVALID") from None
+        scope = "EXACT_EFFECT_IDENTITY_RECORDED" if effect_key else "EFFECT_OVERLAP_UNPROVEN"
+        return OperationIntent(operation, execution_id, state, scope)
+
+    @classmethod
+    def _admit_decision_operation(cls, db, operation: NextOperation) -> OperationIntent:
+        operation_id = operation.operation_id
+        if db.execute("SELECT 1 FROM decision_outbox WHERE operation_id=?", (operation_id,)).fetchone():
+            intent = cls._read_decision_operation(db, operation_id)
+            _require(operation == intent.operation, "DECISION_OPERATION_CONFLICT")
+            return intent
+        effect_key = cls._effect_key(operation)
+        if effect_key is not None:
+            _require(db.execute("SELECT 1 FROM decision_outbox WHERE effect_key=?", (effect_key,)).fetchone() is None,
+                     "DECISION_EFFECT_SCOPE_CONFLICT")
+        _require(db.execute("SELECT 1 FROM execution_requests WHERE request_key=?", (operation.request.key,)).fetchone()
+                 is None, "DECISION_OPERATION_CONFLICT")
+        execution_id = cls._insert_execution(db, operation.request)
+        db.execute("INSERT INTO decision_outbox VALUES (?, ?, ?, ?, 'PENDING_INTENT')",
+                   (operation_id, execution_id, effect_key, json.dumps(asdict(operation), sort_keys=True)))
+        return cls._read_decision_operation(db, operation_id)
 
     def enrolled_origin(self, registration: Registration, principal: str, *, for_upgrade: bool = False,
                         for_retirement: bool = False) -> dict | None:
@@ -2134,8 +2559,8 @@ class Journal:
                 _require(db.execute("PRAGMA user_version").fetchone() in ((2,), (3,))
                          and db.execute("PRAGMA application_id").fetchone() == (_APP_ID,),
                          "JOURNAL_SCHEMA_INCOMPATIBLE")
-                schemas = dict(db.execute("SELECT name, sql FROM sqlite_master WHERE type='table'"))
-                _has_execution_tables(schemas)
+                schemas = dict(db.execute("SELECT name, CASE WHEN type='table' THEN sql END FROM sqlite_master"))
+                _, decision_tables = _extension_tables(schemas)
                 _require(schemas.get("identity") == _TABLES["identity"], "JOURNAL_SCHEMA_INCOMPATIBLE")
                 self._check_registration(db, owner, registration)
                 if "local_origin" not in schemas and not (for_upgrade or for_retirement):
@@ -2150,6 +2575,11 @@ class Journal:
                 if for_upgrade or for_retirement:
                     # The tick slot excludes synchronous effects. Durable
                     # records still need to rule out detached or interrupted ones.
+                    if decision_tables:
+                        _require(db.execute("SELECT 1 FROM decision_outbox "
+                                            "WHERE state IN ('RECEIVER_RESERVED', 'EFFECT_RESERVED', 'UNKNOWN') "
+                                            "LIMIT 1").fetchone() is None,
+                                 "DECISION_OPERATION_CUSTODY_UNRESOLVED")
                     _require(schemas.get("events") == _TABLES["events"], "JOURNAL_SCHEMA_INCOMPATIBLE")
                     if for_retirement:
                         _require(db.execute("PRAGMA quick_check").fetchall() == [("ok",)], "JOURNAL_CORRUPT")
@@ -2239,7 +2669,7 @@ class Journal:
                 db.execute("PRAGMA trusted_schema=OFF")
                 _require(db.execute("PRAGMA quick_check").fetchall() == [("ok",)], "JOURNAL_CORRUPT")
                 version = 2
-                source_table = origin_table = cursor_table = execution_tables = False
+                source_table = origin_table = cursor_table = execution_tables = decision_tables = False
                 if not new:
                     version, = db.execute("PRAGMA user_version").fetchone()
                     tables = dict(_TABLES, chrome_lifecycle=_CHROME_TABLE) if version == 3 else _TABLES
@@ -2254,10 +2684,12 @@ class Journal:
                     cursor_table = ("table", "standing_ef02_cursor", _STANDING_CURSOR_TABLE) in stored_tables
                     if cursor_table:
                         tables = dict(tables, standing_ef02_cursor=_STANDING_CURSOR_TABLE)
-                    execution_tables = _has_execution_tables({name: sql for kind, name, sql in stored_tables
-                                                             if kind == "table"})
+                    execution_tables, decision_tables = _extension_tables(
+                        {name: sql if kind == "table" else None for kind, name, sql in stored_tables})
                     if execution_tables:
                         tables = dict(tables, **_EXECUTION_TABLES)
+                    if decision_tables:
+                        tables = dict(tables, **_DECISION_TABLES)
                     _require(version in (2, 3)
                              and db.execute("PRAGMA application_id").fetchone() == (_APP_ID,)
                              and stored_tables == [("table", name, sql) for name, sql in sorted(tables.items())],
@@ -2301,7 +2733,8 @@ class Journal:
                     _require(len(rows) == 1 and rows[0][0] == 1, "CHROME_JOURNAL_INVALID")
                     data["chrome"] = _decode_unique(rows[0][1])
                     _validate_chrome(data["chrome"])
-                yield _SQLiteTransaction(db, self, registration, owner, source_table, execution_tables), data
+                yield _SQLiteTransaction(db, self, registration, owner, source_table, execution_tables,
+                                         decision_tables), data
                 self._owner(owner)
         except sqlite3.DatabaseError as exc:
             code = "JOURNAL_BUSY" if isinstance(exc, sqlite3.OperationalError) and \
