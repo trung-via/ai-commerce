@@ -498,6 +498,143 @@ class DecisionPlan:
         return ("BRAIN_DECISION_INGRESS_UNAVAILABLE", "ATTEMPT_ACTIVATION_UNVERIFIED")
 
 
+def _optional_refs(*values: str | None) -> bool:
+    return all(value is None or _decision_ref(value) for value in values)
+
+
+@dataclass(frozen=True, repr=False)
+class TurnCapture:
+    """Owner-private observation. References are opaque, credential-free source identifiers."""
+
+    project: str | None
+    account: str | None
+    conversation: str | None
+    branch: str | None
+    turn: str | None
+    revision: str | None
+    role: Literal["USER", "ASSISTANT", "SYSTEM", "TOOL", "UNKNOWN"]
+    content_sha256: str
+    raw: bytes | None = None
+    source_ref: str | None = None
+    observed_actor: str | None = None
+    actor_provenance: str | None = None
+    coverage: Literal["UNKNOWN", "PARTIAL"] = "UNKNOWN"
+    cursor: str | None = None
+    supersedes: str | None = None
+    wake_event_key: str | None = None
+
+    def __post_init__(self) -> None:
+        _require(_optional_refs(self.project, self.account, self.conversation, self.branch, self.turn,
+                                self.revision, self.source_ref, self.observed_actor, self.actor_provenance,
+                                self.cursor)
+                 and type(self.role) is str and self.role in ("USER", "ASSISTANT", "SYSTEM", "TOOL", "UNKNOWN")
+                 and type(self.coverage) is str and self.coverage in ("UNKNOWN", "PARTIAL")
+                 and _chrome_digest(self.content_sha256)
+                 and (self.raw is None or type(self.raw) is bytes and len(self.raw) <= 65536
+                      and bytes_digest(self.raw) == self.content_sha256)
+                 and (self.raw is not None or self.source_ref is not None)
+                 and (self.supersedes is None or _chrome_digest(self.supersedes) and self.turn_key is not None)
+                 and (self.wake_event_key is None or _chrome_digest(self.wake_event_key)),
+                 "CONTINUITY_CAPTURE_INVALID")
+
+    @property
+    def turn_key(self) -> str | None:
+        refs = (self.project, self.account, self.conversation, self.branch, self.turn)
+        return (digest(["wakehub-source-turn.v1", *refs]) if all(refs) and self.revision is not None
+                else None)
+
+    def _record(self) -> dict:
+        fields = asdict(self)
+        fields.pop("raw")
+        return fields
+
+
+@dataclass(frozen=True, repr=False)
+class InstructionObservation:
+    """An explicit semantic projection of a capture, pending independent owner authority."""
+
+    capture_id: str
+    obligation: str
+    revision: str
+    kind: Literal["PROPOSAL", "TASK", "DECISION", "POLICY", "OVERRIDE", "PREFERENCE", "QUESTION"]
+    lifetime: Literal["ONE_SHOT", "TEST_ONLY", "DURABLE_CANDIDATE", "UNSPECIFIED"]
+    summary: str
+    supersedes: str | None = None
+
+    def __post_init__(self) -> None:
+        _require(_chrome_digest(self.capture_id)
+                 and _decision_ref(self.obligation) and _decision_ref(self.revision)
+                 and type(self.kind) is str
+                 and self.kind in ("PROPOSAL", "TASK", "DECISION", "POLICY", "OVERRIDE", "PREFERENCE", "QUESTION")
+                 and type(self.lifetime) is str
+                 and self.lifetime in ("ONE_SHOT", "TEST_ONLY", "DURABLE_CANDIDATE", "UNSPECIFIED")
+                 and _execution_objective(self.summary) and len(self.summary) <= 2048
+                 and (self.supersedes is None or _chrome_digest(self.supersedes)),
+                 "CONTINUITY_INSTRUCTION_INVALID")
+
+
+@dataclass(frozen=True, repr=False)
+class ContinuityPacket:
+    """Exact private serialization of the context at a stored U1b checkpoint."""
+
+    execution_id: str
+    decision_id: str
+    checkpoint: str
+    context: str
+
+    def __post_init__(self) -> None:
+        _require(_execution_id(self.execution_id) and _chrome_digest(self.decision_id)
+                 and _chrome_digest(self.checkpoint) and type(self.context) is str
+                 and 0 < len(self.context) <= 131072 and self.context.isascii(), "CONTINUITY_PACKET_INVALID")
+
+    @property
+    def context_sha256(self) -> str:
+        return bytes_digest(self.context.encode("ascii"))
+
+    @property
+    def packet_id(self) -> str:
+        return digest(["wakehub-continuity-packet.v1", self.execution_id, self.decision_id,
+                       self.checkpoint, self.context_sha256])
+
+
+@dataclass(frozen=True)
+class ContinuityResume:
+    """Local revalidation readback for a proposal checkpoint."""
+
+    packet_id: str
+
+    @property
+    def authority(self) -> Literal["PENDING_AUTHORITY"]:
+        return "PENDING_AUTHORITY"
+
+    @property
+    def retrieval_proof(self) -> Literal["UNVERIFIED"]:
+        """Local revalidation leaves consumer receipt unverified."""
+        return "UNVERIFIED"
+
+
+@dataclass(frozen=True, repr=False)
+class ContinuityPage:
+    """Owner-private rows from a revalidated commitment. A null cursor marks the end.
+
+    Details hold the exact observations or operation intents keyed by their row IDs.
+    Captures and sources carry exact references for their existing readback APIs.
+    """
+
+    packet_id: str
+    section: str
+    offset: int
+    count: int
+    sha256: str
+    rows: tuple[dict, ...]
+    next_cursor: str | None
+    details: dict[str, InstructionObservation | OperationIntent]
+
+    @property
+    def preview_complete(self) -> bool:
+        return self.count <= _CONTINUITY_PAGE_SIZE
+
+
 class EventSource(Protocol):
     def next_event(self) -> Event | SourceEvent | None: ...
 
@@ -1659,6 +1796,25 @@ _DECISION_TABLES = {
     "decision_checkpoints": "CREATE TABLE decision_checkpoints (obligation_key TEXT PRIMARY KEY, "
                             "checkpoint TEXT NOT NULL REFERENCES decision_proposals(checkpoint))",
 }
+_CONTINUITY_TABLES = {
+    "continuity_captures": "CREATE TABLE continuity_captures (capture_id TEXT PRIMARY KEY, turn_key TEXT, "
+                           "revision TEXT, supersedes TEXT REFERENCES continuity_captures(capture_id), "
+                           "nonce TEXT, record TEXT NOT NULL, raw BLOB, UNIQUE(turn_key, revision, capture_id))",
+    "continuity_capture_scope": "CREATE TABLE continuity_capture_scope ("
+                                "execution_id TEXT NOT NULL REFERENCES execution_requests(execution_id), "
+                                "capture_id TEXT NOT NULL REFERENCES continuity_captures(capture_id), "
+                                "PRIMARY KEY(execution_id, capture_id))",
+    "continuity_instructions": "CREATE TABLE continuity_instructions (instruction_id TEXT PRIMARY KEY, "
+                               "execution_id TEXT NOT NULL REFERENCES execution_requests(execution_id), "
+                               "obligation TEXT NOT NULL, revision TEXT NOT NULL, "
+                               "supersedes TEXT UNIQUE REFERENCES continuity_instructions(instruction_id), "
+                               "record TEXT NOT NULL, UNIQUE(execution_id, obligation, revision))",
+    "continuity_packets": "CREATE TABLE continuity_packets (packet_id TEXT PRIMARY KEY, "
+                          "execution_id TEXT NOT NULL REFERENCES execution_requests(execution_id), "
+                          "decision_id TEXT NOT NULL, checkpoint TEXT NOT NULL, context TEXT NOT NULL)",
+    "continuity_resumes": "CREATE TABLE continuity_resumes (packet_id TEXT PRIMARY KEY "
+                          "REFERENCES continuity_packets(packet_id))",
+}
 _APP_ID = 0x57485231
 
 
@@ -1668,12 +1824,46 @@ def _has_table_group(schemas: dict, expected: dict) -> bool:
     return bool(present)
 
 
-def _extension_tables(schemas: dict) -> tuple[bool, bool]:
+def _extension_tables(schemas: dict) -> tuple[bool, bool, bool]:
     execution = _has_table_group(schemas, _EXECUTION_TABLES)
     decisions = _has_table_group(schemas, _DECISION_TABLES)
+    continuity = _has_table_group(schemas, _CONTINUITY_TABLES)
     _require(not decisions or (execution and schemas.get("source_identities") == _SOURCE_TABLE
                                and schemas.get("events") == _TABLES["events"]), "JOURNAL_SCHEMA_INCOMPATIBLE")
-    return execution, decisions
+    _require(not continuity or execution, "JOURNAL_SCHEMA_INCOMPATIBLE")
+    return execution, decisions, continuity
+
+
+def _continuity_json(value: object) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+_CONTINUITY_PAGE_SIZE = 8
+_CONTINUITY_SECTIONS = ("source_evidence", "decision_obligations", "outbox", "captures", "instructions")
+
+
+def _continuity_cursor(packet_id: str, section: str, offset: int) -> str:
+    binding = digest(["wakehub-continuity-cursor.v1", packet_id, section, offset])
+    return f"{offset}.{binding}"
+
+
+def _continuity_section(rows, gaps: set[str], *, offset: int | None = None) -> tuple[dict, tuple]:
+    """Hash all ordered rows while retaining only the preview and optional page."""
+    committed = hashlib.sha256()
+    preview = []
+    page = []
+    count = 0
+    for count, row in enumerate(rows, 1):
+        canonical = _continuity_json(row)
+        committed.update(canonical.encode("ascii") + b"\n")
+        if count <= _CONTINUITY_PAGE_SIZE:
+            preview.append(row)
+        if offset is not None and offset < count <= offset + _CONTINUITY_PAGE_SIZE:
+            page.append(json.loads(canonical))
+    if count > len(preview):
+        # Preserve the packet's preview marker for existing stored commitments.
+        gaps.add("CONTINUITY_PROJECTION_LIMIT")
+    return {"count": count, "rows": preview, "sha256": committed.hexdigest()}, tuple(page)
 
 
 def _execution_aliases(identity: SourceIdentity, source_event: dict) -> tuple[ExecutionAlias, ...]:
@@ -2007,12 +2197,14 @@ def _validate_records(data: dict, registration: Registration) -> None:
 
 
 class _SQLiteTransaction:
-    def __init__(self, connection, journal, registration, owner, source_table, execution_tables, decision_tables):
+    def __init__(self, connection, journal, registration, owner, source_table, execution_tables, decision_tables,
+                 continuity_tables):
         self.connection, self.journal = connection, journal
         self.registration, self.owner = registration, owner
         self.source_table = source_table
         self.execution_tables = execution_tables
         self.decision_tables = decision_tables
+        self.continuity_tables = continuity_tables
 
     def stage_execution_source(self, data: dict, event: SourceEvent, verified: dict | None) -> bool:
         # D1's validated selector-only event keeps the projection checkable
@@ -2036,7 +2228,7 @@ class _SQLiteTransaction:
                 self.connection.execute(sql)
 
     @contextmanager
-    def execution_write(self, *, decisions: bool = False):
+    def execution_write(self, *, decisions: bool = False, continuity: bool = False):
         self.journal._owner(self.owner)
         db = self.connection
         try:
@@ -2045,11 +2237,15 @@ class _SQLiteTransaction:
             if decisions and not self.decision_tables:
                 for sql in _DECISION_TABLES.values():
                     db.execute(sql)
+            if continuity and not self.continuity_tables:
+                for sql in _CONTINUITY_TABLES.values():
+                    db.execute(sql)
             yield db
             self.journal._owner(self.owner)
             db.commit()
             self.execution_tables = True
             self.decision_tables = self.decision_tables or decisions
+            self.continuity_tables = self.continuity_tables or continuity
         except BaseException:
             db.rollback()
             raise
@@ -2239,7 +2435,7 @@ class Journal:
                                  principal: str) -> tuple[DecisionSourceEvidence, ...]:
         """Read authenticated intake as evidence, before any obligation is classified."""
         _require(type(identity) is SourceIdentity, "SOURCE_IDENTITY_INVALID")
-        with self._registered_snapshot(registration, principal) as (db, execution, _):
+        with self._registered_snapshot(registration, principal) as (db, execution, _, _):
             return self._decision_evidence(db, identity, registration) if execution else ()
 
     @contextmanager
@@ -2248,7 +2444,7 @@ class Journal:
             _require(owner == principal, "JOURNAL_OWNER_DRIFT")
             self._owner(owner)
             if not self.path.exists():
-                yield None, False, False
+                yield None, False, False, False
                 return
             with closing(sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=0)) as db:
                 db.execute("PRAGMA trusted_schema=OFF")
@@ -2259,11 +2455,11 @@ class Journal:
                 schemas = dict(db.execute("SELECT name, CASE WHEN type='table' THEN sql END FROM sqlite_master"))
                 _require(schemas.get("identity") == _TABLES["identity"], "JOURNAL_SCHEMA_INCOMPATIBLE")
                 self._check_registration(db, owner, registration)
-                execution, decisions = _extension_tables(schemas)
+                execution, decisions, continuity = _extension_tables(schemas)
                 if execution and db.execute("SELECT 1 FROM execution_source_events LIMIT 1").fetchone():
                     _require(schemas.get("source_identities") == _SOURCE_TABLE
                              and schemas.get("events") == _TABLES["events"], "JOURNAL_SCHEMA_INCOMPATIBLE")
-                yield db, execution, decisions
+                yield db, execution, decisions, continuity
 
     @classmethod
     def _decision_evidence(cls, db, identity: SourceIdentity,
@@ -2361,7 +2557,7 @@ class Journal:
     def decision_demand(self, registration: Registration, decision_id: str, *,
                         principal: str) -> DecisionDemand | None:
         _require(_chrome_digest(decision_id), "DECISION_DEMAND_INVALID")
-        with self._registered_snapshot(registration, principal) as (db, _, decisions):
+        with self._registered_snapshot(registration, principal) as (db, _, decisions, _):
             return self._read_decision_demand(db, decision_id) if decisions else None
 
     @staticmethod
@@ -2381,21 +2577,36 @@ class Journal:
             raise RuntimeHold("DECISION_JOURNAL_INVALID") from None
 
     @classmethod
-    def _verify_decision_coverage(cls, db, registration: Registration, demand: DecisionDemand) -> None:
+    def _read_execution_request(cls, db, execution_id: str) -> ExecutionRequest:
         row = db.execute("SELECT request_key, contract FROM execution_requests WHERE execution_id=?",
-                         (demand.execution_id,)).fetchone()
+                         (execution_id,)).fetchone()
         _require(row is not None, "EXECUTION_REQUEST_UNKNOWN")
         try:
             execution = ExecutionRequest(row[0], *_decode_unique(row[1]))
             _require(cls._execution_contract(execution) == row[1], "EXECUTION_REGISTRY_INVALID")
         except (TypeError, ValueError):
             raise RuntimeHold("EXECUTION_REGISTRY_INVALID") from None
+        return execution
+
+    @classmethod
+    def _verify_decision_coverage(cls, db, registration: Registration, demand: DecisionDemand) -> None:
+        execution = cls._read_execution_request(db, demand.execution_id)
         _require(execution.consumer == demand.consumer, "DECISION_EXECUTION_SCOPE_UNPROVEN")
         for coverage in demand.coverage:
             evidence = cls._decision_evidence(db, coverage.identity, registration, selector=coverage.selector)
             matched = next((item for item in evidence if item.coverage == coverage), None)
             _require(matched is not None, "DECISION_SOURCE_UNVERIFIED")
             _require(matched.lineage.execution_id == demand.execution_id, "DECISION_EXECUTION_SCOPE_UNPROVEN")
+
+    @classmethod
+    def _current_decision_revision(cls, db, obligation_key: str) -> str | None:
+        # The verified owner submission order establishes the current planning
+        # demand. Revision labels themselves have no ordering semantics.
+        for decision_id, in db.execute("SELECT decision_id FROM decision_demands WHERE obligation_key=? "
+                                       "ORDER BY rowid DESC", (obligation_key,)):
+            if cls._read_decision_demand(db, decision_id).classification == "DECISION_NEEDED":
+                return decision_id
+        return None
 
     @classmethod
     def _check_decision_source_custody(cls, db, registration: Registration, demand: DecisionDemand) -> None:
@@ -2433,6 +2644,8 @@ class Journal:
             if saved is not None:
                 _require(saved.checkpoint == checkpoint, "DECISION_PROPOSAL_CONFLICT")
                 return saved
+            _require(self._current_decision_revision(db, demand.obligation_key) == demand.decision_id,
+                     "DECISION_REVISION_STALE")
             latest = self._read_decision_plan(db, demand, version=None)
             _require(proposal.expected_checkpoint == (latest.checkpoint if latest else None),
                      "DECISION_CHECKPOINT_STALE")
@@ -2455,7 +2668,7 @@ class Journal:
         """Read an exact proposal version, or the current checkpoint for its obligation."""
         _require(_chrome_digest(decision_id) and (version is None or _github_id(version)),
                  "DECISION_PROPOSAL_INVALID")
-        with self._registered_snapshot(registration, principal) as (db, _, decisions):
+        with self._registered_snapshot(registration, principal) as (db, _, decisions, _):
             demand = self._read_decision_demand(db, decision_id) if decisions else None
             return self._read_decision_plan(db, demand, version=version) if demand is not None else None
 
@@ -2541,6 +2754,424 @@ class Journal:
                    (operation_id, execution_id, effect_key, json.dumps(asdict(operation), sort_keys=True)))
         return cls._read_decision_operation(db, operation_id)
 
+    def record_turn_capture(self, registration: Registration, execution_id: str, capture: TurnCapture, *,
+                            principal: str) -> str:
+        """Retain exact private bytes or an opaque source claim under the admitted Execution."""
+        _require(type(capture) is TurnCapture and _execution_id(execution_id), "CONTINUITY_CAPTURE_INVALID")
+        _require(_reference(principal), "EXECUTION_OWNER_REQUIRED")
+        turn_key = capture.turn_key
+        # Without stable selectors, identical text cannot identify a repeat observation.
+        nonce = token_hex(16) if turn_key is None else None
+        record = capture._record()
+        capture_id = digest(["wakehub-turn-capture.v1", nonce, capture.raw is not None, record])
+        with self.locked(registration, execution_owner=principal) as (txn, _), txn.execution_write(
+                continuity=True) as db:
+            self._read_execution_request(db, execution_id)
+            if capture.supersedes is not None:
+                old = self._read_turn_capture(db, execution_id, capture.supersedes)
+                _require(old is not None and old.turn_key == turn_key and old.revision != capture.revision,
+                         "CONTINUITY_CAPTURE_SUPERSESSION_INVALID")
+            saved = self._read_turn_capture(db, None, capture_id)
+            if saved is None:
+                db.execute("INSERT INTO continuity_captures VALUES (?, ?, ?, ?, ?, ?, ?)",
+                           (capture_id, turn_key, capture.revision, capture.supersedes, nonce,
+                            _continuity_json(record), capture.raw))
+            else:
+                _require(saved == capture, "CONTINUITY_CAPTURE_CONFLICT")
+            db.execute("INSERT INTO continuity_capture_scope VALUES (?, ?) ON CONFLICT DO NOTHING",
+                       (execution_id, capture_id))
+            return capture_id
+
+    def turn_capture(self, registration: Registration, execution_id: str, capture_id: str, *,
+                     principal: str) -> TurnCapture | None:
+        """Exact readback for one capture in its admitted scope."""
+        _require(_execution_id(execution_id) and _chrome_digest(capture_id), "CONTINUITY_CAPTURE_INVALID")
+        with self._registered_snapshot(registration, principal) as (db, _, _, continuity):
+            return self._read_turn_capture(db, execution_id, capture_id) if continuity else None
+
+    @staticmethod
+    def _read_turn_capture(db, execution_id: str | None, capture_id: str) -> TurnCapture | None:
+        if execution_id is not None and db.execute(
+                "SELECT 1 FROM continuity_capture_scope WHERE execution_id=? AND capture_id=?",
+                (execution_id, capture_id)).fetchone() is None:
+            return None
+        row = db.execute("SELECT turn_key, revision, supersedes, nonce, record, raw FROM continuity_captures "
+                         "WHERE capture_id=?", (capture_id,)).fetchone()
+        if row is None and execution_id is None:
+            return None
+        _require(row is not None, "CONTINUITY_CAPTURE_SOURCE_INVALID")
+        turn_key, revision, supersedes, nonce, raw_record, raw = row
+        try:
+            fields = _decode_unique(raw_record)
+            capture = TurnCapture(**fields, raw=raw)
+            _require((capture.turn_key, capture.revision, capture.supersedes) == (turn_key, revision, supersedes)
+                     and (nonce is None if turn_key is not None else _execution_id(nonce))
+                     and _continuity_json(capture._record()) == raw_record
+                     and digest(["wakehub-turn-capture.v1", nonce, raw is not None, fields]) == capture_id,
+                     "CONTINUITY_CAPTURE_SOURCE_INVALID")
+        except (TypeError, ValueError):
+            raise RuntimeHold("CONTINUITY_CAPTURE_SOURCE_INVALID") from None
+        return capture
+
+    def record_instruction_observation(self, registration: Registration, execution_id: str,
+                                       observation: InstructionObservation, *, principal: str) -> str:
+        """Store an explicit revision of a pending semantic obligation."""
+        _require(type(observation) is InstructionObservation and _execution_id(execution_id),
+                 "CONTINUITY_INSTRUCTION_INVALID")
+        _require(_reference(principal), "EXECUTION_OWNER_REQUIRED")
+        fields = asdict(observation)
+        instruction_id = digest(["wakehub-instruction-observation.v1", execution_id, fields])
+        with self.locked(registration, execution_owner=principal) as (txn, _), txn.execution_write(
+                continuity=True) as db:
+            self._read_execution_request(db, execution_id)
+            _require(self._read_turn_capture(db, execution_id, observation.capture_id) is not None,
+                     "CONTINUITY_CAPTURE_SOURCE_INVALID")
+            saved = self._read_instruction_observation(db, execution_id, instruction_id)
+            if saved is not None:
+                return instruction_id
+            head = db.execute(
+                "SELECT i.instruction_id FROM continuity_instructions i WHERE i.execution_id=? AND i.obligation=? "
+                "AND NOT EXISTS (SELECT 1 FROM continuity_instructions WHERE supersedes=i.instruction_id)",
+                (execution_id, observation.obligation)).fetchall()
+            _require(head == ([] if observation.supersedes is None else [(observation.supersedes,)]),
+                     "CONTINUITY_INSTRUCTION_REVISION_STALE")
+            _require(db.execute("SELECT 1 FROM continuity_instructions WHERE execution_id=? AND obligation=? "
+                                "AND revision=?", (execution_id, observation.obligation, observation.revision))
+                     .fetchone() is None, "CONTINUITY_INSTRUCTION_REVISION_CONFLICT")
+            db.execute("INSERT INTO continuity_instructions VALUES (?, ?, ?, ?, ?, ?)",
+                       (instruction_id, execution_id, observation.obligation, observation.revision,
+                        observation.supersedes, _continuity_json(fields)))
+            return instruction_id
+
+    def instruction_observation(self, registration: Registration, execution_id: str, instruction_id: str, *,
+                                principal: str) -> InstructionObservation | None:
+        _require(_execution_id(execution_id) and _chrome_digest(instruction_id), "CONTINUITY_INSTRUCTION_INVALID")
+        with self._registered_snapshot(registration, principal) as (db, _, _, continuity):
+            return self._read_instruction_observation(db, execution_id, instruction_id) if continuity else None
+
+    @staticmethod
+    def _read_instruction_observation(db, execution_id: str, instruction_id: str) -> InstructionObservation | None:
+        row = db.execute("SELECT obligation, revision, supersedes, record FROM continuity_instructions "
+                         "WHERE execution_id=? AND instruction_id=?", (execution_id, instruction_id)).fetchone()
+        if row is None:
+            return None
+        try:
+            fields = _decode_unique(row[3])
+            observation = InstructionObservation(**fields)
+            _require(row == (observation.obligation, observation.revision, observation.supersedes,
+                             _continuity_json(asdict(observation)))
+                     and digest(["wakehub-instruction-observation.v1", execution_id, fields]) == instruction_id,
+                     "CONTINUITY_INSTRUCTION_SOURCE_INVALID")
+        except (TypeError, ValueError):
+            raise RuntimeHold("CONTINUITY_INSTRUCTION_SOURCE_INVALID") from None
+        return observation
+
+    def build_continuity_packet(self, registration: Registration, execution_id: str, decision_id: str, *,
+                                principal: str) -> ContinuityPacket:
+        """Save the exact small context at the current U1b plan, under the planning lock."""
+        _require(_execution_id(execution_id) and _chrome_digest(decision_id), "CONTINUITY_PACKET_INVALID")
+        _require(_reference(principal), "EXECUTION_OWNER_REQUIRED")
+        with self.locked(registration, execution_owner=principal) as (txn, _), txn.execution_write(
+                continuity=True) as db:
+            packet, _ = self._continuity_projection(db, registration, execution_id, decision_id, txn.decision_tables)
+            saved = self._read_continuity_packet(db, packet.packet_id)
+            if saved is None:
+                db.execute("INSERT INTO continuity_packets VALUES (?, ?, ?, ?, ?)",
+                           (packet.packet_id, packet.execution_id, packet.decision_id, packet.checkpoint,
+                            packet.context))
+            else:
+                _require(saved == packet, "CONTINUITY_PACKET_INVALID")
+            return packet
+
+    def continuity_packet(self, registration: Registration, packet_id: str, *, principal: str) -> ContinuityPacket | None:
+        """Read a historical packet verbatim, including after its checkpoint or context changes."""
+        _require(_chrome_digest(packet_id), "CONTINUITY_PACKET_INVALID")
+        with self._registered_snapshot(registration, principal) as (db, _, _, continuity):
+            return self._read_continuity_packet(db, packet_id) if continuity else None
+
+    def continuity_page(self, registration: Registration, execution_id: str, decision_id: str, checkpoint: str,
+                        packet_id: str, section: str, *, principal: str, cursor: str | None = None) -> ContinuityPage:
+        """Read a verified local page. A stale packet remains available through continuity_packet."""
+        _require(_execution_id(execution_id) and all(_chrome_digest(ref) for ref in (decision_id, checkpoint, packet_id)),
+                 "CONTINUITY_PACKET_INVALID")
+        _require(type(section) is str and section in _CONTINUITY_SECTIONS, "CONTINUITY_SECTION_INVALID")
+        offset = 0
+        if cursor is not None:
+            match = re.fullmatch(r"([1-9][0-9]{0,18})\.[0-9a-f]{64}", cursor) if type(cursor) is str else None
+            _require(match is not None, "CONTINUITY_CURSOR_INVALID")
+            offset = int(match[1])
+            _require(offset % _CONTINUITY_PAGE_SIZE == 0 and cursor == _continuity_cursor(packet_id, section, offset),
+                     "CONTINUITY_CURSOR_INVALID")
+        with self._registered_snapshot(registration, principal) as (db, _, decisions, continuity):
+            packet = self._read_continuity_packet(db, packet_id) if continuity else None
+            _require(packet is not None, "CONTINUITY_PACKET_UNVERIFIED")
+            _require((execution_id, decision_id, checkpoint) == (packet.execution_id, packet.decision_id,
+                                                                  packet.checkpoint), "CONTINUITY_SCOPE_MISMATCH")
+            current, rows = self._continuity_projection(db, registration, execution_id, decision_id, decisions,
+                                                        section=section, offset=offset)
+            _require(current == packet, "CONTINUITY_CONTEXT_STALE")
+            commitment = json.loads(packet.context)[section]
+            count = commitment["count"]
+            _require(cursor is None or offset < count, "CONTINUITY_CURSOR_INVALID")
+            end = offset + len(rows)
+            next_cursor = _continuity_cursor(packet_id, section, end) if end < count else None
+            details = {}
+            if section == "instructions":
+                for row in rows:
+                    ref = row["instruction_id"]
+                    observation = self._read_instruction_observation(db, execution_id, ref)
+                    _require(observation is not None, "CONTINUITY_INSTRUCTION_SOURCE_INVALID")
+                    details[ref] = observation
+            elif section == "outbox":
+                for row in rows:
+                    ref = row["operation_id"]
+                    details[ref] = self._read_decision_operation(db, ref)
+            return ContinuityPage(packet_id, section, offset, count, commitment["sha256"], rows, next_cursor, details)
+
+    def execution_request(self, registration: Registration, execution_id: str, *, principal: str) -> ExecutionRequest:
+        """Read the exact private request identified by the packet's Execution reference."""
+        _require(_execution_id(execution_id), "EXECUTION_REQUEST_INVALID")
+        with self._registered_snapshot(registration, principal) as (db, execution, _, _):
+            _require(execution, "EXECUTION_REQUEST_UNKNOWN")
+            return self._read_execution_request(db, execution_id)
+
+    @staticmethod
+    def _read_continuity_packet(db, packet_id: str) -> ContinuityPacket | None:
+        row = db.execute("SELECT execution_id, decision_id, checkpoint, context FROM continuity_packets "
+                         "WHERE packet_id=?", (packet_id,)).fetchone()
+        if row is None:
+            return None
+        packet = ContinuityPacket(*row)
+        _require(packet.packet_id == packet_id, "CONTINUITY_PACKET_INVALID")
+        return packet
+
+    def resume_decision(self, registration: Registration, execution_id: str, decision_id: str,
+                        packet: ContinuityPacket, *, principal: str) -> ContinuityResume:
+        """Revalidate a stored proposal with current journal facts and persist local readback.
+
+        U2b needs a real owner producer/receiver that independently authenticates
+        the producer and exact request, Execution, decision revision, checkpoint
+        and context commitment. It must validate a correlated native receipt
+        from the registered account, conversation and turn with replay/readback
+        proof. Attempt activation and prior possible-effect reconciliation also
+        need independent evidence. Typed receipt claims, owner file custody and
+        the packet digest provide no such authority.
+        """
+        _require(type(packet) is ContinuityPacket and (execution_id, decision_id) ==
+                 (packet.execution_id, packet.decision_id), "CONTINUITY_SCOPE_MISMATCH")
+        _require(_reference(principal), "EXECUTION_OWNER_REQUIRED")
+        with self.locked(registration, execution_owner=principal) as (txn, _), txn.execution_write() as db:
+            _require(txn.continuity_tables and self._read_continuity_packet(db, packet.packet_id) == packet,
+                     "CONTINUITY_PACKET_UNVERIFIED")
+            current, _ = self._continuity_projection(db, registration, execution_id, decision_id, txn.decision_tables)
+            _require(current.checkpoint == packet.checkpoint, "DECISION_CHECKPOINT_STALE")
+            _require(current == packet, "CONTINUITY_CONTEXT_STALE")
+            db.execute("INSERT INTO continuity_resumes VALUES (?) ON CONFLICT DO NOTHING", (packet.packet_id,))
+            return ContinuityResume(packet.packet_id)
+
+    @classmethod
+    def _continuity_projection(cls, db, registration: Registration, execution_id: str, decision_id: str,
+                               decision_tables: bool, *, section: str | None = None,
+                               offset: int = 0) -> tuple[ContinuityPacket, tuple[dict, ...]]:
+        demand = cls._read_decision_demand(db, decision_id) if decision_tables else None
+        _require(demand is not None and demand.classification == "DECISION_NEEDED", "DECISION_NOT_REQUESTED")
+        _require(demand.execution_id == execution_id, "CONTINUITY_SCOPE_MISMATCH")
+        _require(cls._current_decision_revision(db, demand.obligation_key) == decision_id,
+                 "DECISION_REVISION_STALE")
+        plan = cls._read_decision_plan(db, demand, version=None)
+        _require(plan is not None and plan.decision_id == decision_id, "CONTINUITY_REPLAN_REQUIRED")
+        cls._verify_decision_coverage(db, registration, demand)
+        execution = cls._read_execution_request(db, execution_id)
+        gaps = {"AC_UNAVAILABLE", "CAPTURE_INVENTORY_UNVERIFIED", "OWNER_POLICY_SOURCE_UNAVAILABLE",
+                "NATIVE_ORIGIN_AUTHORITY_UNAVAILABLE", "OWNER_REQUEST_PRODUCER_UNAVAILABLE",
+                *plan.missing_capabilities}
+        context = {
+            "schema": "WakeHubContinuityPacket.v1",
+            "status": "PENDING",
+            "registration_sha256": digest(asdict(registration)),
+            "execution": {"objective": execution.objective[:512], "objective_truncated": len(execution.objective) > 512,
+                          "contract_sha256": bytes_digest(cls._execution_contract(execution).encode("ascii")),
+                          "consumer": execution.consumer, "operation_slot": execution.operation_slot, "ac": None},
+            "decision": {"obligation": demand.obligation, "revision": demand.revision, "version": plan.version,
+                         "decision_sha256": plan.decision_sha256, "proposal_sha256": plan.proposal_sha256,
+                         "coverage_count": len(demand.coverage),
+                         "coverage_sha256": bytes_digest(_continuity_json(asdict(demand)).encode("ascii")),
+                         "previous_checkpoint": plan.previous_checkpoint,
+                         "operation_id": plan.operation.operation_id if plan.operation else None},
+        }
+        projections = {
+            "source_evidence": cls._continuity_sources(db, registration, demand, gaps),
+            "decision_obligations": cls._continuity_demands(db, execution_id, gaps),
+            "outbox": cls._continuity_operations(db, execution_id, gaps),
+            "captures": cls._continuity_captures(db, registration, execution_id, gaps),
+            "instructions": cls._continuity_instructions(db, execution_id),
+        }
+        page = ()
+        for name, rows in projections.items():
+            context[name], selected = _continuity_section(rows, gaps, offset=offset if section == name else None)
+            if section == name:
+                page = selected
+        context["gaps"] = sorted(gaps)
+        return ContinuityPacket(execution_id, decision_id, plan.checkpoint, _continuity_json(context)), page
+
+    @classmethod
+    def _continuity_sources(cls, db, registration: Registration, demand: DecisionDemand, gaps: set[str]):
+        covered = set(demand.coverage)
+        for number, repository, batch, action, attempt, run, run_attempt in db.execute(
+                "SELECT number, repository, batch_id, action_id, attempt_id, run_id, run_attempt "
+                "FROM execution_attempts WHERE execution_id=? ORDER BY number", (demand.execution_id,)):
+            identity = SourceIdentity(_EF02, repository, run, run_attempt)
+            selector = ExecutionAlias("ef02_attempt", (repository, batch, action, attempt))
+            evidence = cls._decision_evidence(db, identity, registration, selector=selector)
+            row = {"number": number, "source": asdict(identity), "selector": asdict(selector)}
+            if not evidence:
+                gaps.add("ATTEMPT_SOURCE_EVIDENCE_MISSING")
+                yield {**row, "custody": "UNVERIFIED", "coverage": "UNVERIFIED"}
+                continue
+            item, = evidence
+            _require((item.lineage.execution_id, item.lineage.attempt_number) == (demand.execution_id, number),
+                     "DECISION_EXECUTION_SCOPE_UNPROVEN")
+            raw, = db.execute("SELECT record FROM events WHERE event_key=?", (item.coverage.event_key,)).fetchone()
+            record = _decode_unique(raw)
+            # Route readiness is transient. Commit the durable delivery proof and exact source state.
+            pins = {key: value for key, value in record["evidence"].items() if key != "local_route"}
+            if item.custody in ("EFFECT_RESERVED", "UNKNOWN"):
+                gaps.add("DECISION_SOURCE_CUSTODY_UNRESOLVED")
+            yield {**row, "event": asdict(item.coverage), "in_decision_coverage": item.coverage in covered,
+                   "lineage": item.lineage.code, "custody": item.custody, "status": record["status"],
+                   "code": record["code"], "source_sha": record["event"]["source_sha"],
+                   "journal_evidence_sha256": bytes_digest(_continuity_json([record["history"], pins]).encode("ascii"))}
+
+    @classmethod
+    def _continuity_demands(cls, db, execution_id: str, gaps: set[str]):
+        heads = {}
+        for decision_id, in db.execute(
+                "SELECT decision_id FROM decision_demands "
+                "WHERE CASE WHEN json_valid(contract) THEN json_extract(contract, '$.execution_id') END=? "
+                "ORDER BY decision_id", (execution_id,)):
+            demand = cls._read_decision_demand(db, decision_id)
+            key = demand.obligation_key
+            if key not in heads:
+                heads[key] = (cls._current_decision_revision(db, key), cls._read_decision_plan(db, demand, version=None))
+            current_id, plan = heads[key]
+            state = demand.classification
+            if state == "DECISION_NEEDED":
+                if decision_id != current_id:
+                    state = "SUPERSEDED"
+                elif plan is None or plan.decision_id != decision_id:
+                    state = "PENDING_REPLAN"
+                    gaps.add("DECISION_OBLIGATION_REPLAN_REQUIRED")
+                else:
+                    state = "PENDING_AUTHORITY"
+            if state == "UNCLASSIFIED":
+                gaps.add("DECISION_OBLIGATION_UNCLASSIFIED")
+            yield {"decision_id": decision_id, "obligation": demand.obligation, "revision": demand.revision,
+                   "classification": demand.classification, "state": state,
+                   "checkpoint": plan.checkpoint if plan else None,
+                   "planned_decision_id": plan.decision_id if plan else None,
+                   "contract_sha256": bytes_digest(_continuity_json(asdict(demand)).encode("ascii"))}
+
+    @classmethod
+    def _continuity_operations(cls, db, execution_id: str, gaps: set[str]):
+        for operation_id, in db.execute(
+                "SELECT operation_id FROM decision_outbox WHERE execution_id=? UNION "
+                "SELECT p.operation_id FROM decision_proposals p JOIN decision_demands d USING(decision_id) "
+                "WHERE p.operation_id IS NOT NULL AND "
+                "CASE WHEN json_valid(d.contract) THEN json_extract(d.contract, '$.execution_id') END=? "
+                "ORDER BY operation_id", (execution_id, execution_id)):
+            intent = cls._read_decision_operation(db, operation_id)
+            if intent.state in ("RECEIVER_RESERVED", "EFFECT_RESERVED", "UNKNOWN"):
+                gaps.add("DECISION_OPERATION_CUSTODY_UNRESOLVED")
+            if intent.operation.effect is None:
+                gaps.add("EFFECT_OVERLAP_UNPROVEN")
+            yield {"operation_id": operation_id, "execution_id": intent.execution_id, "state": intent.state,
+                   "consumer": intent.operation.consumer, "scope": intent.operation.scope, "slot": intent.operation.slot,
+                   "effect": asdict(intent.operation.effect) if intent.operation.effect else None,
+                   "contract_sha256": bytes_digest(_continuity_json(asdict(intent.operation)).encode("ascii"))}
+
+    @classmethod
+    def _continuity_captures(cls, db, registration: Registration, execution_id: str, gaps: set[str]):
+        # A claimed edit replaces only its exact predecessor in this projection.
+        # Historical bytes and any competing heads remain addressable.
+        turn_commitments = {}
+        for capture_id, in db.execute(
+                "SELECT s.capture_id FROM continuity_capture_scope s WHERE s.execution_id=? AND NOT EXISTS "
+                "(SELECT 1 FROM continuity_capture_scope next JOIN continuity_captures c USING(capture_id) "
+                "WHERE next.execution_id=s.execution_id AND c.supersedes=s.capture_id) ORDER BY s.capture_id",
+                (execution_id,)):
+            capture = cls._read_turn_capture(db, execution_id, capture_id)
+            issues = set()
+            turn_key = capture.turn_key
+            turn_commitment = None
+            if turn_key is None:
+                issues.add("TURN_IDENTITY_UNVERIFIED")
+            else:
+                if turn_key not in turn_commitments:
+                    claim_ids = db.execute(
+                        "SELECT c.capture_id FROM continuity_captures c JOIN continuity_capture_scope s USING(capture_id) "
+                        "WHERE s.execution_id=? AND c.turn_key=? ORDER BY c.capture_id", (execution_id, turn_key))
+                    commitment, _ = _continuity_section((ref for ref, in claim_ids), gaps)
+                    turn_commitments[turn_key] = commitment["sha256"]
+                turn_commitment = turn_commitments[turn_key]
+                revisions, observations = db.execute(
+                    "SELECT COUNT(DISTINCT revision), COUNT(DISTINCT CASE WHEN revision=? THEN record END) "
+                    "FROM continuity_captures JOIN continuity_capture_scope USING(capture_id) "
+                    "WHERE execution_id=? AND turn_key=?", (capture.revision, execution_id, turn_key)).fetchone()
+                if observations > 1:
+                    issues.add("TURN_REVISION_CONFLICT")
+                if revisions > 1 and db.execute(
+                        "SELECT 1 FROM continuity_captures other JOIN continuity_capture_scope s USING(capture_id) "
+                        "WHERE s.execution_id=? AND turn_key=? AND capture_id<>? AND revision<>? "
+                        "AND NOT EXISTS (SELECT 1 FROM continuity_captures next "
+                        "JOIN continuity_capture_scope successor USING(capture_id) "
+                        "WHERE successor.execution_id=s.execution_id AND next.supersedes=other.capture_id) LIMIT 1",
+                        (execution_id, turn_key, capture_id, capture.revision)).fetchone():
+                    issues.add("TURN_REVISION_ORDER_UNVERIFIED")
+            if capture.raw is None:
+                issues.add("TURN_SOURCE_READBACK_UNVERIFIED")
+            actor = cls._continuity_actor(db, registration, capture)
+            if capture.supersedes is not None:
+                old = cls._read_turn_capture(db, execution_id, capture.supersedes)
+                _require(old is not None and old.turn_key == turn_key and old.revision != capture.revision,
+                         "CONTINUITY_CAPTURE_SUPERSESSION_INVALID")
+            if actor == "UNVERIFIED":
+                issues.add("TURN_ACTOR_UNVERIFIED")
+            gaps.update(issues)
+            # IDs pin all exact coordinates and provenance without copying chat text.
+            yield {"capture_id": capture_id, "turn_key": turn_key, "turn_observations_sha256": turn_commitment,
+                   "revision": capture.revision,
+                   "role": capture.role, "actor": actor, "wake_event_key": capture.wake_event_key,
+                   "coverage": capture.coverage, "cursor": capture.cursor, "supersedes": capture.supersedes,
+                   "content_sha256": capture.content_sha256, "local_raw": capture.raw is not None,
+                   "gaps": sorted(issues)}
+
+    @staticmethod
+    def _continuity_actor(db, registration: Registration, capture: TurnCapture) -> str:
+        if (capture.role == "USER" and capture.turn is not None and capture.wake_event_key is not None
+                and capture.conversation == _CHAT.fullmatch(registration.binding.chat_url)[1]):
+            row = db.execute("SELECT record FROM events WHERE event_key=?", (capture.wake_event_key,)).fetchone()
+            if row is not None:
+                record = _decode_unique(row[0])
+                proof = record["evidence"]
+                if ("RESERVED" in record["history"] and _DELIVERY_STATES.intersection(record["history"])
+                        and proof.get("marker") == registration.marker
+                        and capture.turn in (proof.get("user_turn_ref"), proof.get("user_turn_id"))):
+                    return "WAKE_AUTOMATION"
+        return "UNVERIFIED"
+
+    @classmethod
+    def _continuity_instructions(cls, db, execution_id: str):
+        for instruction_id, in db.execute(
+                "SELECT i.instruction_id FROM continuity_instructions i WHERE i.execution_id=? AND NOT EXISTS "
+                "(SELECT 1 FROM continuity_instructions WHERE supersedes=i.instruction_id) "
+                "ORDER BY i.obligation", (execution_id,)):
+            observation = cls._read_instruction_observation(db, execution_id, instruction_id)
+            _require(cls._read_turn_capture(db, execution_id, observation.capture_id) is not None,
+                     "CONTINUITY_CAPTURE_SOURCE_INVALID")
+            yield {"instruction_id": instruction_id, "capture_id": observation.capture_id,
+                   "obligation": observation.obligation, "revision": observation.revision, "kind": observation.kind,
+                   "lifetime": observation.lifetime, "state": "PENDING_AUTHORITY", "supersedes": observation.supersedes}
+
     def enrolled_origin(self, registration: Registration, principal: str, *, for_upgrade: bool = False,
                         for_retirement: bool = False) -> dict | None:
         """Read the exact existing enrollment without creating, migrating or recovering state."""
@@ -2560,7 +3191,7 @@ class Journal:
                          and db.execute("PRAGMA application_id").fetchone() == (_APP_ID,),
                          "JOURNAL_SCHEMA_INCOMPATIBLE")
                 schemas = dict(db.execute("SELECT name, CASE WHEN type='table' THEN sql END FROM sqlite_master"))
-                _, decision_tables = _extension_tables(schemas)
+                _, decision_tables, _ = _extension_tables(schemas)
                 _require(schemas.get("identity") == _TABLES["identity"], "JOURNAL_SCHEMA_INCOMPATIBLE")
                 self._check_registration(db, owner, registration)
                 if "local_origin" not in schemas and not (for_upgrade or for_retirement):
@@ -2669,7 +3300,8 @@ class Journal:
                 db.execute("PRAGMA trusted_schema=OFF")
                 _require(db.execute("PRAGMA quick_check").fetchall() == [("ok",)], "JOURNAL_CORRUPT")
                 version = 2
-                source_table = origin_table = cursor_table = execution_tables = decision_tables = False
+                source_table = origin_table = cursor_table = False
+                execution_tables = decision_tables = continuity_tables = False
                 if not new:
                     version, = db.execute("PRAGMA user_version").fetchone()
                     tables = dict(_TABLES, chrome_lifecycle=_CHROME_TABLE) if version == 3 else _TABLES
@@ -2684,12 +3316,14 @@ class Journal:
                     cursor_table = ("table", "standing_ef02_cursor", _STANDING_CURSOR_TABLE) in stored_tables
                     if cursor_table:
                         tables = dict(tables, standing_ef02_cursor=_STANDING_CURSOR_TABLE)
-                    execution_tables, decision_tables = _extension_tables(
+                    execution_tables, decision_tables, continuity_tables = _extension_tables(
                         {name: sql if kind == "table" else None for kind, name, sql in stored_tables})
                     if execution_tables:
                         tables = dict(tables, **_EXECUTION_TABLES)
                     if decision_tables:
                         tables = dict(tables, **_DECISION_TABLES)
+                    if continuity_tables:
+                        tables = dict(tables, **_CONTINUITY_TABLES)
                     _require(version in (2, 3)
                              and db.execute("PRAGMA application_id").fetchone() == (_APP_ID,)
                              and stored_tables == [("table", name, sql) for name, sql in sorted(tables.items())],
@@ -2734,7 +3368,7 @@ class Journal:
                     data["chrome"] = _decode_unique(rows[0][1])
                     _validate_chrome(data["chrome"])
                 yield _SQLiteTransaction(db, self, registration, owner, source_table, execution_tables,
-                                         decision_tables), data
+                                         decision_tables, continuity_tables), data
                 self._owner(owner)
         except sqlite3.DatabaseError as exc:
             code = "JOURNAL_BUSY" if isinstance(exc, sqlite3.OperationalError) and \

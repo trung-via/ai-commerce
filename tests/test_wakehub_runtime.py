@@ -22,6 +22,7 @@ import sqlite3
 import subprocess
 import sys
 from tempfile import TemporaryFile
+from threading import Barrier
 from types import FunctionType, SimpleNamespace
 from urllib.error import HTTPError
 import zipfile
@@ -1474,7 +1475,7 @@ def test_execution_lineage_checks_the_saved_event_commitment(ingress):
     assert journal.path.read_bytes() == before
 
 
-def decision_fixture(i, *, runs=(17, 18), include_other=True):
+def decision_fixture(i, *, runs=(17, 18), include_other=True, objective=None):
     journal, registration, owner = execution_registry(i)
     for run_id in runs:
         actions = [
@@ -1488,8 +1489,11 @@ def decision_fixture(i, *, runs=(17, 18), include_other=True):
         evidence = journal.decision_source_evidence(registration, identity, principal=owner)
         assert len(evidence) == len(actions)
         assert all(item.lineage.code == "OWNER_REQUEST_PRODUCER_UNAVAILABLE" for item in evidence)
-    parents = [journal.admit_execution(registration, execution_request(key), principal=owner)
-               for key in ("decision-parent", "unrelated-parent")]
+    request = execution_request("decision-parent")
+    if objective is not None:
+        request = replace(request, objective=objective)
+    parents = [journal.admit_execution(registration, item, principal=owner)
+               for item in (request, execution_request("unrelated-parent"))]
     for number, run_id in enumerate(runs, 1):
         journal.record_execution_attempt(registration, execution_attempt(
             parents[0], number, attempt=f"attempt-{run_id}", run_id=run_id), principal=owner)
@@ -1822,6 +1826,423 @@ def test_decision_outbox_existing_custody_stays_frozen(ingress, custody):
     for mode in ({"for_upgrade": True}, {"for_retirement": True}):
         with pytest.raises(r.RuntimeHold, match="^DECISION_OPERATION_CUSTODY_UNRESOLVED$"):
             journal.enrolled_origin(registration, owner, **mode)
+
+
+def continuity_fixture(ingress):
+    journal, registration, owner, demand, operation, _ = decision_fixture(ingress, runs=(17,))
+    journal.record_decision_demand(registration, demand, principal=owner)
+    proposal = r.DecisionProposal(demand.decision_id, 1, digest("synthetic proposal"), next_operation=operation)
+    plan = journal.record_decision_plan(registration, proposal, principal=owner)
+    return journal, registration, owner, demand, proposal, plan
+
+
+def continuity_turn(registration, **changes):
+    raw = b"Review the fixture once.\r\n"
+    capture = r.TurnCapture("fixture-project", "fixture-account",
+                            r._CHAT.fullmatch(registration.binding.chat_url)[1], "fixture-branch",
+                            "fixture-turn-1", "rev-1", "USER", r.bytes_digest(raw), raw=raw,
+                            observed_actor="claimed-human", actor_provenance="fixture-actor-claim")
+    return replace(capture, **changes)
+
+
+def test_continuity_capture_preserves_bytes_revisions_and_actor_uncertainty(ingress, monkeypatch):
+    journal, registration, owner, demand, _, _ = continuity_fixture(ingress)
+    eid, did = demand.execution_id, demand.decision_id
+    coverage, = demand.coverage
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Continuity accessed a browser or attempted to send")
+
+    monkeypatch.setattr(r.NativeSender, "send", forbidden)
+    monkeypatch.setattr(r.NativeBrainAdapter, "authenticate_receipt", forbidden)
+    monkeypatch.setattr(r.LocalChromeDoorbellAdapter, "send_registered_ui", forbidden)
+    monkeypatch.setattr(r.LocalChromeDoorbellAdapter, "observe_registered_ui", forbidden)
+    calls = ingress["calls"].copy()
+
+    def save(capture):
+        return journal.record_turn_capture(registration, eid, capture, principal=owner)
+
+    capture = continuity_turn(registration)
+    first = save(capture)
+    assert save(capture) == first
+    same_text = save(replace(capture, turn="fixture-turn-2"))
+    assert same_text != first
+    edited_bytes = b"Review the scoped fixture once.\r\n"
+    edited = replace(capture, revision="rev-2", supersedes=first, raw=edited_bytes,
+                     content_sha256=r.bytes_digest(edited_bytes), coverage="PARTIAL", cursor="fixture-cursor")
+    latest = save(edited)
+    missing_identity = replace(capture, branch=None)
+    assert save(missing_identity) != save(missing_identity)
+    ambiguous = save(replace(edited, observed_actor="conflicting-actor"))
+    ref_only = save(replace(capture, turn="fixture-turn-3", raw=None, source_ref="fixture:immutable:turn-3:rev-1"))
+    with pytest.raises(r.RuntimeHold, match="^CONTINUITY_CAPTURE_INVALID$"):
+        replace(capture, raw=b"x" * 65537)
+    with pytest.raises(r.RuntimeHold, match="^CONTINUITY_CAPTURE_SUPERSESSION_INVALID$"):
+        save(replace(edited, supersedes=same_text))
+
+    # A saved USER observation matched to a prior reservation is automation.
+    # These are historical synthetic browser inputs, with no Send.
+    automation = save(replace(capture, turn="fixture-automation-turn", wake_event_key=coverage.event_key))
+    with journal.locked(registration) as (txn, data):
+        data["events"][coverage.event_key].update(
+            status="UI_TURN_OBSERVED", code="UI_USER_TURN_OBSERVED",
+            history=["PENDING", "RESERVED", "UI_TURN_OBSERVED"],
+            evidence={"marker": registration.marker, "user_turn_ref": "fixture-automation-turn"})
+        txn.write(data)
+    task = r.InstructionObservation(latest, "fixture-review", "r1", "TASK", "ONE_SHOT", "Review this fixture once.")
+    instruction = journal.record_instruction_observation(registration, eid, task, principal=owner)
+    candidate = replace(task, capture_id=automation, revision="r2", kind="POLICY", lifetime="TEST_ONLY",
+                        supersedes=instruction, summary="Synthetic test instruction.")
+    current = journal.record_instruction_observation(registration, eid, candidate, principal=owner)
+    assert journal.record_instruction_observation(registration, eid, task, principal=owner) == instruction
+    with pytest.raises(r.RuntimeHold, match="^CONTINUITY_INSTRUCTION_REVISION_STALE$"):
+        journal.record_instruction_observation(registration, eid, replace(candidate, revision="r3"), principal=owner)
+
+    journal, _, _ = execution_registry(ingress)
+    assert journal.turn_capture(registration, eid, first, principal=owner) == capture
+    assert journal.turn_capture(registration, eid, latest, principal=owner) == edited
+    assert save(capture) == first
+    assert journal.instruction_observation(registration, eid, instruction, principal=owner) == task
+    assert journal.instruction_observation(registration, eid, current, principal=owner) == candidate
+    packet = journal.build_continuity_packet(registration, eid, did, principal=owner)
+    context = json.loads(packet.context)
+    captures = {row["capture_id"]: row for row in context["captures"]["rows"]}
+    assert first not in captures and {latest, same_text, ambiguous, automation, ref_only} <= captures.keys()
+    assert captures[latest]["actor"] == "UNVERIFIED"
+    assert captures[latest]["coverage"] == "PARTIAL" and captures[latest]["cursor"] == "fixture-cursor"
+    assert "TURN_REVISION_CONFLICT" in captures[ambiguous]["gaps"]
+    assert captures[automation]["role"] == "USER" and captures[automation]["actor"] == "WAKE_AUTOMATION"
+    assert {"CAPTURE_INVENTORY_UNVERIFIED", "TURN_IDENTITY_UNVERIFIED", "TURN_SOURCE_READBACK_UNVERIFIED",
+            "OWNER_POLICY_SOURCE_UNAVAILABLE"} <= set(context["gaps"])
+    observed, = context["instructions"]["rows"]
+    assert (observed["instruction_id"], observed["state"], observed["lifetime"]) == (
+        current, "PENDING_AUTHORITY", "TEST_ONLY")
+    assert "Review the fixture once" not in packet.context
+    assert journal.resume_decision(registration, eid, did, packet, principal=owner).authority == "PENDING_AUTHORITY"
+    assert ingress["calls"] == calls
+
+
+def test_continuity_resume_rebuilds_scoped_evidence_and_preserves_unknown(ingress):
+    journal, registration, owner, demand, _, plan = continuity_fixture(ingress)
+    eid, did = demand.execution_id, demand.decision_id
+    coverage, = demand.coverage
+    calls = ingress["calls"].copy()
+
+    def build():
+        return journal.build_continuity_packet(registration, eid, did, principal=owner)
+
+    def resume(packet):
+        return journal.resume_decision(registration, eid, did, packet, principal=owner)
+
+    first = build()
+    context = json.loads(first.context)
+    assert (first.execution_id, first.decision_id, first.checkpoint) == (eid, did, plan.checkpoint)
+    assert context["status"] == "PENDING" and context["execution"]["ac"] is None
+    assert context["execution"]["objective"] == execution_request().objective
+    assert context["decision"]["decision_sha256"] == plan.decision_sha256
+    assert context["source_evidence"]["rows"][0]["event"]["payload_sha256"] == coverage.payload_sha256
+    assert context["outbox"]["rows"][0]["state"] == "PENDING_INTENT"
+    other = journal.admit_execution(registration, execution_request("unrelated-parent"), principal=owner)
+    journal.record_turn_capture(registration, other, continuity_turn(registration, turn="unrelated"), principal=owner)
+    assert build() == first
+    assert resume(first).authority == "PENDING_AUTHORITY"
+    assert resume(first) == resume(first)
+    for foreign_e, foreign_d in ((other, did), (eid, digest("unrelated decision"))):
+        with pytest.raises(r.RuntimeHold, match="^CONTINUITY_SCOPE_MISMATCH$"):
+            journal.resume_decision(registration, foreign_e, foreign_d, first, principal=owner)
+    with pytest.raises(r.RuntimeHold, match="^CONTINUITY_SCOPE_MISMATCH$"):
+        journal.build_continuity_packet(registration, other, did, principal=owner)
+
+    capture_id = journal.record_turn_capture(registration, eid, continuity_turn(registration), principal=owner)
+    instruction = r.InstructionObservation(capture_id, "open-proof", "r1", "QUESTION", "ONE_SHOT", "Proof ready?")
+    journal.record_instruction_observation(registration, eid, instruction, principal=owner)
+    other_demand = replace(demand, obligation="secondary-review")
+    journal.record_decision_demand(registration, other_demand, principal=owner)
+    with journal.locked(registration) as (txn, data):
+        data["events"][coverage.event_key].update(
+            status="UNKNOWN_EFFECT", code="SEND_OUTCOME_UNKNOWN", history=["PENDING", "RESERVED", "UNKNOWN_EFFECT"])
+        txn.write(data)
+    with closing(sqlite3.connect(journal.path)) as db, db:
+        db.execute("UPDATE decision_outbox SET state='UNKNOWN' WHERE operation_id=?", (plan.operation.operation_id,))
+    refreshed = build()
+    assert refreshed.context_sha256 != first.context_sha256 and refreshed.checkpoint == first.checkpoint
+    assert journal.continuity_packet(registration, first.packet_id, principal=owner) == first
+    with pytest.raises(r.RuntimeHold, match="^CONTINUITY_CONTEXT_STALE$"):
+        resume(first)
+    context = json.loads(refreshed.context)
+    assert context["source_evidence"]["rows"][0]["custody"] == "UNKNOWN"
+    assert context["outbox"]["rows"][0]["state"] == "UNKNOWN"
+    assert any(row["decision_id"] == other_demand.decision_id and row["state"] == "PENDING_REPLAN"
+               for row in context["decision_obligations"]["rows"])
+    for field in ("decision_obligations", "instructions", "source_evidence", "outbox", "claimed_receipt"):
+        altered = dict(context)
+        if field == "claimed_receipt":
+            altered.update(claimed_receipt={"checkpoint": refreshed.checkpoint,
+                                            "context_sha256": refreshed.context_sha256, "status": "ACK"})
+        else:
+            altered[field] = {**context[field], "rows": []}
+        with pytest.raises(r.RuntimeHold, match="^CONTINUITY_PACKET_UNVERIFIED$"):
+            resume(replace(refreshed, context=json.dumps(altered, sort_keys=True, separators=(",", ":"))))
+    assert resume(refreshed).authority == "PENDING_AUTHORITY"
+    assert journal.decision_plan(registration, did, principal=owner).operation.state == "UNKNOWN"
+
+    with closing(sqlite3.connect(journal.path)) as db, db:
+        db.execute("UPDATE execution_source_events SET source_event='{}' WHERE source_key=?", (coverage.identity.key,))
+    with pytest.raises(r.RuntimeHold, match="^EXECUTION_LINEAGE_INVALID$"):
+        resume(refreshed)
+    assert ingress["calls"] == calls
+
+
+def test_continuity_requires_current_decision_revision_and_explicit_replan(ingress):
+    journal, registration, owner, demand, proposal, plan = continuity_fixture(ingress)
+    eid, did = demand.execution_id, demand.decision_id
+    original = journal.build_continuity_packet(registration, eid, did, principal=owner)
+    revised = replace(demand, revision="explicit-replan")
+    journal.record_decision_demand(registration, revised, principal=owner)
+    with pytest.raises(r.RuntimeHold, match="^DECISION_REVISION_STALE$"):
+        journal.resume_decision(registration, eid, did, original, principal=owner)
+    with pytest.raises(r.RuntimeHold, match="^CONTINUITY_REPLAN_REQUIRED$"):
+        journal.build_continuity_packet(registration, eid, revised.decision_id, principal=owner)
+    with pytest.raises(r.RuntimeHold, match="^DECISION_REVISION_STALE$"):
+        journal.record_decision_plan(registration, replace(proposal, version=2, expected_checkpoint=plan.checkpoint),
+                                     principal=owner)
+
+    successor = replace(proposal, decision_id=revised.decision_id, expected_checkpoint=plan.checkpoint,
+                        proposal_sha256=digest("replanned fixture"), next_operation=None)
+    new = journal.record_decision_plan(registration, successor, principal=owner)
+    current = journal.build_continuity_packet(registration, eid, revised.decision_id, principal=owner)
+    assert current.checkpoint == new.checkpoint
+    assert journal.continuity_packet(registration, original.packet_id, principal=owner) == original
+    assert journal.record_decision_plan(registration, proposal, principal=owner) == plan
+    assert json.loads(current.context)["outbox"]["rows"][0]["state"] == "PENDING_INTENT"
+    newer = journal.record_decision_plan(registration, replace(successor, version=2, expected_checkpoint=new.checkpoint),
+                                         principal=owner)
+    assert newer.checkpoint != current.checkpoint
+    with pytest.raises(r.RuntimeHold, match="^DECISION_CHECKPOINT_STALE$"):
+        journal.resume_decision(registration, eid, revised.decision_id, current, principal=owner)
+
+
+def test_continuity_transaction_rollback_reopen_and_competing_resumes(ingress, monkeypatch):
+    journal, registration, owner, demand, _, plan = continuity_fixture(ingress)
+    eid, did = demand.execution_id, demand.decision_id
+    connect = sqlite3.connect
+    fail_on = "INSERT INTO continuity_packets"
+
+    class Fault(sqlite3.Connection):
+        def execute(self, sql, parameters=(), /):
+            result = super().execute(sql, parameters)
+            if sql.startswith(fail_on):
+                raise RuntimeError("injected after continuity write")
+            return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(r.sqlite3, "connect", lambda *args, **kwargs: connect(*args, **kwargs, factory=Fault))
+        with pytest.raises(RuntimeError, match="injected after continuity write"):
+            journal.build_continuity_packet(registration, eid, did, principal=owner)
+    with closing(connect(journal.path)) as db:
+        assert db.execute("SELECT name FROM sqlite_master WHERE name LIKE 'continuity_%'").fetchall() == []
+    assert journal.enrolled_origin(registration, owner, for_upgrade=True) is None
+    journal, _, _ = execution_registry(ingress)
+    packet = journal.build_continuity_packet(registration, eid, did, principal=owner)
+    with journal.locked(registration) as (txn, _):
+        txn.write_chrome({"scope": None, "process": None, "launch": None}, migrate=True)
+    assert journal.enrolled_origin(registration, owner, for_retirement=True) is None
+    assert journal.enrolled_origin(registration, owner, for_upgrade=True) is None
+    assert journal.continuity_packet(registration, packet.packet_id, principal=owner) == packet
+    assert journal.decision_plan(registration, did, principal=owner) == plan
+
+    fail_on = "INSERT INTO continuity_resumes"
+    with monkeypatch.context() as patch:
+        patch.setattr(r.sqlite3, "connect", lambda *args, **kwargs: connect(*args, **kwargs, factory=Fault))
+        with pytest.raises(RuntimeError, match="injected after continuity write"):
+            journal.resume_decision(registration, eid, did, packet, principal=owner)
+    with closing(connect(journal.path)) as db:
+        assert db.execute("SELECT COUNT(*) FROM continuity_resumes").fetchone() == (0,)
+
+    # Keep all 24 submissions and start each competing pair together. A single
+    # burst can exhaust the journal's five-second lock budget on a loaded host.
+    competing_pair = Barrier(2)
+
+    def submit(_):
+        competing_pair.wait()
+        reopened, _, _ = execution_registry(ingress)
+        return reopened.resume_decision(registration, eid, did, packet, principal=owner)
+
+    receipts = []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for start in range(0, 24, 2):
+            receipts.extend(pool.map(submit, range(start, start + 2)))
+    first, *duplicates = receipts
+    assert first.authority == "PENDING_AUTHORITY" and duplicates == [first] * 23
+    with closing(connect(journal.path)) as db:
+        assert db.execute("SELECT packet_id FROM continuity_resumes").fetchall() == [(packet.packet_id,)]
+        assert db.execute("SELECT COUNT(*) FROM continuity_packets").fetchone() == (1,)
+
+
+def test_continuity_pages_recover_every_committed_tail_from_private_journal(ingress, monkeypatch):
+    objective = "Review only the exact fixture evidence.\n" * 40
+    journal, registration, owner, demand, operation, sources = decision_fixture(
+        ingress, runs=range(17, 26), objective=objective)
+    eid, did = demand.execution_id, demand.decision_id
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Continuity accessed a browser or attempted to send")
+
+    monkeypatch.setattr(r.NativeSender, "send", forbidden)
+    monkeypatch.setattr(r.NativeBrainAdapter, "authenticate_receipt", forbidden)
+    monkeypatch.setattr(r.LocalChromeDoorbellAdapter, "send_registered_ui", forbidden)
+    monkeypatch.setattr(r.LocalChromeDoorbellAdapter, "observe_registered_ui", forbidden)
+    calls = ingress["calls"].copy()
+
+    obligations = sorted([replace(demand, obligation=f"review-{n}") for n in range(9)],
+                         key=lambda item: item.decision_id)
+    unresolved = obligations.pop()
+    journal.record_decision_demand(registration, unresolved, principal=owner)
+    operations = {}
+    for n, obligation in enumerate([demand, *obligations]):
+        intent = replace(operation, slot=f"verify-{n}", effect=None,
+                         objective=objective + f"Exact operation {n}")
+        journal.record_decision_demand(registration, obligation, principal=owner)
+        proposal = r.DecisionProposal(obligation.decision_id, 1, digest(f"proposal-{n}"), next_operation=intent)
+        plan = journal.record_decision_plan(registration, proposal, principal=owner)
+        operations[intent.operation_id] = plan.operation
+
+    captures, instructions = {}, {}
+    tail_summary = "HOLD the remaining operation. An owner override requires exact proof."
+    for n in range(9):
+        capture = continuity_turn(registration, turn=f"fixture-scoped-turn-{n}")
+        capture_id = journal.record_turn_capture(registration, eid, capture, principal=owner)
+        captures[capture_id] = capture
+        observation = r.InstructionObservation(
+            capture_id, f"instruction-{n}", "r1", "OVERRIDE" if n == 8 else "TASK", "ONE_SHOT",
+            tail_summary if n == 8 else f"Review fixture {n}.")
+        instruction_id = journal.record_instruction_observation(registration, eid, observation, principal=owner)
+        instructions[instruction_id] = observation
+
+    def build():
+        return journal.build_continuity_packet(registration, eid, did, principal=owner)
+
+    def page(packet, section, cursor=None, **changes):
+        refs = {"execution_id": eid, "decision_id": did, "checkpoint": packet.checkpoint,
+                "packet_id": packet.packet_id, "section": section, "principal": owner, "cursor": cursor}
+        return journal.continuity_page(registration, **(refs | changes))
+
+    original = build()
+    first = page(original, "instructions")
+    assert first.offset == 0 and not first.preview_complete and first.next_cursor is not None
+    assert tail_summary not in original.context and instruction_id not in original.context
+    assert len(captures) == 9 and len({item.content_sha256 for item in captures.values()}) == 1
+
+    # An unrelated Execution can observe the same turn coordinate independently.
+    other = journal.admit_execution(registration, execution_request("unrelated-parent"), principal=owner)
+    foreign_capture = journal.record_turn_capture(
+        registration, other, replace(capture, actor_provenance="unrelated-claim"), principal=owner)
+    foreign_instruction = journal.record_instruction_observation(
+        registration, other, replace(observation, capture_id=foreign_capture), principal=owner)
+    assert journal.turn_capture(registration, eid, foreign_capture, principal=owner) is None
+    assert journal.instruction_observation(registration, eid, foreign_instruction, principal=owner) is None
+    assert build() == original
+    last = page(original, "instructions", first.next_cursor)
+    assert last.details[instruction_id].summary == tail_summary and last.next_cursor is None
+
+    for changes in ({"execution_id": other}, {"decision_id": unresolved.decision_id},
+                    {"checkpoint": digest("wrong checkpoint")}):
+        with pytest.raises(r.RuntimeHold, match="^CONTINUITY_SCOPE_MISMATCH$"):
+            page(original, "instructions", **changes)
+    with pytest.raises(r.RuntimeHold, match="^CONTINUITY_PACKET_UNVERIFIED$"):
+        page(original, "instructions", packet_id=digest("absent packet"))
+    with pytest.raises(r.RuntimeHold, match="^JOURNAL_OWNER_DRIFT$"):
+        page(original, "instructions", principal="unrelated-owner")
+    with pytest.raises(r.RuntimeHold, match="^CONTINUITY_SECTION_INVALID$"):
+        page(original, "execution")
+    for section, cursor in (("captures", first.next_cursor), ("instructions", "8." + "0" * 64),
+                            ("instructions", r._continuity_cursor(original.packet_id, "instructions", 16))):
+        with pytest.raises(r.RuntimeHold, match="^CONTINUITY_CURSOR_INVALID$"):
+            page(original, section, cursor)
+
+    # The envelope can be internally consistent and still commit to the wrong rows.
+    context = json.loads(original.context)
+    context["instructions"]["sha256"] = digest("tampered commitment")
+    altered = replace(original, context=json.dumps(context, sort_keys=True, separators=(",", ":")))
+    with closing(sqlite3.connect(journal.path)) as db, db:
+        db.execute("INSERT INTO continuity_packets VALUES (?, ?, ?, ?, ?)",
+                   (altered.packet_id, eid, did, altered.checkpoint, altered.context))
+    with pytest.raises(r.RuntimeHold, match="^CONTINUITY_CONTEXT_STALE$"):
+        page(altered, "source_evidence")
+
+    tail_source = sources[-1][0].coverage
+    with journal.locked(registration) as (txn, data):
+        data["events"][tail_source.event_key].update(
+            status="UNKNOWN_EFFECT", code="SEND_OUTCOME_UNKNOWN", history=["PENDING", "RESERVED", "UNKNOWN_EFFECT"])
+        txn.write(data)
+    with pytest.raises(r.RuntimeHold, match="^CONTINUITY_CONTEXT_STALE$"):
+        page(original, "instructions", first.next_cursor)
+    source_unknown = build()
+    outbox_first = page(source_unknown, "outbox")
+    tail_operation = max(operations)
+    with closing(sqlite3.connect(journal.path)) as db, db:
+        db.execute("UPDATE decision_outbox SET state='UNKNOWN' WHERE operation_id=?", (tail_operation,))
+    with pytest.raises(r.RuntimeHold, match="^CONTINUITY_CONTEXT_STALE$"):
+        page(source_unknown, "outbox", outbox_first.next_cursor)
+    operations[tail_operation] = replace(operations[tail_operation], state="UNKNOWN")
+    packet = build()
+    journal, _, _ = execution_registry(ingress)
+    assert journal.continuity_packet(registration, original.packet_id, principal=owner) == original
+    assert journal.continuity_packet(registration, source_unknown.packet_id, principal=owner) == source_unknown
+    with pytest.raises(r.RuntimeHold, match="^CONTINUITY_CURSOR_INVALID$"):
+        page(packet, "instructions", first.next_cursor)
+
+    context = json.loads(packet.context)
+    sections = {"source_evidence": "number", "decision_obligations": "decision_id", "outbox": "operation_id",
+                "captures": "capture_id", "instructions": "instruction_id"}
+    recovered, details = {}, {}
+    for section, key in sections.items():
+        rows = []
+        next_page = page(packet, section)
+        details[section] = {}
+        while True:
+            assert next_page.offset == len(rows) and 0 < len(next_page.rows) <= 8
+            assert (next_page.count, next_page.sha256) == (9 if section != "decision_obligations" else 10,
+                                                         context[section]["sha256"])
+            rows.extend(next_page.rows)
+            details[section].update(next_page.details)
+            if next_page.next_cursor is None:
+                break
+            next_page = page(packet, section, next_page.next_cursor)
+        assert rows[:8] == context[section]["rows"]
+        assert len({row[key] for row in rows}) == len(rows) == context[section]["count"]
+        encoded = b"".join(json.dumps(row, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
+                           for row in rows)
+        assert hashlib.sha256(encoded).hexdigest() == context[section]["sha256"]
+        recovered[section] = rows
+
+    assert recovered["source_evidence"][-1]["custody"] == "UNKNOWN"
+    assert recovered["source_evidence"][-1]["event"] == json.loads(json.dumps(asdict(tail_source)))
+    assert {row["decision_id"] for row in recovered["decision_obligations"]} == {
+        item.decision_id for item in [demand, *obligations, unresolved]}
+    assert any(row["decision_id"] == unresolved.decision_id and row["state"] == "PENDING_REPLAN"
+               for row in recovered["decision_obligations"][8:])
+    assert (recovered["outbox"][-1]["operation_id"], recovered["outbox"][-1]["state"]) == (tail_operation, "UNKNOWN")
+    assert details["outbox"] == operations and details["instructions"] == instructions
+    assert recovered["instructions"][-1]["instruction_id"] == instruction_id
+    assert journal.instruction_observation(registration, eid, instruction_id, principal=owner) == observation
+    assert {row["capture_id"]: journal.turn_capture(registration, eid, row["capture_id"], principal=owner)
+            for row in recovered["captures"]} == captures
+    assert context["execution"]["objective_truncated"]
+    assert journal.execution_request(registration, eid, principal=owner).objective == objective
+    resumed = journal.resume_decision(registration, eid, did, packet, principal=owner)
+    assert (resumed.authority, resumed.retrieval_proof) == ("PENDING_AUTHORITY", "UNVERIFIED")
+
+    before_revision = page(packet, "instructions")
+    successor = replace(observation, revision="r2", supersedes=instruction_id, summary="Retain HOLD pending proof.")
+    successor_id = journal.record_instruction_observation(registration, eid, successor, principal=owner)
+    with pytest.raises(r.RuntimeHold, match="^CONTINUITY_CONTEXT_STALE$"):
+        page(packet, "instructions", before_revision.next_cursor)
+    revised = build()
+    revised_first = page(revised, "instructions")
+    assert page(revised, "instructions", revised_first.next_cursor).details == {successor_id: successor}
+    assert journal.continuity_packet(registration, packet.packet_id, principal=owner) == packet
+    assert ingress["calls"] == calls
 
 
 def register_execution_completion(i, *, run_id, actions, batch=None):
