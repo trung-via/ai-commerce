@@ -6,7 +6,8 @@ on the temporary directory's potentially non-inheritable OWNER RIGHTS grant.
 Private SQLite durability, provenance checks, actual A03 consumer and P0
 receipt validation execute normally. No Git, browser, login or external writes.
 """
-from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing, contextmanager
 from dataclasses import FrozenInstanceError, asdict, replace
 from datetime import datetime, timezone
 import faulthandler
@@ -1234,6 +1235,262 @@ def test_ingress_cannot_skip_independent_artifact_authentication(ingress, monkey
     result = r.run_read_only(ingress["config_path"], ingress["root"])
     assert result.code == "PROVENANCE_UNVERIFIED" and len(calls) == 1
     assert not r.Path(ingress["config"]["journal"]).exists()
+
+
+def execution_registry(i):
+    path = r.Path(i["config"]["journal"])
+    return r.Journal(path, i["root"]), i["registration"], r._private_identity(path.parent)
+
+
+def execution_request(key="owner-request-1", **changes):
+    return replace(r.ExecutionRequest(key, "Exact objective\nwith two lines", "ef02", "verify"), **changes)
+
+
+def execution_attempt(execution_id, number=1, *, batch="fixture-batch", action="fixture-action",
+                      attempt="fixture-attempt", run_id=17, run_attempt=1, repository=r.REPOSITORY):
+    return r.ExecutionAttempt(
+        execution_id, number, r.ExecutionAlias("ef02_attempt", (repository, batch, action, attempt)),
+        r.ExecutionAlias("github_run_attempt", (repository, run_id, run_attempt)))
+
+
+def test_execution_admission_concurrent_restart_and_exact_contract(ingress):
+    journal, registration, owner = execution_registry(ingress)
+    with journal.locked(registration):
+        pass
+    request = execution_request()
+    with ThreadPoolExecutor(max_workers=24) as pool:
+        ids = list(pool.map(lambda _: journal.admit_execution(registration, request, principal=owner), range(24)))
+    assert len(set(ids)) == 1
+    journal, _, _ = execution_registry(ingress)
+    assert journal.admit_execution(registration, request, principal=owner) == ids[0]
+    for change in ({"objective": "different"}, {"consumer": "other"}, {"operation_slot": "review"}):
+        with pytest.raises(r.RuntimeHold, match="^EXECUTION_REQUEST_CONFLICT$"):
+            journal.admit_execution(registration, execution_request(**change), principal=owner)
+    distinct = journal.admit_execution(registration, execution_request("owner-request-2"), principal=owner)
+    assert distinct != ids[0]
+    with closing(sqlite3.connect(journal.path)) as db:
+        assert db.execute("SELECT COUNT(*) FROM execution_requests").fetchone() == (2,)
+    assert ingress["calls"] == []
+
+
+def test_execution_registry_rejects_unowned_and_test_only_admission(ingress, composition):
+    make, _, fixture_registration, _, fixture_path, _ = composition
+    journal, registration, owner = execution_registry(ingress)
+    with pytest.raises(r.RuntimeHold, match="^JOURNAL_OWNER_DRIFT$"):
+        journal.admit_execution(registration, execution_request(), principal="foreign-owner")
+    assert not journal.path.exists()
+    with pytest.raises(r.RuntimeHold, match="^EXECUTION_OWNER_REQUIRED$"):
+        make().journal.admit_execution(fixture_registration, execution_request(), principal=owner)
+    with pytest.raises(r.RuntimeHold, match="^EXECUTION_REQUEST_INVALID$"):
+        journal.admit_execution(registration, {"purpose": "TEST_ONLY"}, principal=owner)
+    assert not fixture_path.exists()
+    assert not journal.path.exists()
+
+
+def test_composed_execution_lineage_retains_pending_and_scopes_each_action(ingress):
+    i = ingress
+    register_execution_completion(i, run_id=17, actions=[
+        {"action_id": "fixture-action", "attempt_id": "fixture-attempt", "status": "EXECUTOR_FAILED"},
+        {"action_id": "other-action", "attempt_id": "other-attempt", "status": "EXECUTOR_FAILED"},
+        {"action_id": "third-action", "attempt_id": "third-attempt", "status": "EXECUTOR_FAILED"},
+    ])
+    journal, registration, owner = execution_registry(i)
+    identity = r.SourceIdentity("ef02-completion", r.REPOSITORY, 17, 1)
+    assert r.run_read_only(i["config_path"], i["root"]).code == "WINDOWS_INTERACTIVE_REQUIRED"
+
+    def lineage():
+        return journal.execution_lineage(registration, identity, principal=owner)
+
+    pending = lineage()
+    assert len(pending) == 3
+    assert all((item.status, item.code, item.execution_id) == ("PENDING", "OWNER_REQUEST_PRODUCER_UNAVAILABLE", None)
+               for item in pending)
+    first, second, third, foreign = [
+        journal.admit_execution(registration, execution_request(key), principal=owner)
+        for key in ("request-1", "request-2", "request-3", "request-foreign")]
+    journal.record_execution_attempt(registration, execution_attempt(
+        foreign, repository="other/ai-commerce"), principal=owner)
+    assert lineage() == pending
+    journal.record_execution_attempt(registration, execution_attempt(
+        first, run_id=18), principal=owner)
+    journal.record_execution_attempt(registration, execution_attempt(
+        second, action="other-action", attempt="other-attempt"), principal=owner)
+    journal.record_execution_attempt(registration, execution_attempt(
+        third, action="third-action", attempt="third-attempt"), principal=owner)
+    with pytest.raises(r.RuntimeHold, match="^EXECUTION_ALIAS_CONFLICT$"):
+        journal.record_execution_attempt(registration, execution_attempt(
+            first, action="other-action", attempt="new-attempt", run_id=19), principal=owner)
+
+    rows = lineage()
+    assert [row.status for row in rows] == ["HOLD", "PENDING", "PENDING"]
+    assert [row.code for row in rows] == [
+        "EXECUTION_ALIAS_CONFLICT", "ATTEMPT_ACTIVATION_UNVERIFIED", "ATTEMPT_ACTIVATION_UNVERIFIED"]
+    assert [row.execution_id for row in rows] == [None, second, third]
+    assert rows[1].alias == execution_attempt(second, action="other-action", attempt="other-attempt").alias
+    assert rows[1].alias != r.ExecutionAlias("ef02_action", rows[1].alias.parts[:-1])
+    assert rows[1].parents[0] == rows[2].parents[0] == r.ExecutionAlias(
+        "ef02_batch", (r.REPOSITORY, "fixture-batch"))
+    assert rows[1].parents[-1] == rows[2].parents[-1] == r.ExecutionAlias(
+        "github_run_attempt", (r.REPOSITORY, 17, 1))
+    assert r.run_read_only(i["config_path"], i["root"]).code == "WINDOWS_INTERACTIVE_REQUIRED"
+    assert lineage() == rows
+    assert len(i["calls"]) == 12
+
+
+def test_execution_lineage_observations_do_not_activate_attempts(ingress):
+    i = ingress
+    journal, registration, owner = execution_registry(i)
+    with journal.locked(registration):
+        pass
+    execution_id = journal.admit_execution(registration, execution_request(), principal=owner)
+    first = execution_attempt(execution_id)
+    second = execution_attempt(execution_id, 2, attempt="next-attempt", run_id=18)
+    competing = execution_attempt(execution_id, 3, attempt="competing-attempt", run_id=19)
+    high = execution_attempt(execution_id, 10**12, attempt="high-ordinal-attempt", run_id=20)
+
+    def observe(attempt):
+        journal.record_execution_attempt(registration, attempt, principal=owner)
+
+    def ingest_completion(attempt):
+        run_id = attempt.run.parts[1]
+        register_execution_completion(i, run_id=run_id, actions=[
+            {"action_id": "fixture-action", "attempt_id": attempt.alias.parts[-1], "status": "EXECUTOR_FAILED"}])
+        assert r.run_read_only(i["config_path"], i["root"]).code == "WINDOWS_INTERACTIVE_REQUIRED"
+
+    def assert_pending(attempt):
+        run_id = attempt.run.parts[1]
+        identity = r.SourceIdentity("ef02-completion", r.REPOSITORY, run_id, 1)
+        row, = journal.execution_lineage(registration, identity, principal=owner)
+        assert (row.status, row.code) == ("PENDING", "ATTEMPT_ACTIVATION_UNVERIFIED")
+        assert (row.alias, row.execution_id, row.attempt_number) == (attempt.alias, execution_id, attempt.number)
+
+    observe(second)
+    ingest_completion(second)
+    assert_pending(second)
+    observe(first)
+    ingest_completion(first)
+    assert_pending(first)
+    observe(second)
+    ingest_completion(second)
+    assert_pending(second)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        list(pool.map(observe, (competing, high)))
+    with pytest.raises(r.RuntimeHold, match="^EXECUTION_ATTEMPT_CONFLICT$"):
+        observe(execution_attempt(execution_id, 2, attempt="conflicting-attempt", run_id=21))
+    ingest_completion(competing)
+    ingest_completion(high)
+    journal, _, _ = execution_registry(i)
+    for attempt in (first, second, competing, high):
+        assert_pending(attempt)
+    with closing(sqlite3.connect(journal.path)) as db:
+        assert db.execute("SELECT COUNT(*) FROM execution_source_events").fetchone() == (4,)
+
+
+def test_execution_registry_migrates_without_rewriting_unknown_delivery(ingress):
+    i = ingress
+    journal, registration, owner = execution_registry(i)
+    event = r.Event(i["event"]["event_id"], registration.source_sha, 1, digest(i["event"]),
+                    "GITHUB_AUTHENTICATED")
+    key = event.key(registration)
+    identity = r.SourceIdentity("ef02-completion", r.REPOSITORY, 17, 1)
+    with journal.locked(registration) as (txn, data):
+        data["events"][key] = {"event": asdict(event), "status": "UNKNOWN_EFFECT",
+                               "code": "SEND_OUTCOME_UNKNOWN", "history": [
+                                   "PENDING", "RESERVED", "UNKNOWN_EFFECT"], "evidence": {}}
+        data["source_identities"][identity.key] = (key, asdict(identity))
+        txn.write(data)
+    with closing(sqlite3.connect(journal.path)) as db:
+        before = {table: db.execute(f"SELECT * FROM {table}").fetchall()
+                  for table in ("identity", "events", "source_identities")}
+    assert journal.execution_lineage(registration, identity, principal=owner) == ()
+    original = journal.path.read_bytes()
+    with pytest.raises(r.RuntimeHold, match="^EXECUTION_REQUEST_UNKNOWN$"):
+        journal.record_execution_attempt(registration, execution_attempt("0" * 32), principal=owner)
+    assert journal.path.read_bytes() == original
+    execution_id = journal.admit_execution(registration, execution_request(), principal=owner)
+    assert execution_id
+    assert journal.execution_lineage(registration, identity, principal=owner) == ()
+    assert r.run_read_only(i["config_path"], i["root"]) == r.Result(
+        "UNKNOWN_EFFECT", "SEND_OUTCOME_UNKNOWN", "GITHUB_AUTHENTICATED", replayed=True)
+    row, = journal.execution_lineage(registration, identity, principal=owner)
+    assert row.code == "OWNER_REQUEST_PRODUCER_UNAVAILABLE"
+    with closing(sqlite3.connect(journal.path)) as db:
+        for table, rows in before.items():
+            assert db.execute(f"SELECT * FROM {table}").fetchall() == rows
+    assert journal.enrolled_origin(registration, owner, for_upgrade=True) is None
+    with pytest.raises(r.RuntimeHold, match="^SUPERVISOR_DELIVERY_UNRESOLVED$"):
+        journal.enrolled_origin(registration, owner, for_retirement=True)
+
+    journal.record_execution_attempt(registration, execution_attempt(execution_id), principal=owner)
+    prior_lineage = journal.execution_lineage(registration, identity, principal=owner)
+    successor = execution_attempt(execution_id, 2, attempt="next-attempt", run_id=18)
+    journal.record_execution_attempt(registration, successor, principal=owner)
+    register_execution_completion(i, run_id=18, actions=[
+        {"action_id": "fixture-action", "attempt_id": "next-attempt", "status": "EXECUTOR_FAILED"}])
+    assert r.run_read_only(i["config_path"], i["root"]).code == "WINDOWS_INTERACTIVE_REQUIRED"
+    next_identity = r.SourceIdentity("ef02-completion", r.REPOSITORY, 18, 1)
+    journal, _, _ = execution_registry(i)
+    assert journal.execution_lineage(registration, identity, principal=owner) == prior_lineage
+    for source, number in ((identity, 1), (next_identity, 2)):
+        row, = journal.execution_lineage(registration, source, principal=owner)
+        assert (row.status, row.code) == ("PENDING", "ATTEMPT_ACTIVATION_UNVERIFIED")
+        assert (row.execution_id, row.attempt_number) == (execution_id, number)
+    with closing(sqlite3.connect(journal.path)) as db:
+        assert db.execute("SELECT * FROM events WHERE event_key=?", (key,)).fetchall() == before["events"]
+    with pytest.raises(r.RuntimeHold, match="^SUPERVISOR_DELIVERY_UNRESOLVED$"):
+        journal.enrolled_origin(registration, owner, for_retirement=True)
+
+
+@pytest.mark.parametrize("mutation,code", [
+    ("CREATE TABLE execution_requests (fake TEXT)", "JOURNAL_SCHEMA_INCOMPATIBLE"),
+    ("INSERT INTO events VALUES ('key', 'id', 'sha', 1, 1, '{}')", "JOURNAL_INVALID"),
+])
+def test_execution_migration_refuses_incompatible_or_invalid_state(ingress, mutation, code):
+    journal, registration, owner = execution_registry(ingress)
+    with journal.locked(registration):
+        pass
+    with closing(sqlite3.connect(journal.path)) as db, db:
+        db.execute(mutation)
+    before = journal.path.read_bytes()
+    with pytest.raises(r.RuntimeHold, match=f"^{code}$"):
+        journal.admit_execution(registration, execution_request(), principal=owner)
+    assert journal.path.read_bytes() == before
+
+
+def test_execution_lineage_checks_the_saved_event_commitment(ingress):
+    i = ingress
+    journal, registration, owner = execution_registry(i)
+    identity = r.SourceIdentity("ef02-completion", r.REPOSITORY, 17, 1)
+    assert r.run_read_only(i["config_path"], i["root"]).code == "WINDOWS_INTERACTIVE_REQUIRED"
+    with closing(sqlite3.connect(journal.path)) as db, db:
+        copy = {**i["event"], "batch_id": "different-batch"}
+        db.execute("UPDATE execution_source_events SET source_event=?", (json.dumps(copy, sort_keys=True),))
+    before = journal.path.read_bytes()
+    with pytest.raises(r.RuntimeHold, match="^EXECUTION_LINEAGE_INVALID$"):
+        journal.execution_lineage(registration, identity, principal=owner)
+    assert journal.path.read_bytes() == before
+
+
+def register_execution_completion(i, *, run_id, actions):
+    _, report = github_candidate()
+    report.update(actions=actions, total=len(actions), github_workflow_run_id=str(run_id))
+    event = build_completion_event(report, repository=r.REPOSITORY, run_id=run_id, run_attempt=1, issue_number=23)
+    report.update(wake_event_id=event["event_id"], wake_event_status="RECORDED_UNBOUND")
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zipped:
+        zipped.writestr("fixture-batch/completion_event.json", json.dumps(event))
+        zipped.writestr("fixture-batch/batch_result.json", json.dumps(report))
+    raw = archive.getvalue()
+    api = f"https://api.github.com/repos/{r.REPOSITORY}"
+    run = f"{api}/actions/runs/{run_id}"
+    i["responses"][run] = {**i["run"], "id": run_id}
+    i["responses"][f"{run}/artifacts?per_page=100"] = {
+        "total_count": 1, "artifacts": [{"id": run_id + 100, "name": f"ef02-results-{run_id}-1",
+                                       "expired": False, "workflow_run": {"id": run_id},
+                                       "digest": "sha256:" + hashlib.sha256(raw).hexdigest()}]}
+    i["archives"][f"{api}/actions/artifacts/{run_id + 100}/zip"] = raw
+    i["save"](r.Path(i["config"]["registered_source"]),
+              {**i["registered"], "run_id": run_id, "event_id": event["event_id"]})
 
 
 @pytest.mark.parametrize("name,code", [
@@ -4074,6 +4331,13 @@ def test_flat03_issue_created_acceptance_and_edit_dedup_are_source_only(ingress,
                                                        "creation": asdict(issue.target.creation)})
     assert saved["code"] == "ISSUE_CREATED_SOURCE_ACCEPTED" and saved["history"] == ["PENDING"]
     assert saved["evidence"] == {} and "An edit" not in raw and "example.invalid" not in raw
+    journal, registration, owner = execution_registry(i)
+    identity = issue.target.identity
+    line, = journal.execution_lineage(registration, identity, principal=owner)
+    assert line == r.ExecutionLineage(r.ExecutionAlias("github_issue", (identity.repository_id, identity.object_id)),
+                                      "OWNER_REQUEST_PRODUCER_UNAVAILABLE")
+    assert journal.execution_lineage(registration, replace(identity, repository_id=identity.repository_id + 1),
+                                     principal=owner) == ()
 
 
 @pytest.mark.parametrize("fault,code", [
