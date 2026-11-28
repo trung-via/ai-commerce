@@ -6,15 +6,14 @@ from pathlib import Path
 import sys
 
 from .runner import (
-    Result, RuntimeHold, _CODE_ROOT, _resolve_runtime_config, diagnostic, register_local_chat,
+    Result, RuntimeHold, _CODE_ROOT, _PROJECT_AGY_PROCEDURE, _resolve_runtime_config, diagnostic, register_local_chat,
     run_native_source_only, run_read_only, run_supervisor,
 )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="WakeHub intake for exact EF02 runs and GitHub Issue creations. "
-                    "The supervisor delivers authorized jobs to an exact owner-configured chat on Chrome 9444.")
+        description="WakeHub intake for exact EF02 runs, GitHub Issue creations and persisted decision demands.")
     sub = parser.add_subparsers(dest="command", required=True)
     supervisor = sub.add_parser(
         "supervise", help="Run serial ticks for the interactive owner on Windows.",
@@ -43,7 +42,17 @@ def main(argv: list[str] | None = None) -> int:
                     "An uncertain effect is reconciled through a read-only USER-turn observation. Existing "
                     "v2 config permits reconciliation under its original grant. New Sends require v3. "
                     "Local UI delivery ends with an observed USER turn. A Brain receipt and next work require "
-                    "their own authenticated evidence.")
+                    "their own authenticated evidence. To opt in to Project decisions, add decision_project "
+                    "to the existing private runtime config with schema WakeHubDecisionProject.v1 and the "
+                    "owner-verified project_id and account_id from Chrome 9444. For a slugged chat route, "
+                    "set chat_route_alias to the exact route segment verified for that Project and account. "
+                    "Preserve the registration, "
+                    "journal and ui_delivery for historical reconciliation. For AGY, use project-agy-procedure "
+                    "to install a private wakehub-project-executor SKILL.md and put its SHA-256 in "
+                    "decision_project.agy_skill_sha256. Project delivery starts on the verified empty "
+                    "Project New Chat surface and binds a conversation only after observing the exact USER turn. "
+                    "Only a persisted current decision demand enters this route. Existing source routes retain "
+                    "their configured delivery authority.")
     supervisor.add_argument("--max-ticks", type=int,
                             help="Count all ticks, including Chrome health ticks with no eligible source.")
     supervisor.add_argument("--idle-seconds", type=int, default=30,
@@ -89,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
     prepare = actions.add_parser("prepare", help="Print a fresh private marker for manual presentation.")
     observe = actions.add_parser("observe", help="Verify and consume that marker in the exact Chat A.")
     observe.add_argument("registration_id")
+    sub.add_parser("project-agy-procedure", help="Print the private Project AGY procedure for owner-local setup.")
     for command in (run, supervisor, prepare, observe):
         command.add_argument("--repository-root", type=Path, help="Checkout excluded from private journal storage.")
         command.add_argument("--config", type=Path,
@@ -97,6 +107,9 @@ def main(argv: list[str] | None = None) -> int:
                                   "or Windows User setting AI_COMMERCE_WAKEHUB_CONFIG, then the WakeHub directories "
                                   "under the owner's LOCALAPPDATA/AI-Commerce.")
     args = parser.parse_args(argv)
+    if args.command == "project-agy-procedure":
+        print(_PROJECT_AGY_PROCEDURE, end="")
+        return 0
     root = args.repository_root or _CODE_ROOT
     config = args.config
     if args.command == "run" and args.journal is not None and not (args.diagnostic or args.dry_run):

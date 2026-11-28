@@ -161,6 +161,142 @@ def test_registered_doorbell_rejects_foreign_port_and_legacy_issue_selector(monk
     assert inv.calls == []
 
 
+@pytest.mark.parametrize(("fault", "expected"), [
+    (None, doorbell.LOCAL_UI_OWNER_AUTHORIZED_TURN_OBSERVED),
+    ("slugged", doorbell.LOCAL_UI_OWNER_AUTHORIZED_TURN_OBSERVED),
+    ("unconfigured-alias", "PROJECT_USER_TURN_UNVERIFIED"),
+    ("near-alias", "PROJECT_USER_TURN_UNVERIFIED"),
+    ("near-project", "PROJECT_USER_TURN_UNVERIFIED"),
+    ("wrong-post-project", "PROJECT_USER_TURN_UNVERIFIED"),
+    ("account", "ACCOUNT_UNPROVEN"),
+    ("project", "PROJECT_SURFACE_UNVERIFIED"),
+    ("target-drift", "PROJECT_SURFACE_UNVERIFIED"),
+    ("document-drift", "TARGET_PAGE_CHANGED"),
+    ("post-target-drift", "PROJECT_USER_TURN_UNVERIFIED"),
+    ("duplicate-route", "PROJECT_SERVER_ASSOCIATION_AMBIGUOUS"),
+    ("duplicate-alias", "PROJECT_SERVER_ASSOCIATION_AMBIGUOUS"),
+    ("competing-turn", "PROJECT_SERVER_ASSOCIATION_AMBIGUOUS"),
+    ("disconnected", "PROJECT_CDP_UNAVAILABLE"),
+])
+def test_project_doorbell_binds_first_send_and_observes_stable_project_turn(monkeypatch, fault, expected):
+    """Synthetic browser observations through the doorbell's production CDP inventory contract."""
+    monkeypatch.setattr(doorbell, "_is_windows", lambda: True)
+    alias = "g-p-fixture-ai-commerce"
+    slugged_routes = {"slugged": alias, "duplicate-alias": alias,
+                      "unconfigured-alias": alias, "near-alias": alias + "-other",
+                      "near-project": "g-p-fixture2-ai-commerce", "wrong-post-project": "g-p-other-ai-commerce"}
+    selection = doorbell.ProjectSelection(
+        "g-p-fixture", "fixture-account", alias if fault in slugged_routes and fault != "unconfigured-alias" else None)
+    binding = replace(BIND, chat_url=selection.project_url)
+    server = URL.replace("/c/", f"/g/{slugged_routes.get(fault, selection.project_id)}/c/")
+    ephemeral = server.rsplit("/", 1)[0] + "/local-chatgpt%3Afixture"
+    calls = []
+
+    class Page:
+        url = selection.project_url
+        clock = 123
+        target_id = "a" * 32
+
+        def evaluate(self, script, args=None):
+            if script == doorbell._DOCUMENT_CLOCK:
+                return self.clock
+            assert (args["account_id"], args["text"], args["url"]) == (selection.account_id, message, self.url)
+            if script == doorbell._CHECK:
+                return "ACCOUNT_UNPROVEN" if fault == "account" else "READY"
+            if script == doorbell._PRE_STAGE_REFS:
+                return []
+            if script == doorbell._EXISTING_USER_TURN:
+                assert self.url == server
+                calls.append("observe-server")
+                return "fixture-turn"
+            if script == doorbell._PROJECT_COMPETING_TURN:
+                return fault == "competing-turn"
+            if script == doorbell._CLICK:
+                assert args["standbyRefs"] == [] and calls[-1] == "fence"
+                calls.append("send")
+                self.url = ephemeral
+                if fault == "disconnected":
+                    raise ConnectionError()
+                return []
+            assert script in (doorbell._INSERT, doorbell._READY)
+            if script == doorbell._INSERT:
+                calls.append("stage")
+            return True
+
+        def wait_for_function(self, script, *, arg, timeout, polling):
+            assert (timeout, polling) == (3000, 100) and self.evaluate(script, arg)
+
+    page = Page()
+    message = "[AI COMMERCE PROJECT DECISION WAKE]\nfixture manifest"
+    if fault == "project":
+        page.url = selection.project_url.replace("g-p-fixture", "g-p-other")
+    if fault == "target-drift":
+        page.target_id = "c" * 32
+
+    def session(candidate):
+        details = {"type": "page", "targetId": candidate.target_id, "browserContextId": "b" * 32,
+                   "url": candidate.url}
+        return SimpleNamespace(send=lambda _: {"targetInfo": details}, detach=lambda: None)
+
+    context = SimpleNamespace(pages=[page], new_cdp_session=session)
+
+    @contextmanager
+    def browser(endpoint):
+        assert endpoint == BIND.cdp_endpoint
+        yield SimpleNamespace(contexts=[context])
+
+    def transition(_):
+        if page.url != ephemeral:
+            return
+        assert selection.chat_id(page.url) is None
+        calls.append("observe-ephemeral")
+        page.url = server
+        if fault == "post-target-drift":
+            page.target_id = "c" * 32
+        if fault in ("duplicate-route", "duplicate-alias", "competing-turn"):
+            duplicate = Page()
+            if fault == "duplicate-alias":
+                duplicate.url = server.replace(f"/{alias}/", f"/{selection.project_id}/")
+            elif fault == "duplicate-route":
+                duplicate.url = server
+            else:
+                duplicate.url = server[:-1] + ("0" if server[-1] != "0" else "1")
+            duplicate.target_id = "d" * 32
+            context.pages.append(duplicate)
+
+    clock = iter((0, 1, 6, 7))
+    monkeypatch.setattr(doorbell.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(doorbell.time, "sleep", transition)
+    adapter = LocalChromeDoorbellAdapter(allow_submit=True, inventory=SimpleNamespace(_browser=browser))
+    pinned = Page()
+    document = adapter._surface_commitment(context, pinned, pinned.clock)
+
+    def fence():
+        calls.append("fence")
+        if fault == "document-drift":
+            page.clock += 1
+
+    args = dict(selection=selection, message=message, revalidate=lambda: None, document=document, before_send=fence)
+    assert adapter.project_decision_ui(binding=BIND, **args).code == "PROJECT_TARGET_UNVERIFIED"
+    result = adapter.project_decision_ui(binding=binding, **args)
+    assert result.code == expected
+    if fault in (None, "slugged"):
+        assert (result.chat_url, result.turn_ref) == (server, "fixture-turn")
+        assert calls == ["stage", "fence", "send", "observe-ephemeral", "observe-server", "observe-server"]
+    else:
+        assert result.chat_url is None and result.turn_ref is None
+        if fault in slugged_routes and fault != "duplicate-alias":
+            assert calls == ["stage", "fence", "send", "observe-ephemeral"]
+    assert result.staged == ("send" in calls)
+    assert calls.count("send") <= 1
+
+
+def test_project_selection_rejects_configured_alias_for_another_project():
+    for alias in ("g-p-other-ai-commerce", "g-p-fixture2-ai-commerce", "g-p-fixture-ai-commerce/c/"):
+        with pytest.raises(ValueError, match="PROJECT_SELECTION_INVALID"):
+            doorbell.ProjectSelection("g-p-fixture", "fixture-account", alias)
+
+
 def test_registered_doorbell_scripts_require_fresh_exact_user_reference():
     """Exercise the production JS on fake page primitives, including the synchronous click fence."""
     import json
@@ -191,7 +327,7 @@ const fresh = node(args.text, {'data-message-id':'turn-new'});
 fresh.closest = selector => selector.startsWith('[data-message-id]') ? fresh : null;
 let roles = [], ids = [old], clicks = 0;
 let login = [], workspace = [], prompts = [], attachments = [], buttons = [], busy = [], covered = null;
-let verification = [], totalNodes = [];
+let verification = [], totalNodes = [], accounts = [], projectLinks = [];
 const prompt = node();
 prompt.getBoundingClientRect = () => ({width:20, height:20});
 const button = node();
@@ -203,6 +339,7 @@ button.click = () => { clicks++; roles.push(fresh); ids.push(fresh); };
 editor.parentElement = {tagName:'FORM', querySelectorAll:selector => selector === args.send ? buttons : attachments};
 globalThis.document = {
   readyState: 'complete',
+  querySelector: selector => document.querySelectorAll(selector)[0] || null,
   elementFromPoint: x => (x < 10 ? editor : button) === covered ? prompt : x < 10 ? editor : button,
   querySelectorAll: selector => {
     if (selector === 'main') return [node()];
@@ -210,6 +347,8 @@ globalThis.document = {
     if (selector === args.login) return login;
     if (selector === args.stop) return busy;
     if (selector === args.work) return workspace;
+    if (selector === '[data-account-id]') return accounts;
+    if (selector === 'nav a[href], aside a[href]') return projectLinks;
     if (selector.includes('[role="alertdialog"]')) return prompts;
     if (selector.includes('one-time-code')) return verification;
     if (selector === '*') return totalNodes;
@@ -371,6 +510,23 @@ for (const text of texts) {
   expect(false, 'incomplete document');
   document.readyState = 'complete';
 }
+args.project = true;
+args.account_id = 'fixture-account';
+roles = [candidate('project-turn')];
+ids = roles;
+if (existing(args) !== false) throw Error('project account required');
+accounts = [node('', {'data-account-id':args.account_id})];
+if (existing(args) !== false) throw Error('project conversation link required');
+projectLinks = [{href:args.url}];
+if (existing(args) !== 'project-turn') throw Error('project exact USER with corroborated route');
+roles = [roles[0], candidate('project-turn-copy')];
+if (existing(args) !== 'AMBIGUOUS PROJECT TURN') throw Error('ambiguous project USER');
+roles = [];
+ids = [old];
+editor.textContent = editor.innerText = args.text;
+button.disabled = false;
+args.standbyRefs = [];
+if (click(args) !== false || clicks !== 1) throw Error('project composer is not fresh');
 """
     result = subprocess.run(
         [node, "-e", program],
