@@ -613,6 +613,47 @@ class ContinuityResume:
         return "UNVERIFIED"
 
 
+_OWNER_DECISION_SCHEMA = "WakeHubOwnerDecisionReceipt.v1"
+
+
+@dataclass(frozen=True, repr=False)
+class _OwnerDecisionBinding:
+    identity: SourceIdentity
+    issue_number: int
+    owner_id: int
+    execution_id: str
+    request_sha256: str
+    source_sha256: str
+    continuation_consumer: str | None
+
+    @property
+    def scope_sha256(self) -> str:
+        return digest([_OWNER_DECISION_SCHEMA, asdict(self)])
+
+
+@dataclass(frozen=True)
+class OwnerDecisionAcceptance:
+    """An internal GitHub owner-account decision at an exact journal checkpoint."""
+
+    comment_id: int
+    receipt_sha256: str
+    execution_id: str
+    decision_id: str
+    checkpoint: str
+    packet_id: str
+    disposition: Literal["RECORD_ONLY", "CONTINUE"]
+    operation_id: str | None
+    child_execution_id: str | None
+    supersedes_operation_id: str | None
+    context_gaps: tuple[str, ...]
+    replayed: bool = False
+
+    @property
+    def missing_capabilities(self) -> tuple[str, ...]:
+        return ("NATIVE_BRAIN_RECEIPT_UNAVAILABLE", "RECEIVER_RESERVATION_UNVERIFIED",
+                "ATTEMPT_ACTIVATION_UNVERIFIED")
+
+
 @dataclass(frozen=True, repr=False)
 class ContinuityPage:
     """Owner-private rows from a revalidated commitment. A null cursor marks the end.
@@ -785,7 +826,7 @@ class GitHubIssueCreatedSource:
                  and type(user) is dict and user.get("type") in ("User", "Bot"), "ISSUE_IDENTITY_UNPROVEN")
         return IssueCreated(issue.get("number"), user.get("id"), issue.get("created_at"))
 
-    def _repository(self, root: str, name: str, repository_id: int) -> None:
+    def _repository(self, root: str, name: str, repository_id: int) -> dict:
         repo = self._get(root)
         _require(type(repo) is dict and type(repo.get("full_name")) is str
                  and repo["full_name"].lower() == name and _github_id(repo.get("id"))
@@ -794,6 +835,7 @@ class GitHubIssueCreatedSource:
             owner = repo.get("owner")
             _require(type(owner) is dict and _github_id(owner.get("id"))
                      and owner["id"] == self.standing["creator_id"], "ISSUE_CREATOR_UNPROVEN")
+        return repo
 
     def _in_scope(self, issue: object) -> bool:
         scope = self.standing
@@ -849,6 +891,37 @@ class GitHubIssueCreatedSource:
         payload_sha = digest({"identity": asdict(target.identity), "creation": asdict(target.creation)})
         self.verified_event = SourceEvent(target.identity, payload_sha, target)
         return self.verified_event
+
+    def _owner_decision_comment(self, issue: IssueRegistration, owner_id: int, comment_id: int) -> tuple:
+        root = f"{_API}/repos/{issue.identity.repository}"
+        issue_url = f"{root}/issues/{issue.creation.issue_number}"
+        comment_url = f"{root}/issues/comments/{comment_id}"
+        owner = self._repository(root, issue.identity.repository, issue.identity.repository_id).get("owner")
+        _require(type(owner) is dict and _github_id(owner.get("id")) and owner["id"] == owner_id
+                 and owner.get("type") == "User",
+                 "OWNER_DECISION_REPOSITORY_OWNER_UNPROVEN")
+        verified = self._creation(self._get(issue_url), root, issue_url, issue.identity.object_id)
+        _require(verified == issue.creation, "ISSUE_CREATION_UNPROVEN")
+        comment = self._get(comment_url)
+        _require(type(comment) is dict and _github_id(comment.get("id")) and comment["id"] == comment_id
+                 and comment.get("url") == comment_url and comment.get("issue_url") == issue_url,
+                 "OWNER_DECISION_COMMENT_AFFINITY_UNPROVEN")
+        author = comment.get("user")
+        _require(type(author) is dict and _github_id(author.get("id")) and author["id"] == owner_id
+                 and author.get("type") == "User" and comment.get("performed_via_github_app") is None,
+                 "OWNER_DECISION_COMMENT_ACTOR_UNPROVEN")
+        created, updated = comment.get("created_at"), comment.get("updated_at")
+        _require(created == updated and _timestamp(created) >= _timestamp(verified.created_at),
+                 "OWNER_DECISION_COMMENT_VERSION_UNPROVEN")
+        body = comment.get("body")
+        _require(type(body) is str and 0 < len(body) <= 4096 and body.isascii(), "OWNER_DECISION_BODY_INVALID")
+        try:
+            payload = _decode_unique(body)
+        except (ValueError, RecursionError):
+            raise RuntimeHold("OWNER_DECISION_BODY_INVALID") from None
+        _require(type(payload) is dict and payload.get("schema") == _OWNER_DECISION_SCHEMA
+                 and body == _continuity_json(payload), "OWNER_DECISION_BODY_INVALID")
+        return bytes_digest(body.encode("ascii")), created, updated, payload
 
 
 @dataclass(frozen=True, repr=False)
@@ -1815,6 +1888,22 @@ _CONTINUITY_TABLES = {
     "continuity_resumes": "CREATE TABLE continuity_resumes (packet_id TEXT PRIMARY KEY "
                           "REFERENCES continuity_packets(packet_id))",
 }
+_OWNER_DECISION_TABLES = {
+    "owner_decision_revisions": "CREATE TABLE owner_decision_revisions ("
+                                "decision_id TEXT PRIMARY KEY REFERENCES decision_demands(decision_id), "
+                                "obligation_key TEXT NOT NULL, predecessor TEXT NOT NULL, "
+                                "prior_checkpoint TEXT REFERENCES decision_proposals(checkpoint), "
+                                "scope_sha256 TEXT NOT NULL, UNIQUE(obligation_key, predecessor))",
+    "owner_decision_receipts": "CREATE TABLE owner_decision_receipts (comment_id INTEGER PRIMARY KEY, "
+                               "obligation_key TEXT NOT NULL, predecessor TEXT NOT NULL, "
+                               "checkpoint TEXT NOT NULL UNIQUE REFERENCES decision_proposals(checkpoint), "
+                               "packet_id TEXT NOT NULL REFERENCES continuity_packets(packet_id), "
+                               "receipt_sha256 TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, "
+                               "disposition TEXT NOT NULL CHECK(disposition IN ('RECORD_ONLY', 'CONTINUE')), "
+                               "operation_id TEXT REFERENCES decision_outbox(operation_id), "
+                               "supersedes_operation_id TEXT UNIQUE REFERENCES decision_outbox(operation_id), "
+                               "UNIQUE(obligation_key, predecessor))",
+}
 _APP_ID = 0x57485231
 
 
@@ -1824,14 +1913,16 @@ def _has_table_group(schemas: dict, expected: dict) -> bool:
     return bool(present)
 
 
-def _extension_tables(schemas: dict) -> tuple[bool, bool, bool]:
+def _extension_tables(schemas: dict) -> tuple[bool, bool, bool, bool]:
     execution = _has_table_group(schemas, _EXECUTION_TABLES)
     decisions = _has_table_group(schemas, _DECISION_TABLES)
     continuity = _has_table_group(schemas, _CONTINUITY_TABLES)
+    owner_decisions = _has_table_group(schemas, _OWNER_DECISION_TABLES)
     _require(not decisions or (execution and schemas.get("source_identities") == _SOURCE_TABLE
                                and schemas.get("events") == _TABLES["events"]), "JOURNAL_SCHEMA_INCOMPATIBLE")
     _require(not continuity or execution, "JOURNAL_SCHEMA_INCOMPATIBLE")
-    return execution, decisions, continuity
+    _require(not owner_decisions or (decisions and continuity), "JOURNAL_SCHEMA_INCOMPATIBLE")
+    return execution, decisions, continuity, owner_decisions
 
 
 def _continuity_json(value: object) -> str:
@@ -2198,13 +2289,14 @@ def _validate_records(data: dict, registration: Registration) -> None:
 
 class _SQLiteTransaction:
     def __init__(self, connection, journal, registration, owner, source_table, execution_tables, decision_tables,
-                 continuity_tables):
+                 continuity_tables, owner_decision_tables):
         self.connection, self.journal = connection, journal
         self.registration, self.owner = registration, owner
         self.source_table = source_table
         self.execution_tables = execution_tables
         self.decision_tables = decision_tables
         self.continuity_tables = continuity_tables
+        self.owner_decision_tables = owner_decision_tables
 
     def stage_execution_source(self, data: dict, event: SourceEvent, verified: dict | None) -> bool:
         # D1's validated selector-only event keeps the projection checkable
@@ -2228,7 +2320,7 @@ class _SQLiteTransaction:
                 self.connection.execute(sql)
 
     @contextmanager
-    def execution_write(self, *, decisions: bool = False, continuity: bool = False):
+    def execution_write(self, *, decisions: bool = False, continuity: bool = False, owner_decisions: bool = False):
         self.journal._owner(self.owner)
         db = self.connection
         try:
@@ -2240,12 +2332,16 @@ class _SQLiteTransaction:
             if continuity and not self.continuity_tables:
                 for sql in _CONTINUITY_TABLES.values():
                     db.execute(sql)
+            if owner_decisions and not self.owner_decision_tables:
+                for sql in _OWNER_DECISION_TABLES.values():
+                    db.execute(sql)
             yield db
             self.journal._owner(self.owner)
             db.commit()
             self.execution_tables = True
             self.decision_tables = self.decision_tables or decisions
             self.continuity_tables = self.continuity_tables or continuity
+            self.owner_decision_tables = self.owner_decision_tables or owner_decisions
         except BaseException:
             db.rollback()
             raise
@@ -2455,7 +2551,7 @@ class Journal:
                 schemas = dict(db.execute("SELECT name, CASE WHEN type='table' THEN sql END FROM sqlite_master"))
                 _require(schemas.get("identity") == _TABLES["identity"], "JOURNAL_SCHEMA_INCOMPATIBLE")
                 self._check_registration(db, owner, registration)
-                execution, decisions, continuity = _extension_tables(schemas)
+                execution, decisions, continuity, _ = _extension_tables(schemas)
                 if execution and db.execute("SELECT 1 FROM execution_source_events LIMIT 1").fetchone():
                     _require(schemas.get("source_identities") == _SOURCE_TABLE
                              and schemas.get("events") == _TABLES["events"], "JOURNAL_SCHEMA_INCOMPATIBLE")
@@ -2600,13 +2696,223 @@ class Journal:
 
     @classmethod
     def _current_decision_revision(cls, db, obligation_key: str) -> str | None:
+        grounded = cls._owner_revision_head(db, obligation_key)
+        if grounded is not None:
+            return grounded
         # The verified owner submission order establishes the current planning
-        # demand. Revision labels themselves have no ordering semantics.
+        # demand for legacy planning. Owner receipt ingress requires a CAS head.
         for decision_id, in db.execute("SELECT decision_id FROM decision_demands WHERE obligation_key=? "
                                        "ORDER BY rowid DESC", (obligation_key,)):
             if cls._read_decision_demand(db, decision_id).classification == "DECISION_NEEDED":
                 return decision_id
         return None
+
+    @staticmethod
+    def _owner_revision_head(db, obligation_key: str) -> str | None:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE name='owner_decision_revisions'").fetchone():
+            return None
+        heads = db.execute(
+            "SELECT r.decision_id FROM owner_decision_revisions r WHERE r.obligation_key=? AND NOT EXISTS "
+            "(SELECT 1 FROM owner_decision_revisions n WHERE n.obligation_key=r.obligation_key "
+            "AND n.predecessor=r.decision_id) LIMIT 2", (obligation_key,)).fetchall()
+        _require(len(heads) <= 1, "OWNER_DECISION_REVISION_CHAIN_INVALID")
+        return heads[0][0] if heads else None
+
+    @staticmethod
+    def _owner_accepted_head(db, obligation_key: str) -> str | None:
+        heads = db.execute(
+            "SELECT r.checkpoint FROM owner_decision_receipts r WHERE r.obligation_key=? AND NOT EXISTS "
+            "(SELECT 1 FROM owner_decision_receipts n WHERE n.obligation_key=r.obligation_key "
+            "AND n.predecessor=r.checkpoint) LIMIT 2", (obligation_key,)).fetchall()
+        _require(len(heads) <= 1, "OWNER_DECISION_RECEIPT_CHAIN_INVALID")
+        return heads[0][0] if heads else None
+
+    @classmethod
+    def _owner_decision_source(cls, db, registration: Registration, binding: _OwnerDecisionBinding,
+                               decision_id: str) -> tuple[DecisionDemand, IssueRegistration]:
+        demand = cls._read_decision_demand(db, decision_id)
+        _require(demand is not None and demand.classification == "DECISION_NEEDED", "DECISION_NOT_REQUESTED")
+        _require(demand.execution_id == binding.execution_id, "OWNER_DECISION_EXECUTION_MISMATCH")
+        request = cls._read_execution_request(db, binding.execution_id)
+        _require(digest(asdict(request)) == binding.request_sha256, "OWNER_DECISION_REQUEST_DRIFT")
+        cls._verify_decision_coverage(db, registration, demand)
+        proof = db.execute("SELECT source_event FROM execution_source_events WHERE source_key=?",
+                           (binding.identity.key,)).fetchone()
+        _require(proof == ("{}",), "OWNER_DECISION_ISSUE_SOURCE_MISSING")
+        stored, event_key, record, _ = cls._read_execution_source(db, binding.identity, registration, proof[0])
+        event = _issue_record_event(record["event"], registration)
+        _require(stored == binding.identity and event_key == binding.identity.key
+                 and event.payload.creation.issue_number == binding.issue_number
+                 and event.payload_sha256 == binding.source_sha256, "OWNER_DECISION_ISSUE_SOURCE_DRIFT")
+        return demand, event.payload
+
+    @staticmethod
+    def _require_owner_decision_scope(db, binding: _OwnerDecisionBinding, decision_id: str) -> None:
+        _require(db.execute("SELECT 1 FROM sqlite_master WHERE name='owner_decision_revisions'").fetchone()
+                 is not None, "OWNER_DECISION_REVISION_NOT_GROUNDED")
+        _require(db.execute("SELECT scope_sha256 FROM owner_decision_revisions WHERE decision_id=?",
+                            (decision_id,)).fetchone() == (binding.scope_sha256,), "OWNER_DECISION_SCOPE_UNGROUNDED")
+
+    def _ground_owner_decision(self, authority: _OwnerDecisionAuthority, decision_id: str, *,
+                               expected_revision: str | None, expected_checkpoint: str | None) -> None:
+        registration, principal, binding = authority.registration, authority.principal, authority.binding
+        with self.locked(registration, execution_owner=principal) as (txn, _), txn.execution_write(
+                continuity=True, owner_decisions=True) as db:
+            authority.revalidate_local()
+            _require(txn.decision_tables, "DECISION_NOT_REQUESTED")
+            demand, _ = self._owner_decision_source(db, registration, binding, decision_id)
+            plan = self._read_decision_plan(db, demand, version=None)
+            grounded = self._owner_revision_head(db, demand.obligation_key)
+            current = grounded if grounded is not None else plan.decision_id if plan else None
+            prior = plan.checkpoint if plan else None
+            _require((current, prior) == (expected_revision, expected_checkpoint), "OWNER_DECISION_REVISION_CAS_STALE")
+            if grounded == decision_id:
+                _require(db.execute("SELECT scope_sha256 FROM owner_decision_revisions WHERE decision_id=?",
+                                    (decision_id,)).fetchone() == (binding.scope_sha256,),
+                         "OWNER_DECISION_SCOPE_DRIFT")
+                return
+            _require(db.execute("SELECT 1 FROM owner_decision_revisions WHERE decision_id=?",
+                                (decision_id,)).fetchone() is None, "OWNER_DECISION_REVISION_ALREADY_GROUNDED")
+            if decision_id != current:
+                _require(db.execute("SELECT 1 FROM decision_proposals WHERE decision_id=?", (decision_id,)).fetchone()
+                         is None, "OWNER_DECISION_REVISION_ALREADY_PLANNED")
+            # Legacy adoption pins its actual planning checkpoint. Later heads
+            # advance only through this independently authorized predecessor CAS.
+            predecessor = current if current != decision_id else None
+            authority.revalidate_local()
+            db.execute("INSERT INTO owner_decision_revisions VALUES (?, ?, ?, ?, ?)",
+                       (decision_id, demand.obligation_key, predecessor or "", prior, binding.scope_sha256))
+
+    def _submit_owner_decision(self, authority: _OwnerDecisionAuthority, decision_id: str,
+                               comment_id: int) -> OwnerDecisionAcceptance:
+        registration, principal, binding = authority.registration, authority.principal, authority.binding
+        with self._registered_snapshot(registration, principal) as (db, _, decisions, _):
+            _require(decisions, "DECISION_NOT_REQUESTED")
+            _, issue = self._owner_decision_source(db, registration, binding, decision_id)
+            self._require_owner_decision_scope(db, binding, decision_id)
+        # GitHub is observed once, before the local transaction. Everything it
+        # refers to is rechecked under that transaction against the owner journal.
+        receipt_sha, created, updated, payload = authority.read_comment(issue, comment_id)
+        with self.locked(registration, execution_owner=principal) as (txn, data), txn.execution_write() as db:
+            authority.revalidate_local()
+            demand, current_issue = self._owner_decision_source(db, registration, binding, decision_id)
+            _require(current_issue == issue, "OWNER_DECISION_ISSUE_SOURCE_DRIFT")
+            self._require_owner_decision_scope(db, binding, decision_id)
+            version = receipt_sha, created, updated
+            saved = db.execute("SELECT obligation_key, checkpoint, packet_id, disposition, operation_id, "
+                               "supersedes_operation_id, receipt_sha256, created_at, updated_at "
+                               "FROM owner_decision_receipts WHERE comment_id=?", (comment_id,)).fetchone()
+            if saved is not None:
+                key, checkpoint, packet_id, disposition, operation_id, superseded, *proof = saved
+                _require(tuple(proof) == version, "OWNER_DECISION_COMMENT_CONFLICT")
+                packet = self._read_continuity_packet(db, packet_id)
+                _require(key == demand.obligation_key and packet is not None and
+                         (packet.execution_id, packet.decision_id, packet.checkpoint) ==
+                         (binding.execution_id, decision_id, checkpoint), "OWNER_DECISION_RECEIPT_SCOPE_MISMATCH")
+                intent = self._read_decision_operation(db, operation_id) if operation_id else None
+                return OwnerDecisionAcceptance(comment_id, receipt_sha, binding.execution_id, decision_id, checkpoint,
+                                               packet_id, disposition, operation_id,
+                                               intent.execution_id if intent else None, superseded,
+                                               tuple(json.loads(packet.context)["gaps"]), replayed=True)
+
+            _require(data["events"][binding.identity.key]["status"] not in ("RESERVED", "UNKNOWN_EFFECT"),
+                     "OWNER_DECISION_ISSUE_CUSTODY_UNRESOLVED")
+            _require(self._owner_revision_head(db, demand.obligation_key) == decision_id, "DECISION_REVISION_STALE")
+            plan = self._read_decision_plan(db, demand, version=None)
+            _require(plan is not None and plan.decision_id == decision_id, "CONTINUITY_REPLAN_REQUIRED")
+            _require(db.execute("SELECT 1 FROM owner_decision_receipts WHERE checkpoint=?", (plan.checkpoint,))
+                     .fetchone() is None, "OWNER_DECISION_CHECKPOINT_ALREADY_ACCEPTED")
+            previous = self._owner_accepted_head(db, demand.obligation_key)
+            packet, context = self._validate_owner_decision_payload(db, registration, demand, binding, plan,
+                                                                    previous, payload)
+            disposition = payload["disposition"]
+            operation = superseded = None
+            if disposition == "CONTINUE":
+                operation, superseded = self._owner_operation_applicability(db, demand, binding, plan, context)
+            _require(payload["supersedes_operation_id"] == superseded, "OWNER_DECISION_SUPERSESSION_MISMATCH")
+            authority.revalidate_local()
+            db.execute("INSERT INTO owner_decision_receipts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                       (comment_id, demand.obligation_key, previous or "", plan.checkpoint, packet.packet_id,
+                        *version, disposition, operation.operation_id if operation else None, superseded))
+            return OwnerDecisionAcceptance(comment_id, receipt_sha, binding.execution_id, decision_id, plan.checkpoint,
+                                           packet.packet_id, disposition, operation.operation_id if operation else None,
+                                           operation.execution_id if operation else None, superseded,
+                                           tuple(context["gaps"]))
+
+    @classmethod
+    def _validate_owner_decision_payload(cls, db, registration: Registration, demand: DecisionDemand,
+                                         binding: _OwnerDecisionBinding, plan: DecisionPlan,
+                                         previous: str | None, payload: dict) -> tuple[ContinuityPacket, dict]:
+        _require(payload.keys() == {
+            "schema", "execution_id", "decision_id", "revision_sha256", "scope_sha256", "checkpoint",
+            "previous_checkpoint", "previous_accepted_checkpoint", "packet_id", "context_sha256", "readback",
+            "disposition", "operation", "supersedes_operation_id",
+        } and payload["disposition"] in ("RECORD_ONLY", "CONTINUE"), "OWNER_DECISION_PAYLOAD_INVALID")
+        _require((payload["execution_id"], payload["decision_id"], payload["revision_sha256"], payload["scope_sha256"])
+                 == (demand.execution_id, demand.decision_id, digest(demand.revision), binding.scope_sha256),
+                 "OWNER_DECISION_RECEIPT_SCOPE_MISMATCH")
+        _require((payload["checkpoint"], payload["previous_checkpoint"], payload["previous_accepted_checkpoint"])
+                 == (plan.checkpoint, plan.previous_checkpoint, previous), "OWNER_DECISION_CHECKPOINT_STALE")
+        _require(_chrome_digest(payload["packet_id"]), "CONTINUITY_PACKET_INVALID")
+        packet = cls._read_continuity_packet(db, payload["packet_id"])
+        _require(packet is not None, "CONTINUITY_PACKET_UNVERIFIED")
+        current, _ = cls._continuity_projection(db, registration, demand.execution_id, demand.decision_id, True)
+        _require(packet == current and payload["context_sha256"] == packet.context_sha256, "CONTINUITY_CONTEXT_STALE")
+        context = json.loads(packet.context)
+        manifest = {name: [context[name]["count"], context[name]["sha256"]] for name in _CONTINUITY_SECTIONS}
+        # The owner receipt commits to complete section readback. The local
+        # projection above hashes every row, including rows beyond the preview.
+        _require(_continuity_json(payload["readback"]) == _continuity_json(manifest),
+                 "OWNER_DECISION_READBACK_INCOMPLETE")
+        intent = plan.operation
+        operation = ([intent.operation_id, intent.execution_id, digest(asdict(intent.operation))] if intent else None)
+        _require(payload["operation"] == operation, "OWNER_DECISION_OPERATION_MISMATCH")
+        return packet, context
+
+    @staticmethod
+    def _owner_operation_retired(db, operation_id: str) -> bool:
+        return bool(db.execute("SELECT 1 FROM sqlite_master WHERE name='owner_decision_receipts'").fetchone()
+                    and db.execute("SELECT 1 FROM owner_decision_receipts WHERE supersedes_operation_id=?",
+                                   (operation_id,)).fetchone())
+
+    @classmethod
+    def _owner_operation_applicability(cls, db, demand: DecisionDemand, binding: _OwnerDecisionBinding,
+                                       plan: DecisionPlan, context: dict) -> tuple[OperationIntent, str | None]:
+        intent = plan.operation
+        _require(intent is not None and binding.continuation_consumer == intent.operation.consumer,
+                 "OWNER_DECISION_CONSUMER_APPLICABILITY_UNPROVEN")
+        _require(intent.state == "PENDING_INTENT" and not cls._owner_operation_retired(db, intent.operation_id)
+                 and db.execute("SELECT 1 FROM execution_attempts WHERE execution_id=? LIMIT 1",
+                                (intent.execution_id,)).fetchone() is None,
+                 "DECISION_OPERATION_CUSTODY_UNRESOLVED")
+        for gap in ("DECISION_SOURCE_CUSTODY_UNRESOLVED", "DECISION_OPERATION_CUSTODY_UNRESOLVED",
+                    "ATTEMPT_SOURCE_EVIDENCE_MISSING", "EFFECT_OVERLAP_UNPROVEN",
+                    "DECISION_OBLIGATION_REPLAN_REQUIRED", "DECISION_OBLIGATION_UNCLASSIFIED",
+                    "OWNER_DECISION_SUPERSESSION_CUSTODY_CHANGED"):
+            _require(gap not in context["gaps"], gap)
+        _require(context["captures"]["count"] == context["instructions"]["count"] == 0,
+                 "OWNER_DECISION_SEMANTIC_AUTHORITY_UNPROVEN")
+
+        superseded = None
+        for operation_id, in db.execute(
+                "SELECT DISTINCT p.operation_id FROM decision_proposals p JOIN decision_demands d USING(decision_id) "
+                "JOIN decision_outbox o ON o.operation_id=p.operation_id WHERE d.obligation_key=? "
+                "AND p.operation_id<>? AND o.state<>'OBSERVED_COMPLETION' AND NOT EXISTS "
+                "(SELECT 1 FROM owner_decision_receipts r WHERE r.supersedes_operation_id=p.operation_id)",
+                (demand.obligation_key, intent.operation_id)):
+            _require(superseded is None, "OWNER_DECISION_PRIOR_INTENTS_REQUIRE_RECONCILIATION")
+            old = cls._read_decision_operation(db, operation_id)
+            _require(old.state == "PENDING_INTENT" and db.execute(
+                "SELECT 1 FROM execution_attempts WHERE execution_id=? LIMIT 1", (old.execution_id,)).fetchone() is None,
+                "DECISION_OPERATION_CUSTODY_UNRESOLVED")
+            _require(db.execute(
+                "SELECT 1 FROM decision_proposals p JOIN decision_demands d USING(decision_id) "
+                "WHERE p.operation_id=? AND d.obligation_key<>? UNION ALL "
+                "SELECT 1 FROM decision_demands WHERE json_extract(contract, '$.execution_id')=? LIMIT 1",
+                (operation_id, demand.obligation_key, old.execution_id)).fetchone() is None,
+                "OWNER_DECISION_OPERATION_SHARED")
+            superseded = operation_id
+        return intent, superseded
 
     @classmethod
     def _check_decision_source_custody(cls, db, registration: Registration, demand: DecisionDemand) -> None:
@@ -2739,6 +3045,7 @@ class Journal:
     @classmethod
     def _admit_decision_operation(cls, db, operation: NextOperation) -> OperationIntent:
         operation_id = operation.operation_id
+        _require(not cls._owner_operation_retired(db, operation_id), "OWNER_DECISION_OPERATION_SUPERSEDED")
         if db.execute("SELECT 1 FROM decision_outbox WHERE operation_id=?", (operation_id,)).fetchone():
             intent = cls._read_decision_operation(db, operation_id)
             _require(operation == intent.operation, "DECISION_OPERATION_CONFLICT")
@@ -2949,13 +3256,8 @@ class Journal:
                         packet: ContinuityPacket, *, principal: str) -> ContinuityResume:
         """Revalidate a stored proposal with current journal facts and persist local readback.
 
-        U2b needs a real owner producer/receiver that independently authenticates
-        the producer and exact request, Execution, decision revision, checkpoint
-        and context commitment. It must validate a correlated native receipt
-        from the registered account, conversation and turn with replay/readback
-        proof. Attempt activation and prior possible-effect reconciliation also
-        need independent evidence. Typed receipt claims, owner file custody and
-        the packet digest provide no such authority.
+        Owner-account decision ingress separately authenticates the scoped Issue
+        comment. Native receipt and attempt activation require their own proofs.
         """
         _require(type(packet) is ContinuityPacket and (execution_id, decision_id) ==
                  (packet.execution_id, packet.decision_id), "CONTINUITY_SCOPE_MISMATCH")
@@ -3084,10 +3386,17 @@ class Journal:
                 gaps.add("DECISION_OPERATION_CUSTODY_UNRESOLVED")
             if intent.operation.effect is None:
                 gaps.add("EFFECT_OVERLAP_UNPROVEN")
-            yield {"operation_id": operation_id, "execution_id": intent.execution_id, "state": intent.state,
+            row = {"operation_id": operation_id, "execution_id": intent.execution_id, "state": intent.state,
                    "consumer": intent.operation.consumer, "scope": intent.operation.scope, "slot": intent.operation.slot,
                    "effect": asdict(intent.operation.effect) if intent.operation.effect else None,
                    "contract_sha256": bytes_digest(_continuity_json(asdict(intent.operation)).encode("ascii"))}
+            if cls._owner_operation_retired(db, operation_id):
+                row["applicability"] = "SUPERSEDED"
+                if intent.state != "PENDING_INTENT" or db.execute(
+                        "SELECT 1 FROM execution_attempts WHERE execution_id=? LIMIT 1",
+                        (intent.execution_id,)).fetchone():
+                    gaps.add("OWNER_DECISION_SUPERSESSION_CUSTODY_CHANGED")
+            yield row
 
     @classmethod
     def _continuity_captures(cls, db, registration: Registration, execution_id: str, gaps: set[str]):
@@ -3191,7 +3500,7 @@ class Journal:
                          and db.execute("PRAGMA application_id").fetchone() == (_APP_ID,),
                          "JOURNAL_SCHEMA_INCOMPATIBLE")
                 schemas = dict(db.execute("SELECT name, CASE WHEN type='table' THEN sql END FROM sqlite_master"))
-                _, decision_tables, _ = _extension_tables(schemas)
+                _, decision_tables, _, _ = _extension_tables(schemas)
                 _require(schemas.get("identity") == _TABLES["identity"], "JOURNAL_SCHEMA_INCOMPATIBLE")
                 self._check_registration(db, owner, registration)
                 if "local_origin" not in schemas and not (for_upgrade or for_retirement):
@@ -3301,7 +3610,7 @@ class Journal:
                 _require(db.execute("PRAGMA quick_check").fetchall() == [("ok",)], "JOURNAL_CORRUPT")
                 version = 2
                 source_table = origin_table = cursor_table = False
-                execution_tables = decision_tables = continuity_tables = False
+                execution_tables = decision_tables = continuity_tables = owner_decision_tables = False
                 if not new:
                     version, = db.execute("PRAGMA user_version").fetchone()
                     tables = dict(_TABLES, chrome_lifecycle=_CHROME_TABLE) if version == 3 else _TABLES
@@ -3316,7 +3625,7 @@ class Journal:
                     cursor_table = ("table", "standing_ef02_cursor", _STANDING_CURSOR_TABLE) in stored_tables
                     if cursor_table:
                         tables = dict(tables, standing_ef02_cursor=_STANDING_CURSOR_TABLE)
-                    execution_tables, decision_tables, continuity_tables = _extension_tables(
+                    execution_tables, decision_tables, continuity_tables, owner_decision_tables = _extension_tables(
                         {name: sql if kind == "table" else None for kind, name, sql in stored_tables})
                     if execution_tables:
                         tables = dict(tables, **_EXECUTION_TABLES)
@@ -3324,6 +3633,8 @@ class Journal:
                         tables = dict(tables, **_DECISION_TABLES)
                     if continuity_tables:
                         tables = dict(tables, **_CONTINUITY_TABLES)
+                    if owner_decision_tables:
+                        tables = dict(tables, **_OWNER_DECISION_TABLES)
                     _require(version in (2, 3)
                              and db.execute("PRAGMA application_id").fetchone() == (_APP_ID,)
                              and stored_tables == [("table", name, sql) for name, sql in sorted(tables.items())],
@@ -3368,7 +3679,7 @@ class Journal:
                     data["chrome"] = _decode_unique(rows[0][1])
                     _validate_chrome(data["chrome"])
                 yield _SQLiteTransaction(db, self, registration, owner, source_table, execution_tables,
-                                         decision_tables, continuity_tables), data
+                                         decision_tables, continuity_tables, owner_decision_tables), data
                 self._owner(owner)
         except sqlite3.DatabaseError as exc:
             code = "JOURNAL_BUSY" if isinstance(exc, sqlite3.OperationalError) and \
@@ -4916,6 +5227,116 @@ def _read_runtime_config(config_path: Path, repository_root: Path, *,
     _require(journal_path != config_path, "LOCAL_CONFIG_INVALID")
     return _RuntimeConfig(config_path, config, _private_identity(config_path), registration,
                           Journal(journal_path, repository_root), policy, targets)
+
+
+@dataclass(frozen=True, repr=False)
+class _OwnerDecisionAuthority:
+    runtime: _RuntimeConfig
+    binding: _OwnerDecisionBinding
+
+    @property
+    def registration(self) -> Registration:
+        return self.runtime.registration
+
+    @property
+    def principal(self) -> str:
+        return self.runtime.principal
+
+    def revalidate_local(self) -> None:
+        runtime = self.runtime
+        _revalidate_owned(_snapshots((runtime.path, runtime.raw)), runtime.journal.repository_root,
+                          runtime.path, runtime.principal)
+
+    def read_comment(self, issue: IssueRegistration, comment_id: int) -> tuple:
+        token = os.environ.get("AI_COMMERCE_GITHUB_READ_TOKEN", "")
+        if not token:
+            raise DependencyHold("OWNER_DECISION_GITHUB_READ_CREDENTIAL_MISSING")
+        _require(len(token) <= 4096 and not any(c in token for c in "\r\n\0"), "GITHUB_CREDENTIAL_INVALID")
+        source = GitHubIssueCreatedSource(issue, token=token, read_budget=GitHubReadBudget(
+            max_reads=3, max_seconds=45, max_attempts=1))
+        try:
+            return source._owner_decision_comment(issue, self.binding.owner_id, comment_id)
+        except RuntimeHold:
+            raise
+        except (GitHubReadBlocked, RegistrationBlocked, BindingError) as exc:
+            raise RuntimeHold(_safe_code(exc, "OWNER_DECISION_SOURCE_UNVERIFIED")) from None
+        except (OSError, ValueError, RecursionError):
+            raise RuntimeHold("OWNER_DECISION_SOURCE_UNVERIFIED") from None
+
+
+def _compose_owner_decision(config_path: Path, repository_root: Path, execution_id: str) -> _OwnerDecisionAuthority:
+    _require(_execution_id(execution_id), "EXECUTION_REQUEST_INVALID")
+    runtime = _read_runtime_config(config_path, repository_root, registration_only=True)
+    if "owner_decision_ingress" not in runtime.raw:
+        raise DependencyHold("OWNER_DECISION_STANDING_SCOPE_MISSING")
+    scope = runtime.raw["owner_decision_ingress"]
+    _require(type(scope) is dict and scope.keys() == {"schema", "repository_id", "owner_id", "bindings"}
+             and scope["schema"] == _OWNER_DECISION_SCHEMA and _github_id(scope["repository_id"])
+             and _github_id(scope["owner_id"]) and type(scope["bindings"]) is list
+             and 0 < len(scope["bindings"]) <= 128, "OWNER_DECISION_STANDING_SCOPE_INVALID")
+    bindings, issues, numbers = {}, set(), set()
+    for row in scope["bindings"]:
+        _require(type(row) is dict and row.keys() == {"execution_id", "issue_id", "issue_number", "request_sha256",
+                                                     "source_sha256", "continuation_consumer"}
+                 and _execution_id(row["execution_id"]) and _github_id(row["issue_id"])
+                 and _github_id(row["issue_number"]) and _chrome_digest(row["request_sha256"])
+                 and _chrome_digest(row["source_sha256"])
+                 and (row["continuation_consumer"] is None or _decision_ref(row["continuation_consumer"]))
+                 and row["execution_id"] not in bindings and row["issue_id"] not in issues
+                 and row["issue_number"] not in numbers, "OWNER_DECISION_STANDING_BINDING_INVALID")
+        identity = SourceIdentity(_ISSUE, REPOSITORY, row["issue_id"], repository_id=scope["repository_id"])
+        bindings[row["execution_id"]] = _OwnerDecisionBinding(
+            identity, row["issue_number"], scope["owner_id"], row["execution_id"], row["request_sha256"],
+            row["source_sha256"], row["continuation_consumer"])
+        issues.add(row["issue_id"])
+        numbers.add(row["issue_number"])
+    if execution_id not in bindings:
+        raise DependencyHold("OWNER_DECISION_EXECUTION_BINDING_MISSING")
+    return _OwnerDecisionAuthority(runtime, bindings[execution_id])
+
+
+def ground_owner_decision_revision(config_path: Path, repository_root: Path, execution_id: str, decision_id: str, *,
+                                   expected_revision: str | None, expected_checkpoint: str | None) -> None:
+    """Pin the source-owned revision before planning or accepting a receipt.
+
+    The predecessor is a decision ID. On first use it is the ID of the
+    existing planning checkpoint, or None when the obligation has no plan.
+    The owner_decision_ingress config pins the repository and owner numeric
+    IDs. Each standing binding pins an admitted Execution and request digest,
+    the Issue number and global ID, the Issue creation payload digest, and an
+    optional exact consumer for local continuation applicability.
+    """
+    _require(_chrome_digest(decision_id)
+             and (expected_revision is None or _chrome_digest(expected_revision))
+             and (expected_checkpoint is None or _chrome_digest(expected_checkpoint)), "OWNER_DECISION_SELECTOR_INVALID")
+    authority = _compose_owner_decision(config_path, repository_root, execution_id)
+    authority.runtime.journal._ground_owner_decision(authority, decision_id, expected_revision=expected_revision,
+                                                    expected_checkpoint=expected_checkpoint)
+
+
+def submit_owner_decision(config_path: Path, repository_root: Path, execution_id: str, decision_id: str,
+                          *, comment_id: int) -> OwnerDecisionAcceptance:
+    """Read one existing owner-account Issue comment and accept its internal decision.
+
+    The canonical ASCII JSON body uses WakeHubOwnerDecisionReceipt.v1 and the
+    exact scoped packet. Readback maps the five section names to [count, sha256].
+    The operation uses [operation_id, child_execution_id, digest(operation)]
+    or null. The receipt has its own checkpoint predecessor. PR PASS, NCE test
+    comments and USER captures use different evidence paths.
+
+    The returned continuation identifies a pending local intent. Receiver
+    reservation, attempt activation and native account or turn evidence are
+    separate capabilities. Exact same-ID readback returns replayed=True.
+    """
+    _require(_chrome_digest(decision_id) and _github_id(comment_id), "OWNER_DECISION_SELECTOR_INVALID")
+    authority = _compose_owner_decision(config_path, repository_root, execution_id)
+    try:
+        return authority.runtime.journal._submit_owner_decision(authority, decision_id, comment_id)
+    except sqlite3.DatabaseError as exc:
+        # The read-only source lookup precedes Journal.locked's error mapping.
+        code = ("JOURNAL_BUSY" if getattr(exc, "sqlite_errorcode", None) in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                else "JOURNAL_CORRUPT")
+        raise RuntimeHold(code) from None
 
 
 @dataclass(repr=False)
